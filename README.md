@@ -1,5 +1,20 @@
 # RF-3DGS: Radio Frequency 3D Gaussian Splatting
 
+## Updates 1/12/2026
+We have released the full **Sionna** simulation tutorial suite for generating spatial spectra based on the pinhole camera model and associated poses. [Tutorial](https://drive.google.com/file/d/12Biy_566ImZtyyOuEOiHNPTtQ0iRyIUQ/view?usp=sharing)
+
+### Software Compatibility
+* **Primary Support:** This codebase is natively compatible with [Sionna v0.19.1](https://github.com/NVlabs/sionna/tree/v0.19.1).
+* **Other Versions:** Compatibility with other versions is possible but may require manual adjustments to specific functions and API calls.
+
+### Scope and Limitations
+This tutorial code is designed as a resource for exploring **array signal processing** concepts. Please note the following technical constraints:
+* **Spectrum Application:** The generated spatial spectra are optimized for identifying dominant propagation paths in **millimeter-wave (mmWave)** bands. 
+* **Frequency Constraints:** For sub-6GHz frequencies, the spectrum may lack the necessary precision, as these bands require significantly sharper scattering lobes that cannot be explicitly defined within the Sionna 0.19.1 framework.
+* **Physical Fidelity:** Accurate simulation of the "RF picture" requires rigorous energy conservation across the spatio-temporal domains. Addressing this necessitates a transition toward **physics-based rendering (PBR)** for wireless channels and a fundamental restructuring of the Sionna ray tracer—which represents a core focus of our ongoing research.
+
+---
+
 ## Overview
 
 RF-3DGS is an innovative method for comprehensive radio radiance field reconstruction. RF-3DGS achieves highly accurate geometric information representation and exceptional rendering speed. This approach integrates both visual and radio radiance fields with encoded channel state information (CSI), providing a robust solution for advanced wireless communication and related applications. More details for the paper: [RF-3DGS: Wireless Channel Modeling with Radio Radiance Field and 3D Gaussian Splatting](https://arxiv.org/abs/2411.19420). 
