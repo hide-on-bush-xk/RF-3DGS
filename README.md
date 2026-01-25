@@ -1,8 +1,8 @@
 # RF-3DGS: Radio Frequency 3D Gaussian Splatting
 
 ## Updates 1/12/2026
-We have released the full **Sionna** simulation tutorial suite for generating spatial spectra based on the pinhole camera model and associated poses. [Tutorial](https://drive.google.com/file/d/12Biy_566ImZtyyOuEOiHNPTtQ0iRyIUQ/view?usp=sharing)
-
+Following the paper's acceptance from IEEE TWC, we have released the full **Sionna** simulation tutorial suite for generating spatial spectra based on the pinhole camera model and associated poses. [Tutorial](https://drive.google.com/file/d/12Biy_566ImZtyyOuEOiHNPTtQ0iRyIUQ/view?usp=sharing)
+[Paper Link](https://ieeexplore.ieee.org/document/11355734) 
 ### Software Compatibility
 * **Primary Support:** This codebase is natively compatible with [Sionna v0.19.1](https://github.com/NVlabs/sionna/tree/v0.19.1).
 * **Other Versions:** Compatibility with other versions is possible but may require manual adjustments to specific functions and API calls.
