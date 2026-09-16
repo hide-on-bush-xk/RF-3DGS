@@ -36,7 +36,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
+        # torch>=2.6 defaults torch.load to weights_only=True, which refuses the
+        # numpy scalars stored inside the 3DGS checkpoints.
+        (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
         gaussians.restore(model_params, opt)
 
         # RF_3dgs_retraining

@@ -14,9 +14,13 @@ from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 import os
 
 cxx_compiler_flags = []
+nvcc_compiler_flags = []
 
 if os.name == 'nt':
     cxx_compiler_flags.append("/wd4624")
+    # MSVC 14.4x+ (VS 2022 17.10 and VS 2026) ships a C++17-only STL, and CCCL
+    # (CUDA 12.9+) refuses to build under the traditional preprocessor.
+    nvcc_compiler_flags += ["-std=c++17", "-Xcompiler", "/Zc:preprocessor"]
 
 setup(
     name="simple_knn",
@@ -27,7 +31,7 @@ setup(
             "spatial.cu", 
             "simple_knn.cu",
             "ext.cpp"],
-            extra_compile_args={"nvcc": [], "cxx": cxx_compiler_flags})
+            extra_compile_args={"nvcc": nvcc_compiler_flags, "cxx": cxx_compiler_flags})
         ],
     cmdclass={
         'build_ext': BuildExtension
