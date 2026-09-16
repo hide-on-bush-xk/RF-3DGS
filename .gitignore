@@ -6,3 +6,4 @@ RF-3DGS_dataset/
 output/
 *.pyc
 */simple-knn
+*.zip
