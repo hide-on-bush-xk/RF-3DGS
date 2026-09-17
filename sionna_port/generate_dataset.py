@@ -139,15 +139,17 @@ def solve_paths(solver, scene, cfg: Config):
 def element_gain_fn(theta: torch.Tensor, phi: torch.Tensor) -> torch.Tensor:
     """Co-polar TR 38.901 element response on the pixel grid.
 
-    0.19 returned (c_theta, c_phi) from sionna.rt.antenna.tr38901_pattern and the
-    tutorial used c_theta. 2.x exposes the vertically polarised pattern directly.
+    0.19's sionna.rt.antenna.tr38901_pattern returned a (c_theta, c_phi) pair and
+    the tutorial kept c_theta. The 1.2+ replacement returns a single Complex2f,
+    which is already that co-polar component -- unpacking it as a pair silently
+    yields the real and imaginary parts instead.
     """
     import drjit as dr
     import mitsuba as mi
     t = mi.Float(theta.reshape(-1).cpu().numpy())
     p = mi.Float(phi.reshape(-1).cpu().numpy())
-    c_theta, _ = v_tr38901_pattern(t, p)
-    vals = np.array(dr.real(c_theta)) + 1j * np.array(dr.imag(c_theta))
+    c_theta = v_tr38901_pattern(t, p)
+    vals = np.asarray(dr.real(c_theta)) + 1j * np.asarray(dr.imag(c_theta))
     return torch.as_tensor(vals, dtype=torch.complex64,
                            device=theta.device).reshape(theta.shape)
 

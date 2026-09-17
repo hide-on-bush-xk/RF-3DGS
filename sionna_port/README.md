@@ -78,23 +78,81 @@ delay taps. The tutorial says so in a comment; `torch.linalg.inv` does not raise
 on a rank-deficient matrix, it returns inf/nan, so `mvdr_spectrum` refuses the
 case outright and offers `diagonal_loading` instead.
 
-## What is verified and what is not
+## Running it in WSL2
+
+Two environment facts, both discovered the hard way:
+
+```bash
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:/usr/lib/wsl/lib
+python smoke_sionna.py --scene-xml <scene>_sionna12.xml     # defaults to the CPU variant
+```
+
+**Sionna 2.x needs Python >= 3.11.** On a 3.10 environment pip silently installs
+1.2.2 instead. That turned out not to matter: every API this port uses --
+`PathSolver`, `paths.cir(out_type="torch")`, `Paths.vertices`,
+`v_tr38901_pattern` -- has the same signature in 1.2.2 as in the 2.1 docs, so the
+port runs unchanged. Moving to 2.x means a new interpreter and a gsplat rebuild,
+and buys nothing until Sionna PHY is needed.
+
+**OptiX is unavailable under WSL2 with driver 616.92**, so ray tracing runs on
+the CPU. `/usr/lib/wsl/lib/libnvoptix.so.1` is a 14 KB loader stub and the full
+library is nowhere in the Windows driver store, so Dr.Jit fails with "could not
+find symbol optixQueryFunctionTable". `sionna.rt` picks `cuda_ad_mono_polarized`
+whenever CUDA is present and then dies, so the scripts set
+`llvm_ad_mono_polarized` before importing it. Beamforming still runs on the GPU
+through torch; only the path solve is on the CPU.
+
+## Preparing the scene
+
+The published Blender scene does not load in Sionna 1.2+ for three separate
+reasons. `fix_scene_xml.py` handles the first two:
+
+```bash
+python fix_scene_xml.py NIST_lobby_V1.1.xml NIST_lobby_V1.1_sionna12.xml --frequency-ghz 60
+```
+
+1. **Blender's duplicate suffixes.** Materials are named `mat-itu_plasterboard.001`,
+   and Sionna derives the ITU type by stripping `mat-` and `itu_`, so it looks up
+   `plasterboard.001` and fails.
+2. **Materials that are not ITU materials at all.** `custom_plastic`,
+   `custom_leather` and `custom_cloth` were assigned electromagnetic properties
+   by a semantic descriptor that was never published. They are mapped to ITU
+   materials of roughly the right permittivity -- placeholders, not the authors'
+   values. The script also rejects a mapping whose ITU properties are undefined
+   at the scene frequency, which is easy to hit: `plywood` and `brick` stop at
+   40 GHz, so neither can be used at 60.
+3. **Mesh filenames.** The archive stores UTF-8 names without setting the UTF-8
+   flag, so both bsdtar and Python's zipfile decode them as CP437 and write
+   mojibake to disk while the XML still references the real names. Re-extract
+   with `name.encode("cp437").decode("utf-8")`.
+
+## What is verified
 
 `test_rf_spectra.py` passes on Windows with torch 2.9.1: the angle grid matches
-the pinhole model and the 90° FoV, steering vectors have unit modulus, delay
-binning sums paths into the right bins, and both beamformers peak at the true
-direction of a synthetic single-path arrival.
+the pinhole model and the 90 degree FoV, steering vectors have unit modulus,
+delay binning sums paths into the right bins, and both beamformers peak at the
+true direction of a synthetic single-path arrival.
 
-`generate_dataset.py` is **not executed yet** — it needs Sionna 2.1, which needs
-Mitsuba 3 and a Linux GPU environment. It compiles, and the API calls follow the
-2.1 documentation, but two assumptions want checking on the first real run:
+`smoke_sionna.py` passes in WSL against the real NIST lobby scene, which settles
+the two assumptions this file used to list as open:
 
-1. that Sionna's `PlanarArray(num_rows=M, num_cols=M)` orders its elements the
-   same way `_element_offsets` does — if the CBF peak lands in the wrong place,
-   this is the first thing to look at;
-2. that `v_tr38901_pattern` returns `(c_theta, c_phi)` in that order, matching
-   0.19's `tr38901_pattern`.
+* **Element ordering agrees with Sionna.** With a single line-of-sight path,
+  Sionna reports an arrival at theta 86.26, phi 27.12 degrees and the beamformer
+  peaks at theta 86.00, phi 27.00 -- inside the one-degree grid spacing. So
+  `_element_offsets` matches how `PlanarArray` lays out its elements.
+* **`v_tr38901_pattern` returns a single `Complex2f`, not a `(c_theta, c_phi)`
+  pair.** 0.19 returned the pair and the tutorial kept `c_theta`; unpacking the
+  1.2 return value the same way silently yields its real and imaginary parts.
+  Fixed in `element_gain_fn`.
 
-Also unresolved: 0.19's `scat_keep_prob=0.1` thinned diffuse paths by a factor of
-ten, and there is no 2.x equivalent. Expect a different path count, and therefore
-a different absolute dB range, than the released dataset.
+`generate_dataset.py` still has not been run end to end.
+
+## Known discrepancy with the released dataset
+
+A depth-1 solve with diffuse reflection and 100k samples per source produced
+**8 paths**, against the "more than 300,000 MPCs per Tx-Rx pair" the paper
+reports for the same scene. 0.19's `scat_keep_prob` and the rewritten solver's
+diffuse sampling are not the same mechanism, and `samples_per_src` will have to
+be raised considerably to get a comparable path count. Until that is calibrated,
+spectra regenerated here are not comparable to the released ones in absolute
+terms.
