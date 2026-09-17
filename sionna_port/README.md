@@ -78,29 +78,41 @@ delay taps. The tutorial says so in a comment; `torch.linalg.inv` does not raise
 on a rank-deficient matrix, it returns inf/nan, so `mvdr_spectrum` refuses the
 case outright and offers `diagonal_loading` instead.
 
-## Running it in WSL2
+## Where it runs
 
-Two environment facts, both discovered the hard way:
+| | Sionna | backend | scene load | status |
+| --- | --- | --- | --- | --- |
+| **Windows, conda py3.12** | 2.1.0 | CUDA / OptiX | 0.3 s | **works, use this** |
+| WSL2, conda py3.12 | 2.1.0 | LLVM (CPU) | - | broken, see below |
+| WSL2, conda py3.10 | 1.2.2 | LLVM (CPU) | 2.0 s | works, slower |
 
-```bash
-export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:/usr/lib/wsl/lib
-python smoke_sionna.py --scene-xml <scene>_sionna12.xml     # defaults to the CPU variant
+**Sionna 2.1 brought no API changes this port cares about.** `PathSolver.__call__`,
+`Paths.cir`, `PlanarArray.__init__`, `Receiver.__init__` and `v_tr38901_pattern`
+all have byte-identical signatures in 1.2.2 and 2.1.0, so nothing needed
+rewriting. 2.1 additionally exposes `Paths.cfr()` and `Paths.taps()`, which is
+where a wideband target would come from. Note 2.x requires Python >= 3.11; on a
+3.10 environment pip silently installs 1.2.2 instead.
+
+**Sionna 2.1 does not run on the CPU backend here.** Dr.Jit 1.5.0 bundles LLVM
+15.0.7 and emits the `fmaximum` intrinsic, which LLVM 15 cannot lower on x86
+(that landed in LLVM 17/18), so a path solve dies with `LLVM ERROR: Cannot
+select: f32 = fmaximum`. Sionna 1.2.2 ships Dr.Jit 1.3.1, which does not emit it.
+This is upstream, not a misconfiguration.
+
+**OptiX is unavailable under WSL2** with driver 616.92:
+`/usr/lib/wsl/lib/libnvoptix.so.1` is a 14 KB loader stub and the full library is
+absent from the Windows driver store, so Dr.Jit reports "could not find symbol
+optixQueryFunctionTable". Windows has the real `nvoptix.dll`, which is why the
+GPU path works there and not in WSL. Between the two constraints, **Sionna runs
+on Windows and gsplat runs in WSL** -- gsplat cannot build under VS 2026, and
+Sionna cannot ray trace under WSL.
+
+Two Windows-only requirements:
+
+```powershell
+$env:PYTHONUTF8 = 1      # Sionna opens the scene XML with the locale encoding
+python ascii_meshes.py <scene>.xml     # once, see below
 ```
-
-**Sionna 2.x needs Python >= 3.11.** On a 3.10 environment pip silently installs
-1.2.2 instead. That turned out not to matter: every API this port uses --
-`PathSolver`, `paths.cir(out_type="torch")`, `Paths.vertices`,
-`v_tr38901_pattern` -- has the same signature in 1.2.2 as in the 2.1 docs, so the
-port runs unchanged. Moving to 2.x means a new interpreter and a gsplat rebuild,
-and buys nothing until Sionna PHY is needed.
-
-**OptiX is unavailable under WSL2 with driver 616.92**, so ray tracing runs on
-the CPU. `/usr/lib/wsl/lib/libnvoptix.so.1` is a 14 KB loader stub and the full
-library is nowhere in the Windows driver store, so Dr.Jit fails with "could not
-find symbol optixQueryFunctionTable". `sionna.rt` picks `cuda_ad_mono_polarized`
-whenever CUDA is present and then dies, so the scripts set
-`llvm_ad_mono_polarized` before importing it. Beamforming still runs on the GPU
-through torch; only the path solve is on the CPU.
 
 ## Preparing the scene
 
@@ -128,22 +140,42 @@ python fix_scene_xml.py NIST_lobby_V1.1.xml NIST_lobby_V1.1_sionna12.xml --frequ
 
 ## What is verified
 
-`test_rf_spectra.py` passes on Windows with torch 2.9.1: the angle grid matches
-the pinhole model and the 90 degree FoV, steering vectors have unit modulus,
-delay binning sums paths into the right bins, and both beamformers peak at the
-true direction of a synthetic single-path arrival.
+`test_rf_spectra.py` passes under both Python 3.10 and 3.12: the angle grid
+matches the pinhole model and the 90 degree FoV, steering vectors have unit
+modulus, delay binning sums paths into the right bins, and both beamformers peak
+at the true direction of a synthetic single-path arrival.
 
-`smoke_sionna.py` passes in WSL against the real NIST lobby scene, which settles
-the two assumptions this file used to list as open:
+`smoke_sionna.py` passes against the real NIST lobby scene on Windows with
+Sionna 2.1.0 and GPU ray tracing, and on WSL with 1.2.2 on the CPU. It settles
+what the port rested on:
 
-* **Element ordering agrees with Sionna.** With a single line-of-sight path,
-  Sionna reports an arrival at theta 86.26, phi 27.12 degrees and the beamformer
-  peaks at theta 86.00, phi 27.00 -- inside the one-degree grid spacing. So
-  `_element_offsets` matches how `PlanarArray` lays out its elements.
-* **`v_tr38901_pattern` returns a single `Complex2f`, not a `(c_theta, c_phi)`
-  pair.** 0.19 returned the pair and the tutorial kept `c_theta`; unpacking the
-  1.2 return value the same way silently yields its real and imaginary parts.
-  Fixed in `element_gain_fn`.
+* **Element ordering agrees with Sionna**, to within the array's own ambiguity
+  (below). Sionna reports the line-of-sight arrival at theta 86.26, phi 27.12
+  degrees; the beamformer peaks at theta 86.00 and at one of phi 27 / 153.
+* **`v_tr38901_pattern` returns a single `Complex2f`**, not 0.19's
+  `(c_theta, c_phi)` pair. Unpacking it as a pair silently takes its real and
+  imaginary parts. Fixed in `element_gain_fn`.
+
+### The array cannot tell phi from 180 - phi
+
+`_element_offsets` places the elements in the y-z plane, so the steering vector
+depends only on `(sin(theta) sin(phi), cos(theta))`. For the two directions above
+the steering vectors differ by 9.7e-07 and their normalised inner product is
+1.000000: they are the same vector. A planar array has no way to separate front
+from back, so the full-sphere spectrum has two equal peaks and `argmax` picks one
+arbitrarily -- which is why the same code reported the direct peak on one run and
+the mirror on the next. `smoke_sionna.py` now accepts either and checks the
+ambiguity explicitly.
+
+This is worth knowing beyond the test. Each pinhole view spans only +-45 degrees
+of azimuth, so a path's mirror image lands in a *neighbouring* view rather than
+the same image -- the dataset's four yaw angles tile the azimuth circle, so every
+arrival can appear as a ghost 180 degrees away. What suppresses it is the element
+pattern's front-to-back ratio, and the two spectra do not treat that the same
+way: `cbf_spectrum` beamforms with the bare `steering` vectors while
+`mvdr_spectrum` uses `manifold`, which carries the TR 38.901 element gain. That
+asymmetry is inherited from the tutorial, where `CBF_spectrum` calls
+`steering_vector` and `MVDR_spectrum` calls `array_manifold_vector`.
 
 `generate_dataset.py` still has not been run end to end.
 

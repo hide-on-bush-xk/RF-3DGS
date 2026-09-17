@@ -107,18 +107,40 @@ def main():
     print(f"CBF peak  : theta {math.degrees(peak_theta):7.2f} deg, "
           f"phi {math.degrees(peak_phi):7.2f} deg")
 
+    # The array lies in the y-z plane, so its manifold depends on
+    # (sin(theta) sin(phi), cos(theta)) and phi is indistinguishable from
+    # 180 - phi: both give the same steering vector to within float noise. The
+    # spectrum therefore has two equal peaks and argmax picks one arbitrarily.
+    # Accept either, and check the ambiguity itself separately below.
+    mirror_phi = math.pi - aoa_phi
     d_theta = abs(math.degrees(peak_theta - aoa_theta))
-    d_phi = abs((math.degrees(peak_phi - aoa_phi) + 180) % 360 - 180)
-    print(f"offset    : dtheta {d_theta:.2f} deg, dphi {d_phi:.2f} deg")
+    d_phi_direct = abs((math.degrees(peak_phi - aoa_phi) + 180) % 360 - 180)
+    d_phi_mirror = abs((math.degrees(peak_phi - mirror_phi) + 180) % 360 - 180)
+    d_phi = min(d_phi_direct, d_phi_mirror)
+    which = "direct" if d_phi_direct <= d_phi_mirror else "mirror (180 - phi)"
+    print(f"offset    : dtheta {d_theta:.2f} deg, dphi {d_phi:.2f} deg [{which}]")
 
     # One degree of grid spacing, plus beam width, so allow a few degrees.
     if d_theta < 3.0 and d_phi < 3.0:
-        print("\nELEMENT ORDERING OK: beamformer agrees with Sionna's AoA")
+        print("\nELEMENT ORDERING OK: beamformer agrees with Sionna's AoA "
+              "up to the array's front/back ambiguity")
     else:
         print("\nELEMENT ORDERING MISMATCH: rf_spectra._element_offsets does not "
               "match Sionna's PlanarArray layout. Fix the offsets before "
               "generating a dataset.")
         sys.exit(2)
+
+    # --- 2b. the ambiguity is a property of the array, not a bug -------------
+    pair_theta = torch.tensor([[aoa_theta, aoa_theta]], device=device)
+    pair_phi = torch.tensor([[aoa_phi, mirror_phi]], device=device)
+    pair = steering_vector(args.M, pair_theta, pair_phi)
+    coherence = (pair[:, 0, 0].conj() * pair[:, 0, 1]).sum().abs().item() / args.M ** 2
+    print(f"front/back coherence: {coherence:.6f} "
+          f"(1.0 means the two directions are indistinguishable)")
+    if coherence > 0.999:
+        print("  -> a planar array cannot separate phi from 180 - phi. Each "
+              "pinhole view spans only +-45 deg of azimuth, so the ghost falls "
+              "in a neighbouring view rather than the same image.")
 
     # --- 3. a realistic solve, for shapes and path counts --------------------
     paths = solver(scene=scene, max_depth=1, los=True,
