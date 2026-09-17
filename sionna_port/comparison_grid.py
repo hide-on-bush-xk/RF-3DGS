@@ -29,6 +29,28 @@ SPECTRA = [
 
 PER_VIEW_NORMALISED = {"CBF", "TCBF"}
 
+# Every row reports the same fields in the same order, so the column can be read
+# down. A row that genuinely does not have a value prints a dash rather than
+# omitting the line, which would shift everything below it out of alignment.
+ROW_FIELDS = [
+    ("source", "source"),
+    ("role", "role"),
+    ("max depth", "max_depth"),
+    ("diffuse", "diffuse"),
+    ("paths / pose", "paths"),
+    ("K-factor", "k_factor"),
+    ("RMS delay", "rms_delay"),
+    ("normalisation", "normalisation"),
+]
+
+
+def row_params(**values) -> dict:
+    """Fill the fixed field list, leaving a dash wherever a row has no value."""
+    unknown = set(values) - {key for _, key in ROW_FIELDS}
+    if unknown:
+        raise TypeError(f"unknown row fields: {sorted(unknown)}")
+    return {label: values.get(key, "--") for label, key in ROW_FIELDS}
+
 # The optical view is not a spectrum, but it belongs in the table: it is what the
 # receiver is looking at while the rest of the row is measured.
 OPTICAL = ("optical", "scene from this pose")
@@ -131,16 +153,22 @@ def released_rows(root: str, view: str, test_view: str = "00000.png",
         gt_cells[OPTICAL[0]] = optical
         model_cells[OPTICAL[0]] = optical
 
+    # The tutorial's own solver settings, for the row that produced the targets.
+    # scat_keep_prob is not a scattering coefficient -- it thinned diffuse paths
+    # by a factor of ten -- so it is named rather than translated.
     return [
         {"label": "RF-3DGS ground truth", "base": "root",
-         "params": {"source": "Sionna 0.19 ray tracing",
-                    "role": "training target",
-                    "views": "3200"},
+         "params": row_params(source="Sionna 0.19, TensorFlow",
+                              role="training target",
+                              max_depth="1",
+                              diffuse="scat_keep_prob 0.1",
+                              paths="&gt; 300,000 (paper)",
+                              normalisation="per type, 2 probes"),
          "cells": gt_cells},
         {"label": "RF-3DGS model output", "base": "root",
-         "params": {"source": "released RRF checkpoint",
-                    "role": "what the model predicts",
-                    "iterations": "40,000"},
+         "params": row_params(source="released RRF checkpoint",
+                              role="model prediction, 40k iterations",
+                              normalisation="inherited from target"),
          "cells": model_cells},
     ]
 
@@ -278,11 +306,16 @@ def generate_rows(args):
 
         if optical_cell:
             cells[OPTICAL[0]] = optical_cell
-        params = {"scattering": f"{scattering:g}", "max_depth": f"{depth}",
-                  "paths": f"{n_paths:,}", "solver": "Sionna 2.1, GPU"}
-        if metrics:
-            params["K-factor"] = f"{metrics.k_factor_db:+.1f} dB"
-            params["RMS delay"] = f"{metrics.rms_delay_spread_ns:.1f} ns"
+        params = row_params(
+            source="Sionna 2.1, GPU",
+            role="regenerated here",
+            max_depth=f"{depth}",
+            diffuse=f"coefficient {scattering:g}",
+            paths=f"{n_paths:,}",
+            k_factor=(f"{metrics.k_factor_db:+.1f} dB" if metrics else "--"),
+            rms_delay=(f"{metrics.rms_delay_spread_ns:.1f} ns"
+                       if metrics else "--"),
+            normalisation="global, from data")
         rows.append({"label": f"ours, s={scattering:g}, depth={depth}",
                      "base": "out", "params": params, "cells": cells})
         print(f"  s={scattering:g} depth={depth}: {n_paths:,} paths")
