@@ -12,6 +12,11 @@ import json
 import math
 import os
 
+try:
+    import reference_panels
+except ImportError:
+    reference_panels = None
+
 # Categorical slots from the data-viz reference palette, assigned in fixed order.
 SERIES_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
 SERIES_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500"]
@@ -96,6 +101,7 @@ tbody th { text-align:left; font-family:"IBM Plex Mono",monospace; font-size:12p
 tbody td { font-family:"IBM Plex Mono",monospace; font-size:12.5px; }
 tbody tr:last-child th, tbody tr:last-child td { border-bottom:0; }
 svg text { font-family:"IBM Plex Mono",monospace; }
+
 footer { margin-top:38px; padding-top:14px; border-top:1px solid var(--line);
   font-family:"IBM Plex Mono",monospace; font-size:11px; color:var(--muted);
   display:flex; flex-wrap:wrap; gap:6px 18px; }
@@ -304,7 +310,54 @@ def spectrum_matrix(runs, base_dir):
             f'{"".join(cells)}</div>')
 
 
-def reference_panels(paths_and_labels):
+METRIC_ROWS = [
+    ("num_paths", "paths", 0),
+    ("rms_delay_spread_ns", "RMS delay (ns)", 2),
+    ("coherence_bandwidth_mhz", "coherence BW (MHz)", 1),
+    ("k_factor_db", "K-factor (dB)", 2),
+    ("aoa_azimuth_spread_deg", "AoA az spread (deg)", 1),
+    ("aod_azimuth_spread_deg", "AoD az spread (deg)", 1),
+    ("array_gain_db", "coherent gain (dB)", 2),
+    ("total_power_dbm", "path gain (dB)", 1),
+    ("snr_db", "SNR (dB)", 1),
+    ("capacity_bps_hz", "capacity (bps/Hz)", 2),
+]
+
+
+def spectrum_matrix(runs, base_dir):
+    """Rendered spectra laid out as scattering x depth, so the sweep is visible."""
+    have = [r for r in runs if r.get("preview")]
+    if not have:
+        return ""
+    scatters = sorted({r["scattering_coefficient"] for r in have})
+    depths = sorted({r["max_depth"] for r in have})
+    by_key = {(r["scattering_coefficient"], r["max_depth"]): r for r in have}
+
+    cols = "110px " + " ".join("1fr" for _ in depths)
+    cells = ['<div class="collab"></div>']
+    cells += [f'<div class="collab">depth {d}</div>' for d in depths]
+    for sc in scatters:
+        cells.append(f'<div class="rowlab">scattering {sc:g}</div>')
+        for d in depths:
+            run = by_key.get((sc, d))
+            if not run:
+                cells.append("<div></div>")
+                continue
+            path = os.path.join(base_dir, run["preview"])
+            if not os.path.isfile(path):
+                cells.append("<div></div>")
+                continue
+            n = run["metrics_mean"]["num_paths"]
+            k = run["metrics_mean"]["k_factor_db"]
+            cells.append(
+                f'<figure><img src="{embed(path)}" alt="{run["label"]}"/>'
+                f'<figcaption>{n:,.0f} paths &middot; K {k:+.1f} dB</figcaption>'
+                f'</figure>')
+    return (f'<div class="matrix" style="grid-template-columns:{cols}">'
+            f'{"".join(cells)}</div>')
+
+
+def _unused_reference_strip(paths_and_labels):
     cells = []
     for path, label in paths_and_labels:
         if path and os.path.isfile(path):
@@ -428,13 +481,22 @@ def build(data, preview_dir=None):
         f'normalised to its own range so the shapes are comparable.</p></div>'
         f'{matrix}</section>') if matrix else ""
 
+    reference_html = ""
+    if reference_panels is not None and data.get("_reference_root"):
+        try:
+            reference_html = reference_panels.render(reference_panels.collect(
+                data["_reference_root"], data.get("_regen_dir")))
+        except Exception as exc:
+            print(f"reference panels skipped: {type(exc).__name__}: {exc}")
+
     best = max(runs, key=lambda r: r["metrics_mean"]["num_paths"])
     fastest = min(runs, key=lambda r: r["mean_solve_seconds"])
 
+    extra_css = reference_panels.CSS if reference_panels else ""
     return f"""<title>RF-3DGS Channel Ablation</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500&display=swap">
-<style>{CSS}</style>
+<style>{CSS}{extra_css}</style>
 <div class="wrap">
 <header>
   <p class="eyebrow">{data['generated_at']} &middot; NIST lobby &middot; {data['frequency_hz']/1e9:,.0f} GHz</p>
@@ -452,6 +514,7 @@ def build(data, preview_dir=None):
   </div>
 </header>
 
+{reference_html}
 <section>
   <div class="meters">
     <div class="meter"><b>{best['metrics_mean']['num_paths']:,.0f}</b><span>most paths ({best['label']})</span></div>
@@ -510,11 +573,18 @@ def main():
     ap.add_argument("--out", default="dashboard.html")
     ap.add_argument("--preview-dir", default=None,
                     help="directory of generated spectrum PNGs to embed")
+    ap.add_argument("--reference-root", default=None,
+                    help="repo root, to pull in the Blender renders and the "
+                         "released spectra for comparison")
+    ap.add_argument("--regen-dir", default=None,
+                    help="a generation output directory to show alongside them")
     args = ap.parse_args()
 
     with open(args.ablation_json, encoding="utf-8") as fid:
         data = json.load(fid)
     data["_source"] = args.ablation_json
+    data["_reference_root"] = args.reference_root
+    data["_regen_dir"] = args.regen_dir
     html = build(data, args.preview_dir)
     head = ('<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
             '<meta name="viewport" content="width=device-width, initial-scale=1">\n')
