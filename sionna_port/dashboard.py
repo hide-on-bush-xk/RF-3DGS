@@ -16,6 +16,10 @@ try:
     import reference_panels
 except ImportError:
     reference_panels = None
+try:
+    import comparison_table
+except ImportError:
+    comparison_table = None
 
 # Categorical slots from the data-viz reference palette, assigned in fixed order.
 SERIES_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
@@ -42,7 +46,9 @@ CSS = """
 * { box-sizing: border-box; }
 body { margin:0; background:var(--bg); color:var(--ink); line-height:1.5;
   font-family:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif; }
-.wrap { max-width:1140px; margin:0 auto; padding-inline:20px; padding-block:36px 56px; }
+.wrap { max-width:none; margin:0; padding-inline:16px; padding-block:28px 48px; }
+/* Prose keeps a readable measure via .lede and .sec-head p below; tables and
+   image grids take the full width, which is the point on a large display. */
 h1 { font-family:"IBM Plex Sans Condensed","IBM Plex Sans",sans-serif;
   font-size:clamp(26px,4.4vw,38px); line-height:1.1; margin:0; letter-spacing:-.01em; }
 h2 { font-family:"IBM Plex Sans Condensed","IBM Plex Sans",sans-serif;
@@ -80,7 +86,7 @@ section { margin-top:34px; }
   color:var(--muted); margin-top:3px; text-align:center; }
 .ref { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
   gap:10px; margin-top:10px; }
-.grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:14px; }
+.grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(380px,1fr)); gap:14px; }
 figure { margin:0; }
 figcaption { font-family:"IBM Plex Mono",monospace; font-size:10.5px; color:var(--muted);
   margin-top:6px; }
@@ -489,10 +495,18 @@ def build(data, preview_dir=None):
         except Exception as exc:
             print(f"reference panels skipped: {type(exc).__name__}: {exc}")
 
+    comparison_html = ""
+    if comparison_table is not None and data.get("_comparison"):
+        try:
+            comparison_html = comparison_table.render(data["_comparison"])
+        except Exception as exc:
+            print(f"comparison table skipped: {type(exc).__name__}: {exc}")
+
     best = max(runs, key=lambda r: r["metrics_mean"]["num_paths"])
     fastest = min(runs, key=lambda r: r["mean_solve_seconds"])
 
-    extra_css = reference_panels.CSS if reference_panels else ""
+    extra_css = ((reference_panels.CSS if reference_panels else "")
+                 + (comparison_table.CSS if comparison_table else ""))
     return f"""<title>RF-3DGS Channel Ablation</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500&display=swap">
@@ -514,6 +528,7 @@ def build(data, preview_dir=None):
   </div>
 </header>
 
+{comparison_html}
 {reference_html}
 <section>
   <div class="meters">
@@ -578,6 +593,8 @@ def main():
                          "released spectra for comparison")
     ap.add_argument("--regen-dir", default=None,
                     help="a generation output directory to show alongside them")
+    ap.add_argument("--comparison", default=None,
+                    help="comparison.json from comparison_grid.py")
     args = ap.parse_args()
 
     with open(args.ablation_json, encoding="utf-8") as fid:
@@ -585,6 +602,9 @@ def main():
     data["_source"] = args.ablation_json
     data["_reference_root"] = args.reference_root
     data["_regen_dir"] = args.regen_dir
+    if args.comparison:
+        with open(args.comparison, encoding="utf-8") as fid:
+            data["_comparison"] = json.load(fid)
     html = build(data, args.preview_dir)
     head = ('<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
             '<meta name="viewport" content="width=device-width, initial-scale=1">\n')

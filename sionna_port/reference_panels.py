@@ -174,7 +174,7 @@ def render(groups) -> str:
 
 
 CSS = """
-.panels { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+.panels { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
   gap:14px; }
 .panel { background:var(--surface); border:1px solid var(--line); border-radius:4px;
   padding:10px; margin:0; }
