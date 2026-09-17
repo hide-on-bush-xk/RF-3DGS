@@ -56,6 +56,12 @@ class Config:
     seed: int = 42
     save_float: bool = True
     diagonal_loading: float = 0.0
+    # ITU materials load with scattering_coefficient = 0, so diffuse_reflection
+    # produces nothing at all and a depth-1 solve yields single-digit path
+    # counts. 0.7 reproduces the "more than 300,000 MPCs per Tx-Rx pair" the
+    # paper reports at 60 GHz: it gives 312,683 at depth 1. See
+    # calibrate_paths.py for the sweep this came from.
+    scattering_coefficient: float = 0.7
 
 
 # --------------------------------------------------------------------------
@@ -114,6 +120,10 @@ def build_scene(cfg: Config):
     scene.rx_array = PlanarArray(num_rows=cfg.M, num_cols=cfg.M,
                                  vertical_spacing=0.5, horizontal_spacing=0.5,
                                  pattern="tr38901", polarization="V")
+
+    if cfg.scattering_coefficient > 0:
+        for material in scene.radio_materials.values():
+            material.scattering_coefficient = cfg.scattering_coefficient
     return scene
 
 
@@ -245,6 +255,9 @@ def main():
     ap.add_argument("--num-positions", type=int, default=800)
     ap.add_argument("--max-depth", type=int, default=1)
     ap.add_argument("--diffraction", action="store_true")
+    ap.add_argument("--scattering-coefficient", type=float, default=0.7,
+                    help="applied to every material; 0 reproduces Sionna's "
+                         "default, which yields almost no diffuse paths")
     ap.add_argument("--no-save-float", dest="save_float", action="store_false")
     args = ap.parse_args()
     generate(Config(**vars(args)))

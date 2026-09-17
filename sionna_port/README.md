@@ -179,12 +179,42 @@ asymmetry is inherited from the tutorial, where `CBF_spectrum` calls
 
 `generate_dataset.py` still has not been run end to end.
 
-## Known discrepancy with the released dataset
+## Calibrating the path count
 
-A depth-1 solve with diffuse reflection and 100k samples per source produced
-**8 paths**, against the "more than 300,000 MPCs per Tx-Rx pair" the paper
-reports for the same scene. 0.19's `scat_keep_prob` and the rewritten solver's
-diffuse sampling are not the same mechanism, and `samples_per_src` will have to
-be raised considerably to get a comparable path count. Until that is calibrated,
-spectra regenerated here are not comparable to the released ones in absolute
-terms.
+The paper reports "more than 300,000 MPCs per Tx-Rx pair" at 60 GHz. A depth-1
+solve straight out of the box gives **8**, and a spectrum built from single-digit
+path counts is not a spectrum at all -- it is the array's point spread function,
+a regular sidelobe lattice with no scene structure in it.
+
+`samples_per_src` turns out to be irrelevant: 100k and 10M give the same 8 paths.
+`calibrate_paths.py` isolates the actual cause -- **ITU materials load with
+`scattering_coefficient = 0`**, so `diffuse_reflection=True` produces nothing and
+every path is specular. Turning `diffuse_reflection` off changes the count by
+zero.
+
+| scattering_coefficient | depth 1 | depth 2 | depth 3 |
+| --- | --- | --- | --- |
+| 0.0 (Sionna default) | 8 | 20 | 43 |
+| 0.3 | 57,619 | 94,220 | 130,269 |
+| 0.5 | 159,684 | 262,935 | 363,155 |
+| **0.7** | **312,683** | 522,365 | 722,643 |
+
+0.7 at depth 1 reproduces the paper's figure closely, so that is the default in
+`Config`. The authors' 0.19 pipeline must have set this somewhere -- most likely
+in the semantic material descriptor that was never published, which is the same
+missing piece that leaves `custom_*` materials unmapped.
+
+## Throughput
+
+On a desktop RTX 3060 under Windows with GPU ray tracing, 20 receiver positions
+(80 views, MVDR, 312k paths each) take **8 seconds** -- about 10 views per second,
+so the full 800-position dataset is roughly **5 minutes**. The 80 spectra are
+distinct (mean pairwise correlation 0.298, no duplicates).
+
+Regenerated MVDR spectra are qualitatively what the released ones look like:
+smooth angular power maps with localised hot spots, rather than the array
+lattice. They are not numerically comparable yet -- the normalisation range
+differs (this port takes it from the data, the tutorial from two probe
+positions), and the released spectra have sharper peaks, so some combination of
+`time_interval_ns`, the element pattern and `synthetic_array` still needs
+matching before a like-for-like evaluation.
