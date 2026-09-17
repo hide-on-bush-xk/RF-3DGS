@@ -72,6 +72,47 @@ def rename_meshes(mesh_dir: str, dry_run: bool = False) -> dict[str, str]:
     return mapping
 
 
+def sanitize_shape_ids(text: str) -> tuple[str, int]:
+    """Make <shape id> safe for Mitsuba's object paths.
+
+    Sionna's renderer builds a scene dict keyed by shape id, and Mitsuba rejects
+    a key containing '.', which every Blender duplicate suffix has:
+
+        RuntimeError: The object key 'shape-10-mesh-...custom_plastic.014'
+        contains a '.' character, which is reserved as a delimiter
+
+    Material ids are referenced by <ref> and are left alone; shape ids are not
+    referenced anywhere, so they are free to rename.
+    """
+    seen: set[str] = set()
+    count = 0
+
+    def fix(match):
+        nonlocal count
+        attr, value = match.group(1), match.group(2)
+        new = value
+        for zh, en in TRANSLIT.items():
+            new = new.replace(zh, en)
+        new = unicodedata.normalize("NFKD", new).encode("ascii", "ignore").decode()
+        new = re.sub(r"[^A-Za-z0-9_-]+", "_", new).strip("_") or "shape"
+        candidate, n = new, 1
+        while candidate in seen:
+            candidate = f"{new}_{n}"
+            n += 1
+        seen.add(candidate)
+        if candidate != value:
+            count += 1
+        return f'{attr}="{candidate}"'
+
+    # Only within <shape ...> tags, so material ids are untouched.
+    def fix_shape(m):
+        tag = m.group(0)
+        return re.sub(r'(id|name)="([^"]*)"', fix, tag)
+
+    text = re.sub(r"<shape[^>]*>", fix_shape, text)
+    return text, count
+
+
 def rewrite_xml(xml_path: str, out_path: str, mapping: dict[str, str]) -> int:
     with open(xml_path, encoding="utf-8") as fid:
         text = fid.read()

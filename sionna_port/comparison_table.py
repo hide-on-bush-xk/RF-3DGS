@@ -67,9 +67,11 @@ def render(payload, max_width: int = 260) -> str:
                 cells.append(f'<td class="gap"><span>{cell["missing"]}</span></td>')
                 continue
             # Released images are relative to the repo; generated ones to the
-            # output directory. The row says which, rather than the renderer
-            # guessing from the label.
-            base = root if row.get("base") == "root" else out_base
+            # output directory. A cell may override its row: the optical view of
+            # a released pose is rendered here, so it lives with our output even
+            # though the rest of that row does not.
+            which = cell.get("base", row.get("base"))
+            base = root if which == "root" else out_base
             src = embed_image(os.path.join(base, cell["image"]), max_width)
             if not src:
                 cells.append('<td class="gap"><span>file missing</span></td>')

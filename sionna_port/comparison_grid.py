@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 
 import numpy as np
@@ -28,6 +29,51 @@ SPECTRA = [
 
 PER_VIEW_NORMALISED = {"CBF", "TCBF"}
 
+# The optical view is not a spectrum, but it belongs in the table: it is what the
+# receiver is looking at while the rest of the row is measured.
+OPTICAL = ("optical", "scene from this pose")
+
+
+def recover_pose(root: str, spectrum: str = "MVDR", test_view_index: int = 0):
+    """Position and yaw of a released test view, from its COLMAP entry.
+
+    The released spectra and the Blender renders come from two unrelated
+    sampling campaigns, so no optical image matches a spectrum. Recovering the
+    pose lets one be rendered instead of hunting for a near miss. Inverts what
+    the tutorial's euler_to_quaternion wrote out.
+    """
+    import numpy as np
+    from scipy.spatial.transform import Rotation
+
+    base = os.path.join(root, "RF-3DGS_dataset", "training-rf-spectrum",
+                        f"3dgs_{spectrum}_100")
+    index = os.path.join(base, "test_index.txt")
+    images = os.path.join(base, "sparse", "0", "images.txt")
+    if not (os.path.isfile(index) and os.path.isfile(images)):
+        return None
+
+    with open(index) as fid:
+        names = sorted(os.path.splitext(l.strip())[0] for l in fid if l.strip())
+    if test_view_index >= len(names):
+        return None
+    want = names[test_view_index]
+
+    with open(images) as fid:
+        for line in fid:
+            parts = line.split()
+            if len(parts) >= 10 and os.path.splitext(parts[9])[0] == want:
+                qvec = np.array([float(x) for x in parts[1:5]])
+                tvec = np.array([float(x) for x in parts[5:8]])
+                break
+        else:
+            return None
+
+    r_c2w = Rotation.from_quat([qvec[1], qvec[2], qvec[3], qvec[0]])
+    position = -r_c2w.as_matrix().T @ tvec
+    r_posz2posx = Rotation.from_euler("ZYX", [-np.pi / 2, 0.0, -np.pi / 2])
+    yaw = float((r_c2w.inv() * r_posz2posx.inv()).as_euler("ZYX")[0])
+    return [float(v) for v in position], yaw
+
 
 def _published_psnr(root: str, name: str) -> str | None:
     path = os.path.join(root, "RF-3DGS_dataset", "RF-3DGS_trained_RRF",
@@ -41,7 +87,8 @@ def _published_psnr(root: str, name: str) -> str | None:
         return None
 
 
-def released_rows(root: str, view: str, test_view: str = "00000.png") -> list:
+def released_rows(root: str, view: str, test_view: str = "00000.png",
+                  optical=None) -> list:
     """Two rows: the training target, and what the trained model renders.
 
     Both come from test/ours_40000, where gt/ and renders/ share an index, so
@@ -80,6 +127,10 @@ def released_rows(root: str, view: str, test_view: str = "00000.png") -> list:
         else:
             model_cells[name] = {"missing": "no trained model"}
 
+    if optical:
+        gt_cells[OPTICAL[0]] = optical
+        model_cells[OPTICAL[0]] = optical
+
     return [
         {"label": "RF-3DGS ground truth", "base": "root",
          "params": {"source": "Sionna 0.19 ray tracing",
@@ -92,6 +143,32 @@ def released_rows(root: str, view: str, test_view: str = "00000.png") -> list:
                     "iterations": "40,000"},
          "cells": model_cells},
     ]
+
+
+def render_optical_cell(scene_xml, position, yaw, args, tag):
+    """Render the scene from one pose and return a table cell for it."""
+    try:
+        import imageio.v2 as imageio
+        import render_optical
+    except ImportError:
+        return None
+    out_dir = os.path.join(os.path.dirname(args.out) or ".", "comparison_previews")
+    os.makedirs(out_dir, exist_ok=True)
+    try:
+        scene = render_optical.load_radio_scene(scene_xml, args.frequency, 0.7)
+        img = render_optical.render_pose(scene, position, yaw, args.width,
+                                         args.height, args.fov, num_samples=96)
+    except Exception as exc:
+        print(f"  optical render failed ({tag}): {type(exc).__name__}: {exc}")
+        return None
+    name = f"optical_{tag}.png"
+    imageio.imwrite(os.path.join(out_dir, name), img)
+    return {"image": os.path.join("comparison_previews", name),
+            "base": "out",
+            "params": {"pose": f"{position[0]:.1f}, {position[1]:.1f}, "
+                               f"{position[2]:.1f}",
+                       "yaw": f"{math.degrees(yaw):+.0f} deg",
+                       "shading": "by radio material"}}
 
 
 def generate_rows(args):
@@ -111,6 +188,8 @@ def generate_rows(args):
     solver = PathSolver()
     out_dir = os.path.join(os.path.dirname(args.out) or ".", "comparison_previews")
     os.makedirs(out_dir, exist_ok=True)
+
+    optical_cell = render_optical_cell(args.scene_xml, args.rx, 0.0, args, "ours")
 
     rows = []
     for scattering, depth in [(s, d) for s in args.scattering
@@ -159,6 +238,8 @@ def generate_rows(args):
                 "params": {"normalisation": "global, from data",
                            "dB range": f"{lo:.0f} .. {hi:.0f}"}}
 
+        if optical_cell:
+            cells[OPTICAL[0]] = optical_cell
         params = {"scattering": f"{scattering:g}", "max_depth": f"{depth}",
                   "paths": f"{n_paths:,}", "solver": "Sionna 2.1, GPU"}
         if metrics:
@@ -192,9 +273,23 @@ def main():
     ap.add_argument("--variant", default="cuda_ad_mono_polarized")
     args = ap.parse_args()
 
-    rows = released_rows(args.root, args.view) + generate_rows(args)
-    payload = {"columns": [{"name": n, "algorithm": a, "ported": p}
-                           for n, a, p in SPECTRA],
+    import mitsuba as mi
+    if mi.variant() is None:
+        mi.set_variant(args.variant)
+
+    released_optical = None
+    pose = recover_pose(args.root)
+    if pose:
+        position, yaw = pose
+        print(f"released test view pose: {position}, yaw {math.degrees(yaw):+.0f} deg")
+        released_optical = render_optical_cell(args.scene_xml, position, yaw,
+                                               args, "released")
+
+    rows = released_rows(args.root, args.view, optical=released_optical)         + generate_rows(args)
+    payload = {"columns": [{"name": OPTICAL[0], "algorithm": OPTICAL[1],
+                            "ported": True}]
+                          + [{"name": n, "algorithm": a, "ported": p}
+                             for n, a, p in SPECTRA],
                "rows": rows,
                "root": os.path.abspath(args.root),
                "out_base": os.path.abspath(os.path.dirname(args.out) or ".")}
