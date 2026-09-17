@@ -64,6 +64,17 @@ section { margin-top:34px; }
   text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
 .card { background:var(--surface); border:1px solid var(--line); border-radius:4px;
   padding:16px 18px; }
+.matrix { display:grid; gap:6px; overflow-x:auto; }
+.matrix img { width:100%; border-radius:3px; display:block; }
+.matrix .rowlab, .matrix .collab { font-family:"IBM Plex Mono",monospace;
+  font-size:11px; color:var(--muted); display:flex; align-items:center;
+  justify-content:center; }
+.matrix .rowlab { writing-mode:horizontal-tb; white-space:nowrap; padding-right:4px; }
+.matrix figure { margin:0; }
+.matrix figcaption { font-family:"IBM Plex Mono",monospace; font-size:9.5px;
+  color:var(--muted); margin-top:3px; text-align:center; }
+.ref { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+  gap:10px; margin-top:10px; }
 .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:14px; }
 figure { margin:0; }
 figcaption { font-family:"IBM Plex Mono",monospace; font-size:10.5px; color:var(--muted);
@@ -260,6 +271,49 @@ METRIC_ROWS = [
 ]
 
 
+def spectrum_matrix(runs, base_dir):
+    """Rendered spectra laid out as scattering x depth, so the sweep is visible."""
+    have = [r for r in runs if r.get("preview")]
+    if not have:
+        return ""
+    scatters = sorted({r["scattering_coefficient"] for r in have})
+    depths = sorted({r["max_depth"] for r in have})
+    by_key = {(r["scattering_coefficient"], r["max_depth"]): r for r in have}
+
+    cols = "110px " + " ".join("1fr" for _ in depths)
+    cells = ['<div class="collab"></div>']
+    cells += [f'<div class="collab">depth {d}</div>' for d in depths]
+    for sc in scatters:
+        cells.append(f'<div class="rowlab">scattering {sc:g}</div>')
+        for d in depths:
+            run = by_key.get((sc, d))
+            if not run:
+                cells.append("<div></div>")
+                continue
+            path = os.path.join(base_dir, run["preview"])
+            if not os.path.isfile(path):
+                cells.append("<div></div>")
+                continue
+            n = run["metrics_mean"]["num_paths"]
+            k = run["metrics_mean"]["k_factor_db"]
+            cells.append(
+                f'<figure><img src="{embed(path)}" alt="{run["label"]}"/>'
+                f'<figcaption>{n:,.0f} paths &middot; K {k:+.1f} dB</figcaption>'
+                f'</figure>')
+    return (f'<div class="matrix" style="grid-template-columns:{cols}">'
+            f'{"".join(cells)}</div>')
+
+
+def reference_panels(paths_and_labels):
+    cells = []
+    for path, label in paths_and_labels:
+        if path and os.path.isfile(path):
+            cells.append(f'<figure><img src="{embed(path)}" alt="{label}" '
+                         f'style="width:100%;border-radius:3px"/>'
+                         f'<figcaption>{label}</figcaption></figure>')
+    return f'<div class="ref">{"".join(cells)}</div>' if cells else ""
+
+
 def build(data, preview_dir=None):
     runs = data["runs"]
     depths = sorted({r["max_depth"] for r in runs})
@@ -361,6 +415,19 @@ def build(data, preview_dir=None):
                         f'<p>Sample views from the most recent generation run.</p></div>'
                         f'<div class="grid2">{cells}</div></section>')
 
+    base_dir = os.path.dirname(os.path.abspath(data.get("_source", "."))) or "."
+    matrix = spectrum_matrix(runs, base_dir) if not single else ""
+    matrix_section = (
+        f'<section><div class="sec-head"><h2>What the sweep looks like</h2>'
+        f'<p>One rendered spectrum per configuration, from the same receiver '
+        f'position every time. The top row is what Sionna does by default, with '
+        f'no scattering: a handful of specular paths, so the panel shows the '
+        f'beamformer reacting to those few arrivals -- sharp filaments and deep '
+        f'nulls over an empty background -- rather than the room. As scattering '
+        f'fills the channel in, continuous structure appears. Each panel is '
+        f'normalised to its own range so the shapes are comparable.</p></div>'
+        f'{matrix}</section>') if matrix else ""
+
     best = max(runs, key=lambda r: r["metrics_mean"]["num_paths"])
     fastest = min(runs, key=lambda r: r["mean_solve_seconds"])
 
@@ -394,6 +461,7 @@ def build(data, preview_dir=None):
   </div>
 </section>
 
+{matrix_section}
 <section>
   <div class="sec-head"><h2>Ablation</h2>
   <p>Scattering coefficient against maximum interaction depth. Sionna's ITU
@@ -446,6 +514,7 @@ def main():
 
     with open(args.ablation_json, encoding="utf-8") as fid:
         data = json.load(fid)
+    data["_source"] = args.ablation_json
     html = build(data, args.preview_dir)
     head = ('<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
             '<meta name="viewport" content="width=device-width, initial-scale=1">\n')

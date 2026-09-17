@@ -109,11 +109,29 @@ def sweep(args):
             print("    no valid positions")
             continue
 
+        # One rendered panel per configuration, from the same receiver position
+        # every time, so the grid varies only in the setting being swept.
+        preview_rel = None
+        if spectra and args.previews:
+            preview_dir = os.path.join(os.path.dirname(args.out) or ".",
+                                       "ablation_previews")
+            os.makedirs(preview_dir, exist_ok=True)
+            import imageio.v2 as imageio
+            from matplotlib import colormaps
+            panel = spectra[0]
+            lo, hi = float(panel.min()), float(panel.max())
+            norm = np.clip((panel - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
+            rgb = (colormaps["jet"](norm)[..., :3] * 255).astype(np.uint8)
+            name = f"s{cfg['scattering_coefficient']:g}_d{cfg['max_depth']}.png"
+            imageio.imwrite(os.path.join(preview_dir, name), rgb)
+            preview_rel = os.path.join("ablation_previews", name)
+
         keys = per_position[0].keys()
         summary = {k: float(np.mean([p[k] for p in per_position])) for k in keys}
         spread = {k: float(np.std([p[k] for p in per_position])) for k in keys}
 
         entry = {"label": label, **cfg,
+                 "preview": preview_rel,
                  "positions": len(per_position),
                  "mean_solve_seconds": float(np.mean(solve_times)),
                  "metrics_mean": summary,
@@ -167,6 +185,8 @@ def main():
     ap.add_argument("--spectrum", default="MVDR", choices=["CBF", "MVDR"])
     ap.add_argument("--diagonal-loading", type=float, default=0.0)
     ap.add_argument("--cfr", action="store_true", default=True)
+    ap.add_argument("--no-previews", dest="previews", action="store_false",
+                    help="skip the rendered panel per configuration")
     ap.add_argument("--variant", default="cuda_ad_mono_polarized")
     sweep(ap.parse_args())
 
