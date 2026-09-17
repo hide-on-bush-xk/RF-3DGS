@@ -75,15 +75,6 @@ section { margin-top:34px; }
   text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
 .card { background:var(--surface); border:1px solid var(--line); border-radius:4px;
   padding:16px 18px; }
-.matrix { display:grid; gap:6px; overflow-x:auto; }
-.matrix img { width:100%; border-radius:3px; display:block; }
-.matrix .rowlab, .matrix .collab { font-family:"IBM Plex Mono",monospace;
-  font-size:11px; color:var(--muted); display:flex; align-items:center;
-  justify-content:center; }
-.matrix .rowlab { writing-mode:horizontal-tb; white-space:nowrap; padding-right:4px; }
-.matrix figure { margin:0; }
-.matrix figcaption { font-family:"IBM Plex Mono",monospace; font-size:9.5px;
-  color:var(--muted); margin-top:3px; text-align:center; }
 .ref { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
   gap:10px; margin-top:10px; }
 .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(380px,1fr)); gap:14px; }
@@ -262,6 +253,25 @@ def per_view_bars(values, title, unit, width=520, height=230):
                  f'fill="var(--muted)">{unit}</text>')
     parts.append("</svg>")
     return "".join(parts)
+
+
+def embed(path):
+    with open(path, "rb") as fid:
+        return "data:image/png;base64," + base64.b64encode(fid.read()).decode()
+
+
+METRIC_ROWS = [
+    ("num_paths", "paths", 0),
+    ("rms_delay_spread_ns", "RMS delay (ns)", 2),
+    ("coherence_bandwidth_mhz", "coherence BW (MHz)", 1),
+    ("k_factor_db", "K-factor (dB)", 2),
+    ("aoa_azimuth_spread_deg", "AoA az spread (deg)", 1),
+    ("aod_azimuth_spread_deg", "AoD az spread (deg)", 1),
+    ("array_gain_db", "coherent gain (dB)", 2),
+    ("total_power_dbm", "path gain (dB)", 1),
+    ("snr_db", "SNR (dB)", 1),
+    ("capacity_bps_hz", "capacity (bps/Hz)", 2),
+]
 
 
 def embed(path):
@@ -462,31 +472,8 @@ def build(data, preview_dir=None):
             f'{line_chart(c["frequency_hz"], c["magnitude_db"], "channel frequency response", "GHz", "dB")}'
             f'</figure>')
 
-    previews = ""
-    if preview_dir and os.path.isdir(preview_dir):
-        files = sorted(f for f in os.listdir(preview_dir) if f.endswith(".png"))[:4]
-        if files:
-            cells = "".join(
-                f'<figure><img src="{embed(os.path.join(preview_dir, f))}" '
-                f'alt="spectrum {f}" style="width:100%;border-radius:3px"/>'
-                f'<figcaption>{f}</figcaption></figure>' for f in files)
-            previews = (f'<section><div class="sec-head"><h2>Rendered spectra</h2>'
-                        f'<p>Sample views from the most recent generation run.</p></div>'
-                        f'<div class="grid2">{cells}</div></section>')
-
-    base_dir = os.path.dirname(os.path.abspath(data.get("_source", "."))) or "."
-    matrix = spectrum_matrix(runs, base_dir) if not single else ""
-    matrix_section = (
-        f'<section><div class="sec-head"><h2>What the sweep looks like</h2>'
-        f'<p>One rendered spectrum per configuration, from the same receiver '
-        f'position every time. The top row is what Sionna does by default, with '
-        f'no scattering: a handful of specular paths, so the panel shows the '
-        f'beamformer reacting to those few arrivals -- sharp filaments and deep '
-        f'nulls over an empty background -- rather than the room. As scattering '
-        f'fills the channel in, continuous structure appears. Each panel is '
-        f'normalised to its own range so the shapes are comparable.</p></div>'
-        f'{matrix}</section>') if matrix else ""
-
+    # The rendered spectra used to appear here and again in the
+    # comparison table; the table is the better home for them.
     reference_html = ""
     if reference_panels is not None and data.get("_reference_root"):
         try:
@@ -528,8 +515,8 @@ def build(data, preview_dir=None):
   </div>
 </header>
 
-{comparison_html}
 {reference_html}
+{comparison_html}
 <section>
   <div class="meters">
     <div class="meter"><b>{best['metrics_mean']['num_paths']:,.0f}</b><span>most paths ({best['label']})</span></div>
@@ -539,7 +526,6 @@ def build(data, preview_dir=None):
   </div>
 </section>
 
-{matrix_section}
 <section>
   <div class="sec-head"><h2>Ablation</h2>
   <p>Scattering coefficient against maximum interaction depth. Sionna's ITU
@@ -559,7 +545,6 @@ def build(data, preview_dir=None):
 </section>
 
 <section><div class="grid2">{cfr_html}</div></section>
-{previews}
 
 <footer>
   <span>RF-3DGS &middot; Sun Lab, University of Georgia</span>

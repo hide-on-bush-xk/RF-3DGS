@@ -29,29 +29,69 @@ SPECTRA = [
 PER_VIEW_NORMALISED = {"CBF", "TCBF"}
 
 
-def released_row(root: str, view: str) -> dict:
-    cells = {}
+def _published_psnr(root: str, name: str) -> str | None:
+    path = os.path.join(root, "RF-3DGS_dataset", "RF-3DGS_trained_RRF",
+                        f"3dgs_{name}_100", "results.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fid:
+            return f"{json.load(fid)['ours_40000']['PSNR']:.2f} dB"
+    except Exception:
+        return None
+
+
+def released_rows(root: str, view: str, test_view: str = "00000.png") -> list:
+    """Two rows: the training target, and what the trained model renders.
+
+    Both come from test/ours_40000, where gt/ and renders/ share an index, so
+    the two rows show the same receiver pose. TCBF falls back to the training
+    set for its target and has no model output at all -- the authors released
+    trained checkpoints for five of the six spectra.
+    """
+    gt_cells, model_cells = {}, {}
     for name, _, _ in SPECTRA:
-        img = os.path.join(root, "RF-3DGS_dataset", "training-rf-spectrum",
-                           f"3dgs_{name}_100", "images", view)
-        if not os.path.isfile(img):
-            continue
-        params = {"normalisation":
-                  "per image" if name in PER_VIEW_NORMALISED else "global, 2 probes"}
-        res = os.path.join(root, "RF-3DGS_dataset", "RF-3DGS_trained_RRF",
-                           f"3dgs_{name}_100", "results.json")
-        if os.path.isfile(res):
-            try:
-                with open(res, encoding="utf-8") as fid:
-                    m = json.load(fid)["ours_40000"]
-                params["published PSNR"] = f"{m['PSNR']:.2f} dB"
-            except Exception:
-                pass
-        cells[name] = {"image": os.path.relpath(img, root), "params": params}
-    return {"label": "released ground truth",
-            "params": {"source": "authors' dataset", "views": "3200",
-                       "solver": "Sionna 0.19, TensorFlow"},
-            "cells": cells}
+        base = os.path.join(root, "RF-3DGS_dataset", "RF-3DGS_trained_RRF",
+                            f"3dgs_{name}_100", "test", "ours_40000")
+        gt_img = os.path.join(base, "gt", test_view)
+        render_img = os.path.join(base, "renders", test_view)
+        norm = ("per image" if name in PER_VIEW_NORMALISED
+                else "global, 2 probes")
+
+        if os.path.isfile(gt_img):
+            gt_cells[name] = {"image": os.path.relpath(gt_img, root),
+                              "params": {"normalisation": norm}}
+        else:
+            fallback = os.path.join(root, "RF-3DGS_dataset",
+                                    "training-rf-spectrum", f"3dgs_{name}_100",
+                                    "images", view)
+            if os.path.isfile(fallback):
+                gt_cells[name] = {"image": os.path.relpath(fallback, root),
+                                  "params": {"normalisation": norm,
+                                             "note": "training set, other pose"}}
+
+        if os.path.isfile(render_img):
+            params = {"normalisation": norm}
+            psnr = _published_psnr(root, name)
+            if psnr:
+                params["PSNR vs gt"] = psnr
+            model_cells[name] = {"image": os.path.relpath(render_img, root),
+                                 "params": params}
+        else:
+            model_cells[name] = {"missing": "no trained model"}
+
+    return [
+        {"label": "RF-3DGS ground truth", "base": "root",
+         "params": {"source": "Sionna 0.19 ray tracing",
+                    "role": "training target",
+                    "views": "3200"},
+         "cells": gt_cells},
+        {"label": "RF-3DGS model output", "base": "root",
+         "params": {"source": "released RRF checkpoint",
+                    "role": "what the model predicts",
+                    "iterations": "40,000"},
+         "cells": model_cells},
+    ]
 
 
 def generate_rows(args):
@@ -73,7 +113,8 @@ def generate_rows(args):
     os.makedirs(out_dir, exist_ok=True)
 
     rows = []
-    for scattering in args.scattering:
+    for scattering, depth in [(s, d) for s in args.scattering
+                              for d in args.depth]:
         scene = load_scene(args.scene_xml, merge_shapes=True)
         scene.frequency = args.frequency
         scene.tx_array = PlanarArray(num_rows=1, num_cols=1, pattern="iso",
@@ -86,7 +127,7 @@ def generate_rows(args):
             material.scattering_coefficient = scattering
         scene.add(Receiver(name="rx", position=args.rx, orientation=[0.0, 0.0, 0.0]))
 
-        paths = solver(scene=scene, max_depth=args.depth,
+        paths = solver(scene=scene, max_depth=depth,
                        samples_per_src=args.samples, los=True,
                        specular_reflection=True, diffuse_reflection=True,
                        refraction=False, synthetic_array=True, seed=42)
@@ -111,21 +152,21 @@ def generate_rows(args):
             lo, hi = float(arr.min()), float(arr.max())
             norm = np.clip((arr - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
             rgb = (colormaps["jet"](norm)[..., :3] * 255).astype(np.uint8)
-            fname = f"{name}_s{scattering:g}_d{args.depth}.png"
+            fname = f"{name}_s{scattering:g}_d{depth}.png"
             imageio.imwrite(os.path.join(out_dir, fname), rgb)
             cells[name] = {
                 "image": os.path.join("comparison_previews", fname),
                 "params": {"normalisation": "global, from data",
                            "dB range": f"{lo:.0f} .. {hi:.0f}"}}
 
-        params = {"scattering": f"{scattering:g}", "max_depth": f"{args.depth}",
+        params = {"scattering": f"{scattering:g}", "max_depth": f"{depth}",
                   "paths": f"{n_paths:,}", "solver": "Sionna 2.1, GPU"}
         if metrics:
             params["K-factor"] = f"{metrics.k_factor_db:+.1f} dB"
             params["RMS delay"] = f"{metrics.rms_delay_spread_ns:.1f} ns"
-        rows.append({"label": f"ours, scattering {scattering:g}",
-                     "params": params, "cells": cells})
-        print(f"  scattering {scattering:g}: {n_paths:,} paths")
+        rows.append({"label": f"ours, s={scattering:g}, depth={depth}",
+                     "base": "out", "params": params, "cells": cells})
+        print(f"  s={scattering:g} depth={depth}: {n_paths:,} paths")
     return rows
 
 
@@ -136,7 +177,7 @@ def main():
     ap.add_argument("--root", default="..", help="repo root, for the released data")
     ap.add_argument("--out", default="../output/comparison.json")
     ap.add_argument("--scattering", type=float, nargs="+", default=[0.0, 0.3, 0.7])
-    ap.add_argument("--depth", type=int, default=1)
+    ap.add_argument("--depth", type=int, nargs="+", default=[1])
     ap.add_argument("--view", default="00001.png")
     ap.add_argument("--tx", type=float, nargs=3, default=[6.905, 0.0, 0.287])
     ap.add_argument("--rx", type=float, nargs=3, default=[3.0, -2.0, 0.0])
@@ -151,7 +192,7 @@ def main():
     ap.add_argument("--variant", default="cuda_ad_mono_polarized")
     args = ap.parse_args()
 
-    rows = [released_row(args.root, args.view)] + generate_rows(args)
+    rows = released_rows(args.root, args.view) + generate_rows(args)
     payload = {"columns": [{"name": n, "algorithm": a, "ported": p}
                            for n, a, p in SPECTRA],
                "rows": rows,

@@ -1,9 +1,8 @@
-"""Collect the three kinds of image this project deals with, with their parameters.
+"""The optical view of the scene, as context for the spectra.
 
-A spectrum is hard to judge on its own. Putting the optical render of the same
-room next to the released ground truth and next to what this port regenerates
-makes the differences legible: what the room is, what the authors' pipeline
-produced, and what ours does.
+The spectra themselves are cross-tabulated in comparison_table.py; showing them
+here as well only duplicated that. What this contributes is the one thing the
+table cannot: what the room actually looks like.
 """
 
 from __future__ import annotations
@@ -59,7 +58,7 @@ def _published_metrics(root: str, spectrum: str) -> dict:
 
 
 def collect(root: str, regen_dir: str | None = None, view: str = "00001.png"):
-    """Panels grouped by origin. Missing files are skipped, not faked."""
+    """The optical renders. Missing files are skipped, not faked."""
     groups = []
 
     # 1. the room, as a camera sees it
@@ -82,72 +81,6 @@ def collect(root: str, regen_dir: str | None = None, view: str = "00001.png"):
                     "geometry from these, and the RF stage then freezes that "
                     "geometry and refits only the radiance.",
             "panels": [p for p in panels if p["src"]]})
-
-    # 2. the released spectra, one per ASP algorithm
-    panels = []
-    for spectrum, description, normalisation in RELEASED_TYPES:
-        img = os.path.join(root, "RF-3DGS_dataset", "training-rf-spectrum",
-                           f"3dgs_{spectrum}_100", "images", view)
-        src = embed_image(img, max_width=300)
-        if not src:
-            continue
-        pub = _published_metrics(root, spectrum)
-        params = {"algorithm": description,
-                  "resolution": "300 x 200, 90 deg FoV",
-                  "views": "3200 (800 positions x 4 yaw)",
-                  "normalisation": normalisation}
-        if pub:
-            params["published PSNR"] = f"{pub.get('PSNR', float('nan')):.2f} dB"
-            params["published LPIPS"] = f"{pub.get('LPIPS', float('nan')):.4f}"
-        panels.append({"src": src, "title": spectrum, "params": params})
-    if panels:
-        groups.append({
-            "title": "Released ground truth",
-            "note": "The same receiver pose under six array-processing "
-                    "algorithms, as shipped with the paper. Note the "
-                    "normalisation row: CBF and TCBF are the only two rescaled "
-                    "per image, and they are also the two the paper reports "
-                    "collapsing to about 5 dB PSNR.",
-            "panels": panels})
-
-    # 3. what this port regenerates
-    if regen_dir and os.path.isdir(os.path.join(regen_dir, "images")):
-        meta_path = os.path.join(regen_dir, "generation_meta.json")
-        meta = {}
-        if os.path.isfile(meta_path):
-            with open(meta_path, encoding="utf-8") as fid:
-                meta = json.load(fid)
-        report_path = os.path.join(regen_dir, "run_report.json")
-        paths_mean = None
-        if os.path.isfile(report_path):
-            with open(report_path, encoding="utf-8") as fid:
-                run = json.load(fid)["runs"][0]
-                paths_mean = run["metrics_mean"]["num_paths"]
-        names = sorted(os.listdir(os.path.join(regen_dir, "images")))[:3]
-        panels = []
-        for n in names:
-            params = {
-                "algorithm": meta.get("spectrum", "?"),
-                "scattering": f"{meta.get('scattering_coefficient', '?')}",
-                "max_depth": f"{meta.get('max_depth', '?')}",
-                "normalisation": "global (from the data)",
-                "dB range": (f"{meta.get('spec_min_db', float('nan')):.1f} .. "
-                             f"{meta.get('spec_max_db', float('nan')):.1f}"),
-            }
-            if paths_mean:
-                params["paths per pose"] = f"{paths_mean:,.0f}"
-            panels.append({"src": embed_image(
-                os.path.join(regen_dir, "images", n), max_width=300),
-                "title": n, "params": params})
-        panels = [p for p in panels if p["src"]]
-        if panels:
-            groups.append({
-                "title": "Regenerated here",
-                "note": f"Sionna {meta.get('frequency', 60e9)/1e9:.0f} GHz on the "
-                        f"GPU, with the scattering coefficient calibrated to the "
-                        f"paper's path count. The normalisation range comes from "
-                        f"the data rather than two hand-picked probe positions.",
-                "panels": panels})
 
     return groups
 

@@ -66,7 +66,10 @@ def render(payload, max_width: int = 260) -> str:
             if "missing" in cell:
                 cells.append(f'<td class="gap"><span>{cell["missing"]}</span></td>')
                 continue
-            base = root if row["label"].startswith("released") else out_base
+            # Released images are relative to the repo; generated ones to the
+            # output directory. The row says which, rather than the renderer
+            # guessing from the label.
+            base = root if row.get("base") == "root" else out_base
             src = embed_image(os.path.join(base, cell["image"]), max_width)
             if not src:
                 cells.append('<td class="gap"><span>file missing</span></td>')
