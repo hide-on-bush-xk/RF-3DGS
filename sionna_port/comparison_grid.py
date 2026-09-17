@@ -19,12 +19,12 @@ import numpy as np
 # `ported` says whether generate_dataset.py can produce it: AoD, Delay, MPC and
 # TCBF are projections or tapers the port has not implemented.
 SPECTRA = [
-    ("AoD", "Angle of departure", False),
+    ("AoD", "Angle of departure", True),
     ("CBF", "Conventional beamforming", True),
-    ("Delay", "Propagation delay", False),
-    ("MPC", "Multipath components", False),
+    ("Delay", "Propagation delay", True),
+    ("MPC", "Multipath components", True),
     ("MVDR", "MVDR / Capon", True),
-    ("TCBF", "Tapered beamforming", False),
+    ("TCBF", "Tapered beamforming", True),
 ]
 
 PER_VIEW_NORMALISED = {"CBF", "TCBF"}
@@ -145,6 +145,50 @@ def released_rows(root: str, view: str, test_view: str = "00000.png",
     ]
 
 
+def spectrum_panel(name, paths, response, grid, args):
+    """One spectrum as an 8-bit RGB panel, whichever family it belongs to.
+
+    CBF, TCBF and MVDR beamform on the pinhole grid directly. MPC, Delay and AoD
+    splat paths onto an equirectangular grid and are resampled through the same
+    pinhole model, so every panel in a row shares one camera.
+    """
+    import numpy as np
+    from matplotlib import colormaps
+    from rf_spectra import (aod_spectrum_equirect, cbf_spectrum,
+                            delay_spectrum_equirect, equirect_to_perspective,
+                            mpc_spectrum_equirect, mvdr_spectrum, tcbf_spectrum)
+
+    if name in ("CBF", "TCBF", "MVDR"):
+        if name == "MVDR":
+            _, spec_db = mvdr_spectrum(response, grid, args.diagonal_loading)
+        elif name == "TCBF":
+            _, spec_db = tcbf_spectrum(response, grid)
+        else:
+            _, spec_db = cbf_spectrum(response, grid)
+        arr = spec_db.detach().cpu().numpy()
+        lo, hi = float(arr.min()), float(arr.max())
+        norm = np.clip((arr - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
+        return (colormaps["jet"](norm)[..., :3] * 255).astype(np.uint8)
+
+    if name == "MPC":
+        equirect = mpc_spectrum_equirect(paths, args.equirect_scale)
+        view = equirect_to_perspective(equirect, args.width, args.height,
+                                       args.fov, args.yaw)
+        arr = view.detach().cpu().numpy()
+        lo, hi = float(arr.min()), float(arr.max())
+        norm = np.clip((arr - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
+        return (colormaps["jet"](norm)[..., :3] * 255).astype(np.uint8)
+
+    equirect = (delay_spectrum_equirect(paths, args.equirect_scale)
+                if name == "Delay"
+                else aod_spectrum_equirect(paths, args.equirect_scale))
+    view = equirect_to_perspective(equirect, args.width, args.height,
+                                   args.fov, args.yaw)
+    arr = view.detach().cpu().numpy().transpose(1, 2, 0)
+    hi = max(float(arr.max()), 1e-9)
+    return np.clip(arr / hi * 255.0, 0, 255).astype(np.uint8)
+
+
 def render_optical_cell(scene_xml, position, yaw, args, tag):
     """Render the scene from one pose and return a table cell for it."""
     try:
@@ -181,7 +225,10 @@ def generate_rows(args):
     from matplotlib import colormaps
 
     from rf_metrics import channel_metrics
-    from rf_spectra import ArrayGrid, cbf_spectrum, mvdr_spectrum, paths_to_response
+    from rf_spectra import (ArrayGrid, aod_spectrum_equirect, cbf_spectrum,
+                            delay_spectrum_equirect, equirect_to_perspective,
+                            mpc_spectrum_equirect, mvdr_spectrum,
+                            paths_to_response, tcbf_spectrum)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     grid = ArrayGrid.build(args.M, args.width, args.height, args.fov, device=device)
@@ -189,7 +236,8 @@ def generate_rows(args):
     out_dir = os.path.join(os.path.dirname(args.out) or ".", "comparison_previews")
     os.makedirs(out_dir, exist_ok=True)
 
-    optical_cell = render_optical_cell(args.scene_xml, args.rx, 0.0, args, "ours")
+    optical_cell = render_optical_cell(args.scene_xml, args.rx, args.yaw,
+                                       args, "ours")
 
     rows = []
     for scattering, depth in [(s, d) for s in args.scattering
@@ -204,39 +252,29 @@ def generate_rows(args):
         scene.add(Transmitter(name="tx", position=args.tx))
         for material in scene.radio_materials.values():
             material.scattering_coefficient = scattering
-        scene.add(Receiver(name="rx", position=args.rx, orientation=[0.0, 0.0, 0.0]))
+        scene.add(Receiver(name="rx", position=[float(v) for v in args.rx],
+                           orientation=[float(args.yaw), 0.0, 0.0]))
 
         paths = solver(scene=scene, max_depth=depth,
                        samples_per_src=args.samples, los=True,
                        specular_reflection=True, diffuse_reflection=True,
-                       refraction=False, synthetic_array=True, seed=42)
+                       refraction=False, synthetic_array=True, seed=args.seed)
         n_paths = int(np.asarray(paths.valid).sum())
         metrics = channel_metrics(paths) if n_paths else None
         response = paths_to_response(paths, args.time_interval, device=device)
 
         cells = {}
         for name, _, ported in SPECTRA:
-            if not ported:
-                cells[name] = {"missing": "not ported"}
-                continue
             try:
-                if name == "MVDR":
-                    _, spec_db = mvdr_spectrum(response, grid, args.diagonal_loading)
-                else:
-                    _, spec_db = cbf_spectrum(response, grid)
+                rgb = spectrum_panel(name, paths, response, grid, args)
             except ValueError as exc:
                 cells[name] = {"missing": str(exc)[:40]}
                 continue
-            arr = spec_db.cpu().numpy()
-            lo, hi = float(arr.min()), float(arr.max())
-            norm = np.clip((arr - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
-            rgb = (colormaps["jet"](norm)[..., :3] * 255).astype(np.uint8)
             fname = f"{name}_s{scattering:g}_d{depth}.png"
             imageio.imwrite(os.path.join(out_dir, fname), rgb)
             cells[name] = {
                 "image": os.path.join("comparison_previews", fname),
-                "params": {"normalisation": "global, from data",
-                           "dB range": f"{lo:.0f} .. {hi:.0f}"}}
+                "params": {"normalisation": "global, from data"}}
 
         if optical_cell:
             cells[OPTICAL[0]] = optical_cell
@@ -261,7 +299,12 @@ def main():
     ap.add_argument("--depth", type=int, nargs="+", default=[1])
     ap.add_argument("--view", default="00001.png")
     ap.add_argument("--tx", type=float, nargs=3, default=[6.905, 0.0, 0.287])
-    ap.add_argument("--rx", type=float, nargs=3, default=[3.0, -2.0, 0.0])
+    ap.add_argument("--rx", type=float, nargs=3, default=None,
+                    help="receiver position; defaults to the released test "
+                         "view's own pose so every row shares one camera")
+    ap.add_argument("--yaw", type=float, default=None,
+                    help="receiver yaw in radians; defaults with --rx")
+    ap.add_argument("--equirect-scale", type=int, default=3)
     ap.add_argument("--M", type=int, default=10)
     ap.add_argument("--width", type=int, default=300)
     ap.add_argument("--height", type=int, default=200)
@@ -270,6 +313,7 @@ def main():
     ap.add_argument("--samples", type=int, default=1_000_000)
     ap.add_argument("--time-interval", type=float, default=0.1)
     ap.add_argument("--diagonal-loading", type=float, default=0.0)
+    ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--variant", default="cuda_ad_mono_polarized")
     args = ap.parse_args()
 
@@ -281,9 +325,20 @@ def main():
     pose = recover_pose(args.root)
     if pose:
         position, yaw = pose
-        print(f"released test view pose: {position}, yaw {math.degrees(yaw):+.0f} deg")
+        print(f"released test view pose: {position}, "
+              f"yaw {math.degrees(yaw):+.0f} deg")
+        # Our rows default to that same pose. Comparing a column only means
+        # something if every cell in it looks the same way.
+        if args.rx is None:
+            args.rx = position
+        if args.yaw is None:
+            args.yaw = yaw
         released_optical = render_optical_cell(args.scene_xml, position, yaw,
                                                args, "released")
+    if args.rx is None:
+        args.rx = [3.0, -2.0, 0.0]
+    if args.yaw is None:
+        args.yaw = 0.0
 
     rows = released_rows(args.root, args.view, optical=released_optical)         + generate_rows(args)
     payload = {"columns": [{"name": OPTICAL[0], "algorithm": OPTICAL[1],

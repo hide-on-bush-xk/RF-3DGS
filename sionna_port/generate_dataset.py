@@ -65,6 +65,16 @@ class Config:
     # paper reports at 60 GHz: it gives 312,683 at depth 1. See
     # calibrate_paths.py for the sweep this came from.
     scattering_coefficient: float = 0.7
+    # Cheap views, decorrelated between views, and let the fit do the averaging.
+    #
+    # Sionna's solver shoots samples_per_src rays from a fixed lattice, so a low
+    # budget leaves visible sampling structure -- and reusing one seed makes that
+    # structure identical in every view, which is exactly the kind of error a
+    # multi-view fit cannot average away: it looks like a consistent feature of
+    # the field. Advancing the seed per view moves the lattice instead, so the
+    # residual is independent between views and the radiance field accumulates
+    # towards the high-sample answer while each view stays cheap.
+    per_view_seed: bool = True
     bandwidth_hz: float = 400e6     # link budget only; scales SNR and capacity
     dashboard: bool = True
 
@@ -132,7 +142,7 @@ def build_scene(cfg: Config):
     return scene
 
 
-def solve_paths(solver, scene, cfg: Config):
+def solve_paths(solver, scene, cfg: Config, view_index: int = 0):
     """0.19's scene.compute_paths, expressed with the 2.x PathSolver.
 
     reflection -> specular_reflection, scattering -> diffuse_reflection,
@@ -148,7 +158,7 @@ def solve_paths(solver, scene, cfg: Config):
                   refraction=cfg.refraction,
                   diffraction=cfg.diffraction,
                   synthetic_array=True,
-                  seed=cfg.seed)
+                  seed=cfg.seed + (view_index if cfg.per_view_seed else 0))
 
 
 def element_gain_fn(theta: torch.Tensor, phi: torch.Tensor) -> torch.Tensor:
@@ -212,7 +222,7 @@ def generate(cfg: Config):
             scene.remove("rx") if "rx" in scene.receivers else None
             scene.add(Receiver(name="rx", position=list(rx_loc),
                                orientation=[yaw, 0.0, 0.0]))
-            paths = solve_paths(solver, scene, cfg)
+            paths = solve_paths(solver, scene, cfg, view_index=len(specs))
             _, spec_db = spectrum_for_paths(paths, grid, cfg)
             specs.append(spec_db.cpu().numpy().astype(np.float32))
             poses.append((rx_loc, yaw))
@@ -332,6 +342,11 @@ def main():
                          "default, which yields almost no diffuse paths")
     ap.add_argument("--no-save-float", dest="save_float", action="store_false")
     ap.add_argument("--no-dashboard", dest="dashboard", action="store_false")
+    ap.add_argument("--samples-per-src", type=int, default=1_000_000,
+                    dest="samples_per_src")
+    ap.add_argument("--fixed-seed", dest="per_view_seed", action="store_false",
+                    help="reuse one sampling lattice for every view, which "
+                         "correlates the sampling residual across views")
     args = ap.parse_args()
     generate(Config(**vars(args)))
 

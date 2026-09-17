@@ -218,3 +218,48 @@ differs (this port takes it from the data, the tutorial from two probe
 positions), and the released spectra have sharper peaks, so some combination of
 `time_interval_ns`, the element pattern and `synthetic_array` still needs
 matching before a like-for-like evaluation.
+
+## All six spectra
+
+`rf_spectra.py` now covers the whole released set, in two families:
+
+* **CBF, TCBF, MVDR** beamform on the pinhole grid. TCBF is CBF with a Hann
+  taper over the array -- lower sidelobes, wider main lobe.
+* **MPC, Delay, AoD** do not beamform at all. Each path is splatted onto an
+  equirectangular grid at its angle of arrival with a Gaussian kernel, and the
+  result is resampled through the same pinhole model the beamformed spectra use,
+  so every panel in a row shares one camera. Delay colours the splat by
+  normalised delay, AoD by the departure angles.
+
+The tutorial loops over every path in Python to do that splatting, which is
+minutes for 300k paths; this scatters them in one `index_add_`.
+
+Against the released ground truth the projection spectra line up structurally
+almost pixel for pixel -- the silhouettes of the pillar and the wall match --
+which is the check that the splatting, the resampling and the pose recovery all
+agree. Brightness differs because the normalisation does: this port takes its
+range from the data, the tutorial from two probe positions.
+
+## Cheap views with a moving lattice
+
+`per_view_seed` (on by default) advances the solver seed per view. The reasoning
+is that a low `samples_per_src` leaves sampling structure in each spectrum, and
+reusing one seed makes that structure identical in every view -- the one kind of
+error a multi-view fit cannot average away, because it looks like a consistent
+feature of the field.
+
+`test_sampling_accumulation.py` measures it against a 4M-sample reference at the
+same pose, with 50k samples per view:
+
+| views averaged | lattice moves | lattice fixed |
+| --- | --- | --- |
+| 1 | 1.690 dB | 1.691 dB |
+| 4 | 1.577 dB | 1.691 dB |
+| 8 | **1.472 dB** | 1.691 dB |
+
+The fixed-lattice column is flat, which is the mechanism confirmed: averaging
+eight identical residuals changes nothing. Moving the lattice does accumulate,
+but only by 1.15x over eight views where independent noise would give sqrt(8) =
+2.83x. So most of the 1.69 dB is bias, not variance -- a low-sample solve
+systematically misses weak paths, and moving the lattice does not fix that. The
+technique buys back the variance half; the bias half still costs samples.

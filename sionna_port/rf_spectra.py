@@ -194,3 +194,163 @@ def mvdr_spectrum(response: torch.Tensor, grid: ArrayGrid,
     quad = torch.einsum("nhw,nhw->hw", aH_Rinv, grid.manifold).abs()
     p = 1.0 / quad.clamp_min(torch.finfo(quad.dtype).tiny)
     return p, 10.0 * torch.log10(p)
+
+
+# --------------------------------------------------------------------------
+# Projection spectra: MPC, Delay and AoD
+#
+# These are not beamformed. Each path is splatted onto an equirectangular grid
+# at its angle of arrival with a Gaussian kernel, and Delay and AoD colour that
+# splat by the path's delay or departure angle. The tutorial loops over every
+# path in Python, which is minutes for 300k paths; this scatters them in one go.
+# --------------------------------------------------------------------------
+
+def _gaussian_kernel(kernel_size: int, sigma: float, device=None):
+    size = int(kernel_size * sigma) | 1          # odd, as in the tutorial
+    axis = torch.arange(size, device=device, dtype=torch.float32) - size // 2
+    yy, xx = torch.meshgrid(axis, axis, indexing="ij")
+    k = torch.exp(-(xx ** 2 + yy ** 2) / (2 * sigma ** 2))
+    return k / k.sum(), size
+
+
+def equirect_splat(theta_rad: torch.Tensor, phi_rad: torch.Tensor,
+                   weights: torch.Tensor, scale: int = 3, sigma: float = 3.0,
+                   kernel_size: int = 3) -> torch.Tensor:
+    """Accumulate weighted Gaussian blobs on a [180*scale, 360*scale] grid.
+
+    `weights` is [P] for a scalar spectrum or [C, P] for one channel per path
+    attribute. Returns [C, 180*scale, 360*scale], indexed (theta, phi) with phi
+    running +180 to -180 left to right, matching the tutorial's layout.
+    """
+    device = theta_rad.device
+    if weights.dim() == 1:
+        weights = weights.unsqueeze(0)
+    channels = weights.shape[0]
+    h, w = 180 * scale, 360 * scale
+
+    kernel, size = _gaussian_kernel(kernel_size, sigma, device)
+    half = size // 2
+
+    theta_idx = (torch.rad2deg(theta_rad) * scale).round().long()
+    phi_idx = ((-torch.rad2deg(phi_rad) + 180.0) * scale).round().long()
+
+    offs = torch.arange(-half, half + 1, device=device)
+    dy, dx = torch.meshgrid(offs, offs, indexing="ij")
+    dy, dx = dy.reshape(-1), dx.reshape(-1)
+    kflat = kernel.reshape(-1)
+
+    ys = (theta_idx.unsqueeze(1) + dy.unsqueeze(0)).clamp_(0, h - 1)
+    xs = (phi_idx.unsqueeze(1) + dx.unsqueeze(0)).clamp_(0, w - 1)
+    flat = (ys * w + xs).reshape(-1)
+
+    out = torch.zeros(channels, h * w, device=device, dtype=weights.dtype)
+    for c in range(channels):
+        contrib = (weights[c].unsqueeze(1) * kflat.unsqueeze(0)).reshape(-1)
+        out[c].index_add_(0, flat, contrib)
+    return out.reshape(channels, h, w)
+
+
+def _path_arrays(paths, device=None):
+    """(amplitude, delay, AoA, AoD) for the valid paths, as torch tensors."""
+    a, tau = paths.cir(normalize_delays=False, out_type="torch")
+    a = a[0, :, 0, 0, :, 0]                       # [ant, path]
+    amp = a.abs().sum(dim=0) if a.dim() == 2 else a.abs()
+    tau = tau.reshape(-1)
+
+    def to_t(x):
+        return torch.as_tensor(np.asarray(x).reshape(-1), dtype=torch.float32,
+                               device=amp.device)
+
+    theta_r, phi_r = to_t(paths.theta_r), to_t(paths.phi_r)
+    theta_t, phi_t = to_t(paths.theta_t), to_t(paths.phi_t)
+    keep = torch.isfinite(tau) & (tau >= 0) & (amp > 0)
+    out = (amp[keep], tau[keep], theta_r[keep], phi_r[keep],
+           theta_t[keep], phi_t[keep])
+    if device is not None:
+        out = tuple(t.to(device) for t in out)
+    return out
+
+
+def mpc_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0):
+    """Per-path amplitude splatted at its angle of arrival, in dB."""
+    amp, _, theta_r, phi_r, _, _ = _path_arrays(paths)
+    img = equirect_splat(theta_r, phi_r, amp, scale, sigma)[0]
+    nonzero = img > 0
+    out = torch.full_like(img, float("nan"))
+    out[nonzero] = 10 * torch.log10(img[nonzero])
+    floor = out[nonzero].min() - 10 if nonzero.any() else torch.tensor(-200.0)
+    return torch.nan_to_num(out, nan=float(floor))
+
+
+def delay_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0):
+    """Amplitude in green and blue, normalised delay in red, as the tutorial has it."""
+    amp, tau, theta_r, phi_r, _, _ = _path_arrays(paths)
+    lo, hi = tau.min(), tau.max()
+    r_weight = amp * ((tau - lo) / (hi - lo).clamp_min(1e-30))
+    stacked = torch.stack([r_weight, amp, amp])
+    img = equirect_splat(theta_r, phi_r, stacked, scale, sigma)
+    return _log_rgb(img)
+
+
+def aod_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0):
+    """Departure zenith in red, departure azimuth in green, amplitude in blue."""
+    amp, _, theta_r, phi_r, theta_t, phi_t = _path_arrays(paths)
+    r_weight = amp * (torch.rad2deg(theta_t) / 180.0).clamp(0, 1)
+    g_weight = amp * (1.0 - (torch.rad2deg(phi_t) + 180.0) / 360.0).clamp(0, 1)
+    stacked = torch.stack([r_weight, g_weight, amp])
+    img = equirect_splat(theta_r, phi_r, stacked, scale, sigma)
+    return _log_rgb(img)
+
+
+def _log_rgb(img: torch.Tensor) -> torch.Tensor:
+    """10log10 with the tutorial's +150 dB offset, clipped at zero."""
+    out = torch.zeros_like(img)
+    nz = img > 0
+    out[nz] = 10 * torch.log10(img[nz]) + 150.0
+    return out.clamp_min(0.0)
+
+
+def equirect_to_perspective(equirect: torch.Tensor, width: int, height: int,
+                            fov_deg: float, yaw_rad: float = 0.0) -> torch.Tensor:
+    """Resample an equirectangular image through the same pinhole model.
+
+    `equirect` is [H, W] or [C, H, W]. The pixel directions come from
+    compute_angle_matrices, so the perspective views stay consistent with the
+    beamformed spectra, which are evaluated on that same grid.
+    """
+    single = equirect.dim() == 2
+    src = equirect.unsqueeze(0) if single else equirect
+    device = src.device
+    src_h, src_w = src.shape[-2:]
+
+    theta, phi = compute_angle_matrices(width, height, fov_deg, device=device)
+    phi = phi + yaw_rad
+
+    # Same index convention as equirect_splat.
+    y = (torch.rad2deg(theta) * (src_h / 180.0)).clamp(0, src_h - 1)
+    x = ((-torch.rad2deg(phi) + 180.0) * (src_w / 360.0)) % src_w
+
+    grid_y = (y / (src_h - 1)) * 2 - 1
+    grid_x = (x / (src_w - 1)) * 2 - 1
+    grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
+    out = torch.nn.functional.grid_sample(
+        src.unsqueeze(0), grid, mode="bilinear", padding_mode="border",
+        align_corners=True)[0]
+    return out[0] if single else out
+
+
+def tapering_matrix(M: int, tapering_level: float = 1.0, device=None):
+    """Hann taper over the array, the window TCBF applies to CBF's weights."""
+    x = torch.linspace(0, 1, M, device=device)
+    window = 0.5 * (1 - torch.cos(2 * math.pi * x))
+    return torch.outer(window, window).reshape(-1) * tapering_level
+
+
+def tcbf_spectrum(response: torch.Tensor, grid: "ArrayGrid",
+                  tapering_level: float = 1.0):
+    """CBF with a Hann-tapered weight vector: lower sidelobes, wider main lobe."""
+    taper = tapering_matrix(grid.M, tapering_level,
+                            device=grid.steering.device).to(grid.steering.dtype)
+    weights = grid.steering * taper.reshape(-1, 1, 1)
+    amp = torch.einsum("ml,mhw->hw", response.conj(), weights).abs()
+    return amp, 20.0 * torch.log10(amp.clamp_min(torch.finfo(amp.dtype).tiny))
