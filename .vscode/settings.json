@@ -1,3 +1,18 @@
 {
-    "cmake.sourceDirectory": "/Users/kexu/Documents/GitHub/RF-3DGS/SIBR_viewers"
+    "//": "Four environments exist for this repo; see sionna_port/README.md.",
+    "//train": "train.py / render.py / metrics.py need rf-3dgs: it is the only one with diff_gaussian_rasterization and simple_knn built.",
+    "//sionna": "sionna_port/ needs rf-sionna-win (Sionna 2.1 + GPU OptiX). Switch with the interpreter picker when working in that folder.",
+    "//gsplat": "gsplat lives in WSL (rf-gsplat, rf-sionna2) because it cannot build under VS 2026. Use the WSL extension for that work.",
+    "python.defaultInterpreterPath": "C:\\Users\\Ke\\miniconda3\\envs\\rf-3dgs\\python.exe",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}",
+        "${workspaceFolder}/sionna_port"
+    ],
+    "python.terminal.activateEnvironment": true,
+    "files.exclude": {
+        "**/__pycache__": true
+    },
+    "cmake.sourceDirectory": "${workspaceFolder}/SIBR_viewers",
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
 }

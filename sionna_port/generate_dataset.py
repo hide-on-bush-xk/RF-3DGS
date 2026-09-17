@@ -14,11 +14,14 @@ import argparse
 import json
 import math
 import os
+import time
 from dataclasses import dataclass, asdict
+from datetime import datetime
 
 import numpy as np
 import torch
 
+from rf_metrics import channel_metrics, frequency_response, spectrum_stats
 from rf_spectra import ArrayGrid, cbf_spectrum, mvdr_spectrum, paths_to_response
 
 # Sionna RT 2.x. The 0.19 imports (sionna.rt.antenna, sionna.channel) are gone;
@@ -62,6 +65,8 @@ class Config:
     # paper reports at 60 GHz: it gives 312,683 at depth 1. See
     # calibrate_paths.py for the sweep this came from.
     scattering_coefficient: float = 0.7
+    bandwidth_hz: float = 400e6     # link budget only; scales SNR and capacity
+    dashboard: bool = True
 
 
 # --------------------------------------------------------------------------
@@ -198,7 +203,8 @@ def generate(cfg: Config):
     # Pass 1: collect every spectrum in dB, so the normalisation range comes from
     # the data instead of two hand-picked probe positions.
     print(f"pass 1/2: {len(rx_locs)} positions x {len(VIEW_YAWS)} views")
-    specs, poses = [], []
+    specs, poses, per_view, cfr_curve = [], [], [], None
+    t_start = time.time()
     for i, rx_loc in enumerate(rx_locs):
         if i % 50 == 0:
             print(f"  {i}/{len(rx_locs)}")
@@ -210,6 +216,21 @@ def generate(cfg: Config):
             _, spec_db = spectrum_for_paths(paths, grid, cfg)
             specs.append(spec_db.cpu().numpy().astype(np.float32))
             poses.append((rx_loc, yaw))
+
+            if cfg.dashboard:
+                try:
+                    per_view.append(channel_metrics(
+                        paths, bandwidth_hz=cfg.bandwidth_hz).as_dict())
+                except ValueError:
+                    pass
+                if cfr_curve is None:
+                    try:
+                        freqs, mag_db = frequency_response(
+                            paths, cfg.frequency, cfg.bandwidth_hz)
+                        cfr_curve = {"frequency_hz": freqs.tolist(),
+                                     "magnitude_db": np.asarray(mag_db).reshape(-1).tolist()}
+                    except Exception as exc:
+                        print(f"  cfr unavailable: {type(exc).__name__}: {exc}")
             scene.remove("rx")
 
     all_db = np.stack(specs)
@@ -238,12 +259,63 @@ def generate(cfg: Config):
                       cfg.width / 2, cfg.height / 2)
     write_images_txt(os.path.join(cfg.out_dir, "sparse", "0", "images.txt"), images)
 
+    elapsed = time.time() - t_start
     meta = asdict(cfg) | {"spec_min_db": spec_min, "spec_max_db": spec_max,
                           "num_images": len(images), "colormap": "jet",
-                          "normalization": "global"}
+                          "normalization": "global",
+                          "seconds": elapsed,
+                          "views_per_second": len(images) / max(elapsed, 1e-9)}
     with open(os.path.join(cfg.out_dir, "generation_meta.json"), "w") as fid:
         json.dump(meta, fid, indent=1)
-    print(f"wrote {len(images)} views to {cfg.out_dir}")
+    print(f"wrote {len(images)} views to {cfg.out_dir} "
+          f"({len(images)/max(elapsed,1e-9):.1f} views/s)")
+
+    if cfg.dashboard and per_view:
+        report = build_report(cfg, meta, per_view, all_db, cfr_curve)
+        path = os.path.join(cfg.out_dir, "run_report.json")
+        with open(path, "w", encoding="utf-8") as fid:
+            json.dump(report, fid, indent=1)
+        try:
+            import dashboard
+            html = dashboard.render(report,
+                                    preview_dir=os.path.join(cfg.out_dir, "images"))
+            out_html = os.path.join(cfg.out_dir, "dashboard.html")
+            with open(out_html, "w", encoding="utf-8", newline="\n") as fid:
+                fid.write(html)
+            print(f"dashboard: {out_html}")
+        except Exception as exc:
+            print(f"dashboard skipped: {type(exc).__name__}: {exc}")
+
+
+def build_report(cfg, meta, per_view, all_db, cfr_curve):
+    """One generation run in the same shape the ablation dashboard consumes."""
+    keys = per_view[0].keys()
+    run = {
+        "label": f"{cfg.spectrum}, s={cfg.scattering_coefficient:g}, "
+                 f"depth={cfg.max_depth}",
+        "scattering_coefficient": cfg.scattering_coefficient,
+        "max_depth": cfg.max_depth,
+        "positions": len(per_view),
+        "mean_solve_seconds": meta["seconds"] / max(len(per_view), 1),
+        "metrics_mean": {k: float(np.mean([p[k] for p in per_view])) for k in keys},
+        "metrics_std": {k: float(np.std([p[k] for p in per_view])) for k in keys},
+        "per_position": per_view,
+        "spectrum": spectrum_stats(all_db),
+    }
+    if cfr_curve:
+        run["cfr"] = cfr_curve
+    return {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "scene_xml": cfg.scene_xml,
+        "frequency_hz": cfg.frequency,
+        "bandwidth_hz": cfg.bandwidth_hz,
+        "M": cfg.M,
+        "spectrum": cfg.spectrum,
+        "samples_per_src": cfg.samples_per_src,
+        "positions": len(per_view),
+        "throughput_views_per_second": meta["views_per_second"],
+        "runs": [run],
+    }
 
 
 def main():
@@ -259,6 +331,7 @@ def main():
                     help="applied to every material; 0 reproduces Sionna's "
                          "default, which yields almost no diffuse paths")
     ap.add_argument("--no-save-float", dest="save_float", action="store_false")
+    ap.add_argument("--no-dashboard", dest="dashboard", action="store_false")
     args = ap.parse_args()
     generate(Config(**vars(args)))
 
