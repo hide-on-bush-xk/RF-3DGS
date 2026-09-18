@@ -320,7 +320,23 @@ def multichannel_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0,
     and Delay pictures, no channel is a product of an angle and an amplitude:
     the amplitude has its own channel.
     """
-    amp, tau, theta_r, phi_r, theta_t, phi_t = _path_arrays(paths)
+    return multichannel_from_arrays(*_path_arrays(paths), scale=scale, sigma=sigma, floor_db=floor_db)
+
+
+def multichannel_from_arrays(amp, tau, theta_r, phi_r, theta_t, phi_t,
+                             scale: int = 3, sigma: float = 3.0, floor_db: float = -200.0):
+    """The same, from per-path tensors (amplitude, delay [s], AoA, AoD in rad).
+
+    Split out so a smoke test can feed one synthetic path and check that the
+    channels decode to exactly that path. Zero paths is a valid input: every
+    pixel gets floor_db and zeros.
+    """
+    device = amp.device
+    h, w_px = 180 * scale, 360 * scale
+    out = torch.zeros(5, h, w_px, device=device, dtype=torch.float32)
+    out[0] = floor_db
+    if amp.numel() == 0:
+        return out
     w = amp * amp
     stacked = torch.stack([w, w * torch.cos(phi_t), w * torch.sin(phi_t),
                            w * theta_t, w * tau * 1e9])
@@ -328,7 +344,6 @@ def multichannel_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0,
     power, cos_az, sin_az, zen, delay = img
     hit = power > 0
     p = power.clamp_min(1e-300)
-    out = torch.zeros(5, *power.shape, device=power.device, dtype=power.dtype)
     out[0] = torch.where(hit, 10 * torch.log10(p), torch.full_like(power, floor_db))
     out[1] = torch.where(hit, cos_az / p, torch.zeros_like(cos_az))
     out[2] = torch.where(hit, sin_az / p, torch.zeros_like(sin_az))
