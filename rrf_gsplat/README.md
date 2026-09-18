@@ -11,7 +11,7 @@ Runs in WSL (`rf-gsplat`, Python 3.10, torch 2.9.1+cu130, gsplat 1.6.0), reading
 the repo from `/mnt/c`. Datasets come from `sionna_port/generate_dataset.py` on
 Windows, which also writes the float spectra the evaluation needs.
 
-```
+```text
 train_rrf.py          the fine-tune; --mode rgb | db | power; evaluation in dB and in PSNR
 jet.py                matplotlib's jet and its inverse in torch (to score RGB models in dB)
 renormalize.py        remap a dataset's float spectra to PNGs: global percentile / global min-max / per view
@@ -48,7 +48,7 @@ Adam ε 1e-15), λ_SSIM 0.2, one random view per step — is the same for all th
 
 ## Usage
 
-```
+```bash
 # Windows: datasets (float + PNG), then the global-percentile remap
 python sionna_port/generate_dataset.py --scene-xml ... --rx-loc-file ... --out-dir RF-3DGS_dataset/regenerated/3dgs_MVDR_100 --spectrum MVDR
 python rrf_gsplat/renormalize.py RF-3DGS_dataset/regenerated/3dgs_MVDR_100 RF-3DGS_dataset/regenerated/3dgs_MVDR_100_gpct --norm global-pct --pct 1 99.99
@@ -95,13 +95,22 @@ Per-image normalisation costs 6 dB PSNR on MVDR even when the evaluation is
 handed each test image's true range. The CBF weakness the paper reports has
 this in it.
 
+**Does it hold under other data?** With the tutorial's own per-material
+definitions (`--materials tutorial`, span 83 dB): rgb 17.29 / 5.33 dB, db
+18.04 / 4.68 dB. At the tutorial's 2.4 GHz with those materials — the
+released data's setting — rgb reaches 16.87 dB (released checkpoint on the
+released data: 16.02), db 17.66. On CBF: rgb 13.68 / 7.54, db 13.95 / 7.04.
+The dB target wins in every setting tried.
+
 **Ablations** (`db`): SH0 16.75 → SH1 17.43 → SH3 18.75 dB, so view dependence
 is where the capacity goes; frozen opacity −0.22 dB; 2k iterations (36 s) 17.45;
 160 of 800 positions −0.06 dB, 40 positions −1.3 dB.
 
 **Transmitter moved** (Tx-B at (8.2, −5.4, 2.0), Tx-A's dB range): cold start
 reaches PSNR 17 in 1500 iterations (≈ 27 s), warm start from the Tx-A `db`
-model in 1250; in `rgb` a warm start *hurts* (2000 → 3250). End to end on this
-machine, one transmitter move costs about an hour with the tutorial pipeline
-(dataset on the CPU, 1.1 s/view) and about 6 minutes here — 1.5 minutes if
-160 positions are enough, which the ablation says they are.
+model in 1250; in `rgb` a warm start *hurts* (2000 → 3250). Measured end to
+end with a 160-position dataset (33 s to generate) the RRF reaches PSNR 17
+after 32 s of training cold, 23 s warm — **about one minute per transmitter
+move**, at a cost of 0.4 dB in the final PSNR against the 800-position
+dataset (17.45 vs 17.86). The tutorial pipeline on this machine takes about an
+hour for the dataset alone (CPU, 1.1 s/view).

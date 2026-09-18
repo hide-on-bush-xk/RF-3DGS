@@ -252,7 +252,7 @@ $$\mathbb{E}_{\mathbf{w}\sim\mathcal N(0,I)}\bigl[(\mathbf{J}_n^\top \mathbf{w})
 | 下一步测哪 | 无 | 梯度灵敏度选点 | 0.30 → 0.17 dB(随便选 0.25) |
 | 输出形态 | 图片 | 图片 + 结构化 CIR(npz)+ dashboard | Aerial 风格 |
 | RRF 训练本身 | INRIA 光栅器,RGB 伪彩 | gsplat,单通道 dB 目标 | 复现 15.97 vs 16.02;dB 目标 RMSE −11%,到同质量快 3.6× |
-| Tx 移动后重建 | ≈1 h 数据(CPU)+ 54 s 微调 | 5.4 min 数据 + 27 s 微调;160 个位置 ≈1.5 min | 热启动 db 省 17% 步数,rgb 反而有害 |
+| Tx 移动后重建 | ≈1 h 数据(CPU)+ 54 s 微调 | **实测 65 s**:160 个位置 33 s 生成 + 32 s 微调到 PSNR 17(热启动 56 s) | 终值比 800 位置低 0.4 dB;rgb 热启动反而有害 |
 
 ---
 
@@ -301,9 +301,13 @@ $$\mathbb{E}_{\mathbf{w}\sim\mathcal N(0,I)}\bigl[(\mathbf{J}_n^\top \mathbf{w})
 - **归一化**:逐图 min/max(教程的 CBF/TCBF 做法)在 MVDR 上 18.15 → 11.97 dB,CBF 上 dB 误差 7.54 → 11.03——即使评估时给了 oracle 范围。
 - **消融**:SH0 16.75 → SH3 18.75(视角依赖是主要表达力);opacity 冻结 −0.22 dB;2k 步 36 s 17.45 dB;160 个位置 −0.06 dB。
 - **Tx 移动**:冷启动 1500 步到 17 dB(≈27 s),热启动 1250 步;rgb 热启动反而 2000 → 3250 步。
-  一次 Tx 移动的总成本:原流水线本机 ≈1 h,本工作 ≈6 min(160 个位置 ≈1.5 min)。
+  一次 Tx 移动的总成本(实测):原流水线本机 ≈1 h;本工作 800 个位置 ≈6 min,160 个位置 **65 s**(33 s 生成 + 32 s 训练),热启动 56 s。
+- **稳健性**:教程逐材料定义(修正单位错误后)下 db 18.04 vs rgb 17.29;与发布数据同设置(2.4 GHz + 教程材料)下
+  rgb 16.87(发布 checkpoint 16.02)、db 17.66;CBF 上 db 13.95 vs rgb 13.68。三套数据 db 都赢。
+- **教程材料的单位错误**:cell 6 的电导率公式把频率除以 1e-9,ITU 类材料全成了 1e16–1e24 S/m 的完美导体;
+  `sionna_port/tutorial_materials.py` 提供原样与修正两种变体。
 - **工程**:torch 侧 SH 走 autograd 一步 101 ms;改成线性映射 + gsplat CUDA SH 后 49 ms(rgb)/ 22 ms(db);INRIA 光栅器 27 ms 仍更快。
-- **未做**:教程逐材料定义(见 stage2_notes 表)未接入;所有结果仍是单场景、单频、合成数据。
+- **未做**:2DGS / MCMC 致密化、多通道 PDP 目标、相位与频率;所有结果仍是单场景、合成数据(两个频率、两套材料)。
 
 ## 附:复现路径
 
