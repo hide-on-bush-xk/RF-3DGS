@@ -22,10 +22,11 @@ CSS = """
 
 GROUPS = {
     "colour": ("Colour function", "e2_"),
-    "norm": ("Normalisation", "e1_"),
+    "norm": ("Normalisation", "e1"),          # e1_ (60 GHz) and e1b_ (2.4 GHz, the released setting)
     "ablate": ("Ablations (dB mode)", "a_"),
     "txmove": ("Transmitter moved", "t_"),
     "baseline": ("Baseline on the released data", "c0_"),
+    "multi": ("Multi-channel targets", "m_"),
 }
 
 
@@ -37,6 +38,10 @@ def collect(rrf_dir):
         if os.path.exists(p):
             with open(p, encoding="utf-8") as fid:
                 found[key] = json.load(fid)
+    enc = os.path.join(rrf_dir, "encoding_comparison.json")
+    if os.path.exists(enc):
+        with open(enc, encoding="utf-8") as fid:
+            found["encoding"] = json.load(fid)
     strip = os.path.join(rrf_dir, "compare_colour_modes.png")
     if os.path.exists(strip):
         import base64
@@ -57,6 +62,10 @@ def _label(r):
         bits.append(f"{r['iterations']//1000}k it")
     if r["warm"]:
         bits.append("warm")
+    if r.get("densify", "none") != "none":
+        bits.append(f"MCMC{'' if not r.get('gaussians') else ' ' + format(r['gaussians'], ',')}")
+    elif r.get("geometry") == "trained":
+        bits.append("geometry trained")
     src = r["source"].replace("3dgs_", "").replace("_100", "")
     return f"{src} · " + ", ".join(bits)
 
@@ -191,9 +200,30 @@ def render(found):
                  f"{r['rmse_db']:.2f}", f"{r['train_s']:.0f}"] for r in rows]
         cards.append(
             '<figure class="card"><h2>Ablations on the dB model</h2>'
-            '<p class="rrf-note">SH degree, frozen opacity, fewer training views, fewer iterations.</p>'
+            '<p class="rrf-note">SH degree, frozen opacity, fewer training views, fewer iterations, '
+            'geometry unfrozen, and gsplat\'s MCMC densification (which, unlike the INRIA densifier '
+            'gated by densify_until_iter, runs inside the 30k&rarr;40k fine-tune).</p>'
             + _table(["run", "PSNR (jet)", "SSIM", "RMSE dB", "train s"], body)
             + '</figure>')
+    if by["multi"]:
+        rows = by["multi"]
+        keys = sorted({k for r in rows for k in r.get("extra", {})})
+        body = [[_label(r), f"{r['psnr_rgb']:.2f}", f"{r['rmse_db']:.2f}"]
+                + [f"{r['extra'][k]:.2f}" if k in r.get("extra", {}) else "&ndash;" for k in keys] for r in rows]
+        enc = found.get("encoding")
+        enc_html = ""
+        if enc:
+            enc_html = _table(["decoded from", "AoD azimuth RMSE (deg)", "AoD zenith RMSE (deg)", "delay RMSE (ns)"],
+                              [["one channel per quantity (MULTI)", f"{enc['multi']['az']:.2f}", f"{enc['multi']['zen']:.2f}", f"{enc['multi']['delay']:.2f}"],
+                               ["angle &times; amplitude RGB (the tutorial's AoD encoding)", f"{enc['aod3']['az']:.2f}", f"{enc['aod3']['zen']:.2f}", "&ndash;"]])
+        cards.append(
+            '<figure class="card wide"><h2>Multi-channel targets</h2>'
+            '<p class="rrf-note">gsplat rasterises any number of channels, so path power, departure '
+            'azimuth, departure zenith and delay each get their own channel instead of the tutorial\'s '
+            'angle &times; amplitude RGB pictures. Per-channel errors on pixels a path reaches; the second '
+            'table decodes both representations to angles on the same held-out views.</p>'
+            + _table(["run", "PSNR (jet)", "RMSE dB (mask ch.)"] + [k.replace("rmse_", "RMSE ") for k in keys], body)
+            + enc_html + '</figure>')
     if by["txmove"]:
         cold = [r for r in by["txmove"] if not r["warm"]]
         warm = [r for r in by["txmove"] if r["warm"]]

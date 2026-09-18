@@ -240,7 +240,10 @@ def channel_ranges(all_db: np.ndarray, kind: str):
     """Per-channel (min, max) for a multi-channel dataset, [C, 2]."""
     if kind == "MULTI":
         power = all_db[:, 0]
-        hit = power > power.min() + 0.5                      # above the floor
+        # Pixels a path reaches. The pinhole resampling blends the -200 dB
+        # floor into edge pixels, so "above the floor" is not enough; nothing
+        # physical sits below -150 dB here.
+        hit = power > -150.0
         rng = [[float(np.percentile(power[hit], 1)), float(np.percentile(power[hit], 99.99))],
                [0.0, 1.0], [0.0, 1.0],
                [float(np.percentile(all_db[:, 3][hit], 0.1)), float(np.percentile(all_db[:, 3][hit], 99.9))]]

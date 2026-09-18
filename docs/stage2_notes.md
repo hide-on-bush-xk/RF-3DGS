@@ -319,3 +319,14 @@ ftheta 需要 `FThetaCameraDistortionParameters` torch 类和 `with_ut=True`。�
 但**两张 180° fisheye(前/后半球)**把接缝从 4 条减到 1 条(赤道大圆)、消掉极冠、且等距投影的立体角 Jacobian 光滑(sinθ/θ)。
 代价:生成端要按 fisheye 角网格算谱(CBF/MVDR 的导向矢量网格可以任意定义,投影谱本来就是等距柱状重采样),训练端加
 `camera_model="fisheye"`(建议 `with_ut=True`)。
+
+### E1 重跑:发布数据的设定(CBF,2.4 GHz,教程材料;数据集 3dgs_CBF_24ghz_tut_*,08:01)
+
+| 归一化 | mode | PSNR(jet) | SSIM | RMSE dB(逐图用 oracle 范围) |
+| --- | --- | --- | --- | --- |
+| 全局 1/99.99 百分位 | rgb | 13.00 | 0.511 | 9.32 |
+| 逐图 min/max(教程对 CBF 的做法) | rgb | 12.49 | 0.503 | **13.35** |
+| 全局 | **db** | **13.39** | **0.542** | **8.54** |
+
+- 在发布数据的频率与材料下结论不变:逐图归一化让 dB 误差 +4.0 dB(+43%),PSNR −0.5;db 目标 RMSE −8%。
+- 2.4 GHz 的 CBF 比 60 GHz 版(13.68 / 7.54)更难一点;全局范围 −160.8…−1.0 dB 里跨度更大。

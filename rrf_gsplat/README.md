@@ -93,7 +93,15 @@ curve (see the strip on the dashboard), which the value modes cannot do.
 
 Per-image normalisation costs 6 dB PSNR on MVDR even when the evaluation is
 handed each test image's true range. The CBF weakness the paper reports has
-this in it.
+this in it. Rerun at the released data's own setting (CBF, 2.4 GHz, the
+tutorial's materials — verified below): global 13.00 / 9.32 dB, per image
+12.49 / 13.35 dB, global with the `db` target 13.39 / 8.54 dB.
+
+**The released data are 2.4 GHz.** Generated at the released datasets' exact
+poses (`--poses-from`), the CBF power the tutorial writes to `cbf_power.csv`
+matches our 2.4 GHz spectra within 1.6 dB and the 60 GHz ones by 34 dB
+(`output/freqcheck/`); the notebook's dataset cells set 2.4e9, the paper says
+60 GHz.
 
 **Does it hold under other data?** With the tutorial's own per-material
 definitions (`--materials tutorial`, span 83 dB): rgb 17.29 / 5.33 dB, db
