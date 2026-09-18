@@ -134,14 +134,23 @@ gives 19.43 / 3.83. Read as a decomposition: **24 % of the unfreezing gain
 is a transferable geometric correction, 76 % is specific to the transmitter
 it was fitted on.** That is not a frozen-versus-joint artefact — the adapted
 geometry frozen on Tx-A itself, colours refit from zero, reaches 21.55 /
-2.81, the same as the joint fit. `diag_shape.py` finds no directional
-signature of Tx-A in the change (rotation axes isotropic to the Tx
-direction; extent along it +7 % against +3 % along other directions; the
-short axis aligns *less* with surface normals afterwards, so this is not a
-move towards 2DGS-like flatness). The position basis stays Tx-invariant;
-the shape adaptation is Tx-specific without being Tx-directional — the
-measured cost of a colour function with no incident-direction argument.
-gsplat's MCMC densification with its default
+2.81, the same as the joint fit. Two alternatives were tested and fail:
+the gain is not the geometry absorbing the dB-domain mixing bias (the
+`power` mode, which composites in the linear domain, gains the same
+−27.5 %: 3.97 → 2.88), and it is not a generic re-allocation of capacity
+that any transmitter would supply (the geometry adapted on a third
+transmitter, Tx-C in the main room, carried to Tx-B is *worse* than the
+visual geometry: 4.95 against 4.82 in-range RMSE). `diag_shape.py` finds no
+directional signature of the transmitter in the change (rotation axes
+isotropic to the Tx direction; extent along it +7 % against +3 %
+elsewhere), and the visual checkpoint is needle-like rather than disc-like
+(s_mid/s_min median 3.5; discs 15 %, needles 36 %), so the surface-normal
+test only applies to the disc subset, where alignment gets 5° worse. The
+position basis stays Tx-invariant; the shape adaptation carries
+transmitter-specific information without being a stretch towards the
+transmitter — the measured cost of a colour function with no
+incident-direction argument, and an open question whether a degree-1
+incident-direction term would recover it. gsplat's MCMC densification with its default
 hyper-parameters diverges from this converged start (NaN loss by 4k
 iterations at either cap); a low-noise, late-start, relocate-only
 configuration is the next thing to try.
@@ -171,18 +180,34 @@ learned channels, and δ(a/b)/(a/b) = √((δa/a)² + (δb/b)²) is unbounded as
 the amplitude channel → 0. The gain of one channel per quantity is
 conditioning, not capacity.
 
-Splat width in degrees: the equirect grid is 1/3° per pixel, so σ = 3 px is
-1°, ten times sharper than an M = 10 array resolves (θ₃dB ≈ 102°/M = 10.2°).
-A σ = 1 (0.33°) target trains worse (zenith median 1.5°, P90 27°): its
-bandwidth exceeds what the field represents. Matching σ to the array's
-beamwidth (≈ θ₃dB/2.355 ≈ 4.3°, 13 px) would make the six spectra comparable
-at one angular resolution and take σ off the list of free parameters.
+Splat width as a measurement, not a hyper-parameter: sweeping σ over
+0.33° / 1° / 2° / 4.3° (1 / 3 / 6 / 13 equirect pixels, (cos, sin) target),
+the decoded azimuth error is smallest at **σ\* ≈ 2°** (median 0.57°, P90
+5.3°; 0.33° gives 0.93° / 9.7°, 4.3° gives 0.70° / 6.2°). That minimum is
+the field's representation bandwidth: θ₃dB = 2.355 σ\* ≈ 4.7°, i.e. the
+radiance field resolves angles like an M ≈ 22 array (the paper's M = 10
+array has θ₃dB ≈ 10°). Zenith and delay keep improving with smoother
+targets. Caveat: the set of pixels a path reaches grows with σ (8.8M →
+32M), so the rows are not scored on one support; a fixed-support version
+is pending.
 
 **Transmitter moved** (Tx-B at (8.2, −5.4, 2.0), Tx-A's dB range): cold start
-reaches PSNR 17 in 1500 iterations (≈ 27 s), warm start from the Tx-A `db`
-model in 1250; in `rgb` a warm start *hurts* (2000 → 3250). Measured end to
-end with a 160-position dataset (33 s to generate) the RRF reaches PSNR 17
-after 32 s of training cold, 23 s warm — **about one minute per transmitter
-move**, at a cost of 0.4 dB in the final PSNR against the 800-position
-dataset (17.45 vs 17.86). The tutorial pipeline on this machine takes about an
-hour for the dataset alone (CPU, 1.1 s/view).
+reaches PSNR 17 in 1500 iterations, warm start from the Tx-A `db` model in
+1250; in `rgb` a warm start *hurts* (2000 → 3250). The cost of one move, as
+the full chain (dataset + training + evaluation) on an RTX 3060 12 GB held
+exclusively, per the reporting contract in `CLAUDE.md`:
+
+| pipeline | dataset (3200 views unless stated) | fine-tune | evaluation | total |
+| --- | --- | --- | --- | --- |
+| as published: Sionna 0.19 + TF, INRIA `train.py` 30k→40k | MISSING (the 1.1 s/view CPU figure was taken beside a running GPU job; re-measurement pending) | 272 s incl. its own test pass | (inside) | MISSING |
+| as published + engineering fixes: Sionna 2.1 on the GPU, same spectra (2.4 GHz, tutorial materials, M = 10), INRIA `train.py` | 222 s (14.4 views/s) | 272 s | (inside) | ≈ 8.2 min |
+| this work, full data: 800 positions, `db`, gsplat, 10k it | 311 s (10.3 views/s, 60 GHz) | 168 s | 35 s | 8.6 min |
+| this work, method: 160 positions, `db`, 2k it | 33 s (640 views) | 36 s | 35 s | **≈ 1.7 min** (live page: 104 s measured click-to-render, 2k it, 32-position test) |
+
+Decomposition of the speed-up against the published pipeline: the
+**engineering** part (ray tracing on the GPU through Sionna 2.1) takes the
+dataset from ~1 h (MISSING until re-measured) to under 4 min; the **method**
+part (the dB target converging 3.6× sooner, 160 positions losing 0.06 dB
+on Tx-A and 0.4 dB on Tx-B, 2k iterations) takes the rest from 8 min to
+under 2. Training alone is not the number: at 2k iterations the evaluation
+pass is as long as the training.
