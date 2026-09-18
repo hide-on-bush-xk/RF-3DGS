@@ -85,13 +85,29 @@ def main():
     out = {"n": int(len(idx)), "alive_frac": float(alive.mean())}
     print(f"{len(idx):,} Gaussians sampled from the {alive.mean():.0%} with opacity > 0.01")
 
-    # 1. anisotropy
+    # 1. anisotropy -- and whether these are discs or needles. s_max/s_min alone
+    # cannot tell: a disc has s_max ~ s_mid >> s_min (its short axis is a real
+    # direction, the normal); a needle has s_max >> s_mid ~ s_min (its short
+    # axis is degenerate in the plane normal to the long axis, so its direction
+    # is numerical noise). s_mid/s_min separates them.
     an0, an1 = s0.max(1) / s0.min(1), s1.max(1) / s1.min(1)
+    srt0, srt1 = np.sort(s0, 1), np.sort(s1, 1)               # ascending: min, mid, max
+    mid0, mid1 = srt0[:, 1] / srt0[:, 0], srt1[:, 1] / srt1[:, 0]
+    top0, top1 = srt0[:, 2] / srt0[:, 1], srt1[:, 2] / srt1[:, 1]
+    disc0, disc1 = (mid0 > 3) & (top0 < 3), (mid1 > 3) & (top1 < 3)
+    needle0, needle1 = (top0 > 3) & (mid0 < 3), (top1 > 3) & (mid1 < 3)
     print(f"1. anisotropy s_max/s_min: before median {np.median(an0):.2f} (P90 {np.percentile(an0, 90):.1f}), "
           f"after median {np.median(an1):.2f} (P90 {np.percentile(an1, 90):.1f}); ratio after/before median {np.median(an1/an0):.3f}, "
           f"flattened (ratio > 1.2): {(an1/an0 > 1.2).mean():.1%}, rounded (< 0.83): {(an1/an0 < 0.83).mean():.1%}")
+    print(f"   s_mid/s_min: before median {np.median(mid0):.2f} (P10 {np.percentile(mid0, 10):.2f}, P90 {np.percentile(mid0, 90):.1f}), after {np.median(mid1):.2f}; "
+          f"s_max/s_mid: before median {np.median(top0):.2f}, after {np.median(top1):.2f}")
+    print(f"   discs (s_mid/s_min > 3, s_max/s_mid < 3): before {disc0.mean():.1%}, after {disc1.mean():.1%} | "
+          f"needles (s_max/s_mid > 3, s_mid/s_min < 3): before {needle0.mean():.1%}, after {needle1.mean():.1%}")
     out["anisotropy"] = {"before_median": float(np.median(an0)), "after_median": float(np.median(an1)),
-                         "flattened_frac": float((an1 / an0 > 1.2).mean()), "rounded_frac": float((an1 / an0 < 0.83).mean())}
+                         "flattened_frac": float((an1 / an0 > 1.2).mean()), "rounded_frac": float((an1 / an0 < 0.83).mean()),
+                         "mid_over_min_before": float(np.median(mid0)), "mid_over_min_after": float(np.median(mid1)),
+                         "disc_frac_before": float(disc0.mean()), "disc_frac_after": float(disc1.mean()),
+                         "needle_frac_before": float(needle0.mean()), "needle_frac_after": float(needle1.mean())}
 
     # 2. shortest axis against the surface normal
     import mitsuba as mi
@@ -109,8 +125,29 @@ def main():
     print(f"2. shortest axis vs surface normal ({near.sum():,} Gaussians within 0.2 m of a surface): "
           f"before median {np.median(a0):.1f} deg (within 20 deg: {(a0 < 20).mean():.1%}), after median {np.median(a1):.1f} deg "
           f"(within 20 deg: {(a1 < 20).mean():.1%}); random axes would give median 60 deg")
+    # the test that is well defined for a needle: does the long axis lie in the
+    # tangent plane (90 deg from the normal)?
+    def long_axis_angle(R, s):
+        k = s.argmax(1)
+        ax = R[np.arange(len(R)), :, k]
+        c = np.abs((ax * n).sum(1)) / (np.linalg.norm(ax, axis=1) * np.linalg.norm(n, axis=1) + 1e-12)
+        return np.degrees(np.arccos(np.clip(c, 0, 1)))
+    l0, l1 = long_axis_angle(R0, s0)[near], long_axis_angle(R1, s1)[near]
+    dn, dn1 = disc0[near], disc1[near]
+    nd, nd1 = needle0[near], needle1[near]
+    print(f"   longest axis vs normal: before median {np.median(l0):.1f} deg (within 20 deg of the tangent plane, i.e. > 70: {(l0 > 70).mean():.1%}), "
+          f"after median {np.median(l1):.1f} deg (> 70: {(l1 > 70).mean():.1%})")
+    if dn.sum() > 100:
+        print(f"   discs only ({dn.sum():,}): short axis vs normal before median {np.median(a0[dn]):.1f}, after (same Gaussians) {np.median(a1[dn]):.1f} deg")
+    if nd.sum() > 100:
+        print(f"   needles only ({nd.sum():,}): long axis vs normal before median {np.median(l0[nd]):.1f}, after {np.median(l1[nd]):.1f} deg")
     out["normal_alignment"] = {"before_median_deg": float(np.median(a0)), "after_median_deg": float(np.median(a1)),
-                               "before_within20": float((a0 < 20).mean()), "after_within20": float((a1 < 20).mean())}
+                               "before_within20": float((a0 < 20).mean()), "after_within20": float((a1 < 20).mean()),
+                               "long_axis_before_median": float(np.median(l0)), "long_axis_after_median": float(np.median(l1)),
+                               "disc_short_before": float(np.median(a0[dn])) if dn.sum() else None,
+                               "disc_short_after": float(np.median(a1[dn])) if dn.sum() else None,
+                               "needle_long_before": float(np.median(l0[nd])) if nd.sum() else None,
+                               "needle_long_after": float(np.median(l1[nd])) if nd.sum() else None}
 
     # 3. does the change know where Tx-A is?
     dA = np.array(cfg.tx_a) - mu; dA /= np.linalg.norm(dA, axis=1, keepdims=True)
