@@ -37,6 +37,11 @@ def collect(rrf_dir):
         if os.path.exists(p):
             with open(p, encoding="utf-8") as fid:
                 found[key] = json.load(fid)
+    strip = os.path.join(rrf_dir, "compare_colour_modes.png")
+    if os.path.exists(strip):
+        import base64
+        with open(strip, "rb") as fid:
+            found["strip"] = "data:image/png;base64," + base64.b64encode(fid.read()).decode()
     return found
 
 
@@ -81,14 +86,17 @@ def hbars(rows, key, unit, fmt="{:.2f}", lower_better=False, width=560):
     return "".join(parts)
 
 
-def curves(rows, key="psnr_rgb", unit="dB", width=560, height=240):
-    """Running eval against wall time for up to four runs."""
+def curves(rows, key="psnr_rgb", unit="dB", width=560, height=240, x="iteration"):
+    """Running eval against iterations (or wall time) for up to four runs.
+
+    Iterations by default: wall time depends on what else shared the GPU.
+    """
     rows = [r for r in rows if r.get("history")][:4]
     if not rows:
         return ""
     pad_l, pad_r, pad_t, pad_b = 48, 12, 14, 30
     pw, ph = width - pad_l - pad_r, height - pad_t - pad_b
-    xs = [h["seconds"] for r in rows for h in r["history"]]
+    xs = [h[x] for r in rows for h in r["history"]]
     ys = [h[key] for r in rows for h in r["history"]]
     xmax, ymin, ymax = max(xs) or 1.0, min(ys), max(ys)
     if ymax - ymin < 1e-9:
@@ -109,18 +117,17 @@ def curves(rows, key="psnr_rgb", unit="dB", width=560, height=240):
         parts.append(f'<text x="{pad_l-6}" y="{yy+3.5:.1f}" text-anchor="end" font-size="10" '
                      f'fill="var(--muted)">{ymin + frac*(ymax-ymin):.1f}</text>')
     for k, r in enumerate(rows):
-        pts = " ".join(f"{px(h['seconds']):.1f},{py(h[key]):.1f}" for h in r["history"])
+        pts = " ".join(f"{px(h[x]):.1f},{py(h[key]):.1f}" for h in r["history"])
         parts.append(f'<polyline points="{pts}" fill="none" stroke="var(--s{k+1})" stroke-width="2"/>')
-        last = r["history"][-1]
-        parts.append(f'<text x="{px(last["seconds"])-4:.1f}" y="{py(last[key])-6:.1f}" text-anchor="end" '
-                     f'font-size="10" fill="var(--s{k+1})">{_label(r)}</text>')
-    parts.append(f'<text x="{pad_l}" y="{height-8}" font-size="10" fill="var(--muted)">0 s</text>')
+    parts.append(f'<text x="{pad_l}" y="{height-8}" font-size="10" fill="var(--muted)">0</text>')
     parts.append(f'<text x="{width-pad_r}" y="{height-8}" text-anchor="end" font-size="10" '
-                 f'fill="var(--muted)">{xmax:.0f} s of training</text>')
+                 f'fill="var(--muted)">{xmax:,.0f} {"iterations" if x == "iteration" else "s"}</text>')
     parts.append(f'<text x="{width-pad_r}" y="{pad_t-3}" text-anchor="end" font-size="10" '
                  f'fill="var(--muted)">{unit}</text>')
     parts.append("</svg>")
-    return "".join(parts)
+    legend = "".join(f'<span><i style="background:var(--s{k+1})"></i>{_label(r)}</span>'
+                     for k, r in enumerate(rows))
+    return f'<div class="legend">{legend}</div>' + "".join(parts)
 
 
 def _meter(value, label, unit=""):
@@ -159,6 +166,15 @@ def render(found):
             f'{hbars(by["colour"], "rmse_db", "dB", lower_better=True)}'
             f'<figcaption>RMSE in dB, lower is better &middot; PSNR after jet mapping: '
             + ", ".join(f"{r['mode']} {r['psnr_rgb']:.2f}" for r in by["colour"]) + '</figcaption></figure>')
+        if found.get("strip"):
+            cards.append(
+                f'<figure class="card wide"><h2>Held-out views: truth, rgb, db, power</h2>'
+                f'<p class="rrf-note">Two held-out receiver poses, jet-mapped. The RGB model composites '
+                f'colours, so it can land off the jet curve (the dark and yellow smears); the dB and '
+                f'power models cannot, because they composite the value itself.</p>'
+                f'<img src="{found["strip"]}" alt="truth against the three colour modes" '
+                f'style="width:100%;max-width:1200px;height:auto;display:block;border:1px solid var(--line);border-radius:4px">'
+                f'<figcaption>output/rrf/compare_colour_modes.png</figcaption></figure>')
     if by["norm"]:
         cards.append(
             f'<figure class="card"><h2>Normalisation</h2>'
@@ -183,15 +199,19 @@ def render(found):
         warm = [r for r in by["txmove"] if r["warm"]]
         if cold and warm:
             c, w = cold[0], warm[0]
-            k = next(k for k in c if k.startswith("s_to_psnr"))
+            k = next(k for k in c if k.startswith("it_to_psnr"))
             if c.get(k) and w.get(k):
-                meters.append(_meter(f"{c[k]:.0f} &rarr; {w[k]:.0f}", f"seconds to PSNR {k[9:]} after the Tx moved, cold &rarr; warm", "s"))
+                meters.append(_meter(f"{c[k]:,} &rarr; {w[k]:,}", f"iterations to PSNR {k[10:]} after the Tx moved, cold &rarr; warm ({c['mode']})"))
+        final = "; ".join(f"{_label(r)}: {r['psnr_rgb']:.2f} dB, RMSE {r['rmse_db']:.2f} dB"
+                          + (f" ({r['rmse_db_in_range']:.2f} in range)" if r.get("rmse_db_in_range") else "")
+                          for r in cold[:2] + warm[:2])
         cards.append(
             f'<figure class="card"><h2>Transmitter moved: cold against warm start</h2>'
-            f'<p class="rrf-note">A new dataset for a second transmitter position; the RRF is fitted from '
-            f'zeroed colours (as RF-3DGS must) and from the first transmitter\'s colours. Running eval on 64 '
-            f'held-out views against wall time.</p>'
-            f'{curves(cold[:2] + warm[:2])}<figcaption>PSNR after jet mapping</figcaption></figure>')
+            f'<p class="rrf-note">A new dataset for a second transmitter position, mapped with the first '
+            f'transmitter\'s dB range; the RRF is fitted from zeroed colours (as RF-3DGS must) and from the '
+            f'first transmitter\'s colours. Running eval on 64 held-out views against wall time.</p>'
+            f'{curves(cold[:2] + warm[:2])}<figcaption>PSNR after jet mapping &middot; final on 640 views: '
+            f'{final}</figcaption></figure>')
 
     # pipeline cost per transmitter position
     tut, gen, inria = found.get("tut019"), found.get("gen"), found.get("inria")

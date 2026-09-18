@@ -240,7 +240,7 @@ $$\mathbb{E}_{\mathbf{w}\sim\mathcal N(0,I)}\bigl[(\mathbf{J}_n^\top \mathbf{w})
 | 射线追踪后端 | Sionna 0.19 / TF / CPU | Sionna 2.1 / PyTorch / Dr.Jit OptiX GPU | 单次 solve 27 ms;80 视图 8 s |
 | 数据集生成 | 教程逐路径 Python 循环 | `index_add_` 一次散射 | 800 位置 ≈ 5 min |
 | 路径数 | 论文 > 300k;pipeline 默认实际 8 | 校准 s=0.7 | 312,683 @ depth 1 |
-| 归一化 | 四种全局两探针,两种逐图 | 六种统一全局、从数据来 | 混淆已隔离,待重训验证 |
+| 归一化 | 四种全局两探针,两种逐图 | 六种统一全局、从数据来 | **已验证**:逐图归一化让 MVDR 掉 6.2 dB PSNR、CBF 的 dB 误差 +3.5 dB |
 | 训练目标精度 | 8-bit jet PNG | float `.npy` + PNG + 范围元数据 | 逐图仅用 47% 的 8-bit 范围 |
 | 谱种类 | 6 | 6(全部移植,同一相机) | 投影谱与真值逐像素对齐 |
 | 采样策略 | 固定种子 | 逐视图换种子 | 8 视图 1.69→1.47 dB;偏差仍在 |
@@ -251,18 +251,19 @@ $$\mathbb{E}_{\mathbf{w}\sim\mathcal N(0,I)}\bigl[(\mathbf{J}_n^\top \mathbf{w})
 | 材料学习 | 无(材料来自未公开描述符) | PDP 反演,留出 Tx 验证 | 1.09 → 0.47 dB;可辨识材料误差 0.025 |
 | 下一步测哪 | 无 | 梯度灵敏度选点 | 0.30 → 0.17 dB(随便选 0.25) |
 | 输出形态 | 图片 | 图片 + 结构化 CIR(npz)+ dashboard | Aerial 风格 |
-| RRF 训练本身 | INRIA 光栅器,RGB | **未改**(gsplat 已建未接) | — |
+| RRF 训练本身 | INRIA 光栅器,RGB 伪彩 | gsplat,单通道 dB 目标 | 复现 15.97 vs 16.02;dB 目标 RMSE −11%,到同质量快 3.6× |
+| Tx 移动后重建 | ≈1 h 数据(CPU)+ 54 s 微调 | 5.4 min 数据 + 27 s 微调;160 个位置 ≈1.5 min | 热启动 db 省 17% 步数,rgb 反而有害 |
 
 ---
 
 ## 5. 诚实的边界:还没做、还不能说
 
-1. **RRF 的训练一行没改。** 六种谱、float 输出、统一归一化都是"生成端"的改进;它们能否让 RRF 的 PSNR 提高,需要用我们生成的数据重训 RF-3DGS 才知道。gsplat(任意通道数、2DGS、MCMC 致密化)环境已建好但没接入训练。
+1. ~~RRF 的训练一行没改~~ **已做(阶段 2)**:`rrf_gsplat/` 在 gsplat 上复现了微调并做了 color function / 归一化 / 消融 / Tx 移动实验,见第 7 节。2DGS、MCMC 致密化仍未用。
 2. **重生成的 MVDR 谱与发布的谱还不能数值对比**:范围、`time_interval_ns`、单元方向图、`synthetic_array` 待逐一对齐;发布的谱峰更尖。
 3. **材料反演用的是合成真值**(同一场景藏一组系数),不是实测。真实的失配来源(几何误差、天线方向图、频率相关 EM 参数、depth > 1 的高阶交互)一个都没进来。
 4. **所有规划实验:一个场景、60 GHz、depth 1、单极化各向同性天线、2 m/1 m 网格、25–30 步。** 2 m 网格上的 59.3% 与 1 m 网格上的 49% 不是同一个数,阈值 −85 dB 是拍的。
 5. **`custom_*` 材料是占位映射**(plastic→chipboard,leather→wood,cloth→ceiling_board),不是作者的值——作者的值在教程 cell 6 里(εr 2.3 / 1.8 / 1.8,σ = 0,散射 0.2 / 0.4 / 0.8),尚未接入。
-6. **CBF/TCBF 归一化混淆是假设**,还没做"用全局范围重生成 + 重训"这个决定性实验。
+6. ~~CBF/TCBF 归一化混淆是假设~~ **已验证**:同一份浮点谱,逐图归一化比全局归一化在 MVDR 上低 6.2 dB PSNR,在 CBF 上 dB 误差高 3.5 dB(第 7 节)。
 7. 平面阵列的前后向模糊在所有版本里都存在;单元方向图在 CBF 与 MVDR 里用法不对称,继承自教程,未改。
 
 ---
@@ -291,6 +292,18 @@ $$\mathbb{E}_{\mathbf{w}\sim\mathcal N(0,I)}\bigl[(\mathbf{J}_n^\top \mathbf{w})
 - **RadioSight 对照**:它有 RGB/RF/语义/深度多模态和逐 AP 孪生,但单次反弹、无相位、每个环境冷启动;我们的材料反演 + 主动测量正好是"热启动"和"跨 AP 泛化"的部分。
 
 ---
+
+## 7. 阶段 2 结果(2026-09-18,详见 [stage2_notes.md](stage2_notes.md) 与 [rrf_gsplat/README.md](../rrf_gsplat/README.md))
+
+- **gsplat 移植复现 RF-3DGS**:发布 MVDR 数据上 15.97 dB / 0.727(发布 checkpoint 16.02 / 0.731)。
+- **color function**(重生成 MVDR):rgb 18.15 dB / RMSE 4.42 dB → **db 18.75 / 3.91**,power 18.63 / 3.97;到 PSNR 17 从 69 s 到 19 s。
+  线性功率合成没有比 dB 合成更好;RGB 合成会落到 jet 曲线之外(dashboard 上的对比条)。
+- **归一化**:逐图 min/max(教程的 CBF/TCBF 做法)在 MVDR 上 18.15 → 11.97 dB,CBF 上 dB 误差 7.54 → 11.03——即使评估时给了 oracle 范围。
+- **消融**:SH0 16.75 → SH3 18.75(视角依赖是主要表达力);opacity 冻结 −0.22 dB;2k 步 36 s 17.45 dB;160 个位置 −0.06 dB。
+- **Tx 移动**:冷启动 1500 步到 17 dB(≈27 s),热启动 1250 步;rgb 热启动反而 2000 → 3250 步。
+  一次 Tx 移动的总成本:原流水线本机 ≈1 h,本工作 ≈6 min(160 个位置 ≈1.5 min)。
+- **工程**:torch 侧 SH 走 autograd 一步 101 ms;改成线性映射 + gsplat CUDA SH 后 49 ms(rgb)/ 22 ms(db);INRIA 光栅器 27 ms 仍更快。
+- **未做**:教程逐材料定义(见 stage2_notes 表)未接入;所有结果仍是单场景、单频、合成数据。
 
 ## 附:复现路径
 

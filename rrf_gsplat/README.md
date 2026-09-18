@@ -26,7 +26,7 @@ time_tutorial_019.py  the original tutorial pipeline (Sionna 0.19 + TF) timed on
 ## The three colour functions
 
 | `--mode` | what a Gaussian carries | how it composites | loss target |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `rgb` | SH coefficients for an RGB triple | alpha-blend RGB (RF-3DGS) | jet PNG |
 | `db` | SH coefficients for one value in [0, 1] = normalised dB | alpha-blend the value | float spectrum, normalised with the dataset's global range |
 | `power` | SH → value in [0, 1] → linear power 10^(value·span/10) | alpha-blend **powers**, read back as 10·log10 | same as `db` |
@@ -63,7 +63,45 @@ python sionna_port/dashboard.py output/ablation.json --out output/dashboard.html
        --comparison output/comparison.json --planning-dir output/tx_planning --rrf-dir output/rrf
 ```
 
-## Results
+## Results (2026-09-18, RTX 3060; full table in `output/rrf/summary.json`, narrative in `docs/stage2_notes.md`)
 
-See `docs/stage2_notes.md` while the matrix is running; this section is filled
-in from `output/rrf/summary.json` when it is done.
+**The port reproduces RF-3DGS.** On the released MVDR data, `rgb` reaches
+15.97 dB / 0.727 SSIM on the 640 held-out views (published checkpoint: 16.02 /
+0.731), identically through the torch SH path and gsplat's CUDA SH.
+
+**Colour function** — regenerated MVDR, global percentile range, 10k iterations:
+
+| mode | PSNR (jet) | SSIM | RMSE dB | it/s | s to PSNR 17 |
+| --- | --- | --- | --- | --- | --- |
+| rgb (RF-3DGS) | 18.15 | 0.802 | 4.42 | 47 | 69 |
+| **db** | **18.75** | **0.818** | **3.91** | 60 | **19** |
+| power | 18.63 | 0.812 | 3.97 | 58 | 20 |
+
+Targeting the spectrum instead of its picture takes 11 % off the dB error and
+reaches the same quality 3.6× sooner; compositing linear power buys nothing
+over compositing dB here. The RGB model also composites colours off the jet
+curve (see the strip on the dashboard), which the value modes cannot do.
+
+**Normalisation** — same float spectra, `rgb`:
+
+| data | range | PSNR (jet) | RMSE dB (oracle range) |
+| --- | --- | --- | --- |
+| MVDR | global | 18.15 | 4.42 |
+| MVDR | per image | 11.97 | 7.61 |
+| CBF | global | 13.68 | 7.54 |
+| CBF | per image (the tutorial's CBF/TCBF) | 13.09 | 11.03 |
+
+Per-image normalisation costs 6 dB PSNR on MVDR even when the evaluation is
+handed each test image's true range. The CBF weakness the paper reports has
+this in it.
+
+**Ablations** (`db`): SH0 16.75 → SH1 17.43 → SH3 18.75 dB, so view dependence
+is where the capacity goes; frozen opacity −0.22 dB; 2k iterations (36 s) 17.45;
+160 of 800 positions −0.06 dB, 40 positions −1.3 dB.
+
+**Transmitter moved** (Tx-B at (8.2, −5.4, 2.0), Tx-A's dB range): cold start
+reaches PSNR 17 in 1500 iterations (≈ 27 s), warm start from the Tx-A `db`
+model in 1250; in `rgb` a warm start *hurts* (2000 → 3250). End to end on this
+machine, one transmitter move costs about an hour with the tutorial pipeline
+(dataset on the CPU, 1.1 s/view) and about 6 minutes here — 1.5 minutes if
+160 positions are enough, which the ablation says they are.

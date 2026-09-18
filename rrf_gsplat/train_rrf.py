@@ -251,7 +251,8 @@ def psnr(a, b):
 @torch.no_grad()
 def evaluate(model, data, idx, span, vmin, save_dir=None, mode_target="rgb"):
     """dB RMSE against the float truth, and PSNR/SSIM on jet RGB for every mode."""
-    tot = {"psnr_rgb": 0.0, "ssim_rgb": 0.0, "rmse_db": 0.0, "mae_db": 0.0, "n": 0}
+    tot = {"psnr_rgb": 0.0, "ssim_rgb": 0.0, "rmse_db": 0.0, "mae_db": 0.0,
+           "rmse_db_in_range": 0.0, "n": 0}
     have_float = "float" in data
     for i in idx:
         img = model.render(data["viewmats"][i], data["Ks"][i], data["width"], data["height"], span)
@@ -269,9 +270,16 @@ def evaluate(model, data, idx, span, vmin, save_dir=None, mode_target="rgb"):
             pred_db = pred_norm * span + vmin
             tot["rmse_db"] += float(torch.sqrt(((pred_db - gt_db) ** 2).mean()))
             tot["mae_db"] += float((pred_db - gt_db).abs().mean())
+            # against the truth clipped to the colormap range: what the
+            # representation could have got right (pixels under the floor of
+            # the range are unreachable for every mode alike)
+            gt_c = gt_db.clamp(vmin, vmin + span)
+            tot["rmse_db_in_range"] += float(torch.sqrt(((pred_db - gt_c) ** 2).mean()))
         else:
             gt_norm = jet_inverse(gt_rgb)
-            tot["rmse_db"] += float(torch.sqrt(((pred_norm - gt_norm) ** 2).mean())) * span
+            e = float(torch.sqrt(((pred_norm - gt_norm) ** 2).mean())) * span
+            tot["rmse_db"] += e
+            tot["rmse_db_in_range"] += e
             tot["mae_db"] += float((pred_norm - gt_norm).abs().mean()) * span
         tot["n"] += 1
         if save_dir is not None:

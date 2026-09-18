@@ -44,6 +44,7 @@ def main():
             "warm": os.path.basename(os.path.dirname(c["init_from"])) if c.get("init_from") else "",
             "psnr_rgb": f["psnr_rgb"], "ssim_rgb": f["ssim_rgb"],
             "rmse_db": f["rmse_db"], "mae_db": f["mae_db"],
+            "rmse_db_in_range": f.get("rmse_db_in_range"),
             "span_db": r["db_range"][1] - r["db_range"][0],
             "it_per_s": r["iters_per_second"], "train_s": r["train_seconds"],
             f"s_to_psnr{cfg.psnr_target:g}": t_psnr, f"it_to_psnr{cfg.psnr_target:g}": it_psnr,
@@ -52,15 +53,16 @@ def main():
     json.dump(rows, open(out, "w"), indent=1)
 
     hdr = ["run", "source", "mode", "sh", "views", "opacity", "warm", "PSNR(jet)", "SSIM",
-           "RMSE dB", "MAE dB", "it/s", "train s", f"s→PSNR{cfg.psnr_target:g}"]
+           "RMSE dB", "RMSE in-range", "MAE dB", "it/s", "train s", f"s→PSNR{cfg.psnr_target:g}"]
     print("| " + " | ".join(hdr) + " |")
     print("|" + "---|" * len(hdr))
     for r in rows:
         t = r[f"s_to_psnr{cfg.psnr_target:g}"]
+        ir = r["rmse_db_in_range"]
         print(f"| {r['run']} | {r['source']} | {r['mode']} | {r['sh_degree']} | {r['n_train']} | "
               f"{r['opacity']} | {r['warm']} | {r['psnr_rgb']:.2f} | {r['ssim_rgb']:.3f} | "
-              f"{r['rmse_db']:.2f} | {r['mae_db']:.2f} | {r['it_per_s']:.1f} | {r['train_s']:.0f} | "
-              f"{'-' if t is None else f'{t:.0f}'} |")
+              f"{r['rmse_db']:.2f} | {'-' if ir is None else f'{ir:.2f}'} | {r['mae_db']:.2f} | "
+              f"{r['it_per_s']:.1f} | {r['train_s']:.0f} | {'-' if t is None else f'{t:.0f}'} |")
     print(f"\n{len(rows)} runs -> {out}")
 
 
