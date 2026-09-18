@@ -334,6 +334,10 @@ def main():
     ap.add_argument("--rx-loc-file", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--spectrum", default="MVDR", choices=["CBF", "MVDR"])
+    ap.add_argument("--tx", dest="tx_loc", type=float, nargs=3, default=(6.905, 0.0, 2 - 1.713),
+                    help="transmitter position; the default is the NIST measurement Tx")
+    ap.add_argument("--frequency", type=float, default=60e9,
+                    help="carrier in Hz; the tutorial's dataset cells use 2.4e9")
     ap.add_argument("--num-positions", type=int, default=800)
     ap.add_argument("--max-depth", type=int, default=1)
     ap.add_argument("--diffraction", action="store_true")

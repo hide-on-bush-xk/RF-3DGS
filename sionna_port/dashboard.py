@@ -27,6 +27,12 @@ try:
     import planning_panels
 except ImportError:
     planning_panels = None
+try:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "..", "rrf_gsplat"))
+    import rrf_panels
+except ImportError:
+    rrf_panels = None
 
 # Categorical slots from the data-viz reference palette, assigned in fixed order.
 SERIES_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
@@ -504,12 +510,20 @@ def build(data, preview_dir=None):
         except Exception as exc:
             print(f"planning panels skipped: {type(exc).__name__}: {exc}")
 
+    rrf_html = ""
+    if rrf_panels is not None and data.get("_rrf_dir"):
+        try:
+            rrf_html = rrf_panels.render(rrf_panels.collect(data["_rrf_dir"]))
+        except Exception as exc:
+            print(f"rrf panels skipped: {type(exc).__name__}: {exc}")
+
     best = max(runs, key=lambda r: r["metrics_mean"]["num_paths"])
     fastest = min(runs, key=lambda r: r["mean_solve_seconds"])
 
     extra_css = ((reference_panels.CSS if reference_panels else "")
                  + (comparison_table.CSS if comparison_table else "")
-                 + (planning_panels.CSS if planning_panels else ""))
+                 + (planning_panels.CSS if planning_panels else "")
+                 + (rrf_panels.CSS if rrf_panels else ""))
     return f"""<title>RF-3DGS Channel Ablation</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500&display=swap">
@@ -533,6 +547,7 @@ def build(data, preview_dir=None):
 
 {reference_html}
 {comparison_html}
+{rrf_html}
 {planning_html}
 <section>
   <div class="meters">
@@ -599,6 +614,8 @@ def main():
                     help="comparison.json from comparison_grid.py")
     ap.add_argument("--planning-dir", default=None,
                     help="output/tx_planning, to add the transmitter-planning panels")
+    ap.add_argument("--rrf-dir", default=None,
+                    help="output/rrf, to add the gsplat radiance-field panels")
     args = ap.parse_args()
 
     with open(args.ablation_json, encoding="utf-8") as fid:
@@ -607,6 +624,7 @@ def main():
     data["_reference_root"] = args.reference_root
     data["_regen_dir"] = args.regen_dir
     data["_planning_dir"] = args.planning_dir
+    data["_rrf_dir"] = args.rrf_dir
     if args.comparison:
         with open(args.comparison, encoding="utf-8") as fid:
             data["_comparison"] = json.load(fid)
