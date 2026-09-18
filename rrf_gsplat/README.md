@@ -150,7 +150,21 @@ position basis stays Tx-invariant; the shape adaptation carries
 transmitter-specific information without being a stretch towards the
 transmitter — the measured cost of a colour function with no
 incident-direction argument, and an open question whether a degree-1
-incident-direction term would recover it. gsplat's MCMC densification with its default
+incident-direction term would recover it. Which Gaussians carry the gain
+(`--geometry-subset`, gradients masked to a subset, nothing outside it
+moves): the discs alone (11 % of the Gaussians) reach 21.49 / 2.86, the
+needles alone (40 %) 21.32 / 2.92, and a *random* 11 % 21.27 / 2.91, a
+random 3 % 21.00 / 3.02, a random 1 % 20.72 / 3.14. Shape class is not
+the variable: one Gaussian in a hundred, chosen at random, recovers 73 %
+of the RMSE gain, so the adaptation is a low-dimensional, distributed
+correction rather than a property of surfels or needles, and neither
+2DGS nor a needle-specific incident term is singled out by it. Rays are
+not single-Gaussian either: the effective number of Gaussians per ray,
+N_eff = (Σw)²/Σw² (`diag_neff.py`, Rademacher estimate), has median 5.9
+on the frozen model and 7.5 after unfreezing, with under 4 % of pixels
+below 2, so the equal gain of dB and linear-power compositing is a
+measured fact, not a consequence of one Gaussian owning each pixel.
+gsplat's MCMC densification with its default
 hyper-parameters diverges from this converged start (NaN loss by 4k
 iterations at either cap); a low-noise, late-start, relocate-only
 configuration is the next thing to try.

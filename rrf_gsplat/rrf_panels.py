@@ -11,6 +11,7 @@ tokens, like planning_panels.py.
 from __future__ import annotations
 
 import json
+import math
 import os
 
 CSS = """
@@ -42,6 +43,10 @@ def collect(rrf_dir):
     if os.path.exists(enc):
         with open(enc, encoding="utf-8") as fid:
             found["encoding"] = json.load(fid)
+    tc = os.path.join(rrf_dir, "transfer_curve.json")
+    if os.path.exists(tc):
+        with open(tc, encoding="utf-8") as fid:
+            found["transfer"] = json.load(fid)
     strip = os.path.join(rrf_dir, "compare_colour_modes.png")
     if os.path.exists(strip):
         import base64
@@ -151,6 +156,53 @@ def _table(head, body_rows):
     return f'<div class="tablewrap"><table><thead><tr>{h}</tr></thead><tbody>{b}</tbody></table></div>'
 
 
+def transfer_card(tr, width=560, height=260):
+    """In-range RMSE on Tx-B against the source transmitter's distance to Tx-B."""
+    rows = tr["rows"]
+    cold, own = tr["cold"]["rmse_db_in_range"], tr["own_unfrozen"]["rmse_db_in_range"]
+    pad_l, pad_r, pad_t, pad_b = 48, 12, 14, 30
+    pw, ph = width - pad_l - pad_r, height - pad_t - pad_b
+    xmax = max(r["distance_m"] for r in rows) * 1.08
+    ys = [r["rmse_in_range"] for r in rows] + [cold, own]
+    ymin, ymax = min(ys) - 0.15, max(ys) + 0.15
+
+    def px(v):
+        return pad_l + v / xmax * pw
+
+    def py(v):
+        return pad_t + ph - (v - ymin) / (ymax - ymin) * ph
+
+    parts = [f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="transfer curve" style="width:100%;height:auto">']
+    for i in range(4):
+        frac = i / 3
+        yy = pad_t + ph - frac * ph
+        parts.append(f'<line x1="{pad_l}" x2="{width-pad_r}" y1="{yy:.1f}" y2="{yy:.1f}" stroke="var(--line)"/>')
+        parts.append(f'<text x="{pad_l-6}" y="{yy+3.5:.1f}" text-anchor="end" font-size="10" fill="var(--muted)">{ymin + frac*(ymax-ymin):.2f}</text>')
+    for v, lab, k in ((cold, "visual geometry, frozen", 2), (own, "Tx-B's own geometry, unfrozen", 3)):
+        parts.append(f'<line x1="{pad_l}" x2="{width-pad_r}" y1="{py(v):.1f}" y2="{py(v):.1f}" stroke="var(--s{k})" stroke-width="1.5" stroke-dasharray="5 4"/>')
+        parts.append(f'<text x="{width-pad_r}" y="{py(v)-4:.1f}" text-anchor="end" font-size="10" fill="var(--muted)">{lab} {v:.2f}</text>')
+    fit = tr.get("fit")
+    if fit:
+        xs = [xmax * i / 60 for i in range(61)]
+        pts = " ".join(f"{px(x):.1f},{py(cold - fit['b0_db'] * math.exp(-x / fit['d_c_m'])):.1f}" for x in xs)
+        parts.append(f'<polyline points="{pts}" fill="none" stroke="var(--s1)" stroke-width="1.5" opacity="0.7"/>')
+    for r in rows:
+        parts.append(f'<circle cx="{px(r["distance_m"]):.1f}" cy="{py(r["rmse_in_range"]):.1f}" r="5" fill="var(--s1)" stroke="var(--bg)" stroke-width="2">'
+                     f'<title>Tx-{r["source"]} at {r["tx"]}: {r["distance_m"]:.2f} m from Tx-B, in-range RMSE {r["rmse_in_range"]:.2f} dB</title></circle>')
+        parts.append(f'<text x="{px(r["distance_m"]):.1f}" y="{py(r["rmse_in_range"])-8:.1f}" text-anchor="middle" font-size="10" fill="var(--muted)">{r["source"]}</text>')
+    parts.append(f'<text x="{pad_l}" y="{height-8}" font-size="10" fill="var(--muted)">0</text>')
+    parts.append(f'<text x="{width-pad_r}" y="{height-8}" text-anchor="end" font-size="10" fill="var(--muted)">{xmax:.0f} m from Tx-B</text>')
+    parts.append(f'<text x="{width-pad_r}" y="{pad_t-3}" text-anchor="end" font-size="10" fill="var(--muted)">in-range RMSE, dB</text>')
+    parts.append("</svg>")
+    cap = (f"{len(rows)} source transmitters; fit b(d) = b0 exp(&minus;d/d_c): d_c = {fit['d_c_m']:.1f} m, b0 = {fit['b0_db']:.2f} dB, R&sup2; {fit['r2']:.2f}"
+           if fit else f"{len(rows)} source transmitters; the fit needs 4")
+    return (f'<figure class="card"><h2>How far an adapted geometry carries</h2>'
+            f'<p class="rrf-note">Geometry unfrozen on a source transmitter, then frozen on Tx-B with colours reset. '
+            f'The benefit over the visual geometry decays with the source\'s distance to Tx-B; its correlation length d_c '
+            f'is the range within which one adaptation serves a moved transmitter.</p>'
+            + "".join(parts) + f'<figcaption>{cap}</figcaption></figure>')
+
+
 def render(found):
     runs = found.get("summary") or []
     if not runs and not found.get("tut019"):
@@ -252,6 +304,10 @@ def render(found):
             f'first transmitter\'s colours. Running eval on 64 held-out views against wall time.</p>'
             f'{curves(cold[:2] + warm[:2])}<figcaption>PSNR after jet mapping &middot; final on 640 views: '
             f'{final}</figcaption></figure>')
+
+    tr = found.get("transfer")
+    if tr and tr.get("rows"):
+        cards.append(transfer_card(tr))
 
     # pipeline cost per transmitter position
     tut, gen, inria = found.get("tut019"), found.get("gen"), found.get("inria")
