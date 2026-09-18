@@ -154,10 +154,14 @@ has a tail:
 
 | decoded from | AoD azimuth | AoD zenith | delay |
 | --- | --- | --- | --- |
-| one channel per quantity | **1.8° / 11.0° / 19.0°** | **0.7° / 7.7° / 11.6°** | **2.3 / 11.5 / 8.2 ns** |
+| one channel per quantity, azimuth as (cos, sin) | **0.6° / 5.9° / 9.8°** | 0.9° / 12.1° / 14.7° | 2.4 / 12.8 / 8.9 ns |
+| one channel per quantity, azimuth as (φ+180)/360 | 1.8° / 11.0° / 19.0° | **0.7° / 7.7° / 11.6°** | **2.3 / 11.5 / 8.2 ns** |
 | the tutorial's angle × amplitude RGB | 26.9° / 85.6° / 48.6° | 29.6° / 90.5° / 56.6° | — |
 
-The typical pixel decodes to within 2° of azimuth and 1° of zenith; the RMSE
+Carrying the azimuth as cos and sin removes the seam at ±180° that the
+single channel had (the pinhole resampling interpolated across it, and the
+field had to fit a jump that is not physical): azimuth median 1.8° → 0.6°,
+P90 and RMSE halved. The typical pixel decodes to within 1° of both angles; the RMSE
 is carried by the 3 % of pixels where two comparable paths with opposite
 departure angles share a pixel and the encoded mean lands between them (the
 same tail exists in the target itself: `diag_encoding_truth.py` puts the
