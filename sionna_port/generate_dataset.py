@@ -67,6 +67,7 @@ class Config:
     scattering_coefficient: float = 0.7
     materials: str = "uniform"      # uniform | tutorial | tutorial-asis
     poses_from: str = None          # images.txt of a dataset whose exact poses to reuse
+    splat_sigma: float = 3.0        # projection family: splat kernel width in equirect pixels
     # Cheap views, decorrelated between views, and let the fit do the averaging.
     #
     # Sionna's solver shoots samples_per_src rays from a fixed lattice, so a low
@@ -216,17 +217,30 @@ def element_gain_fn(theta: torch.Tensor, phi: torch.Tensor) -> torch.Tensor:
                            device=theta.device).reshape(theta.shape)
 
 
+PROJECTION_KINDS = ("MULTI", "AOD3")
+
+
+def projection_equirect(paths, kind: str, device, sigma: float = 3.0):
+    """The projection family's whole-sphere image for one receiver position.
+
+    Splatted at the angle of arrival in the world frame, so it does not
+    depend on the receiver's yaw: one solve per position, and the four
+    pinhole faces are cut from this one image. `sigma` is the splat kernel
+    in equirect pixels (1/3 degree each): it sets how many paths share a
+    pixel, i.e. how much the encoded mean angle departs from any real path.
+    """
+    from rf_spectra import aod_spectrum_equirect, multichannel_spectrum_equirect
+    eq = (multichannel_spectrum_equirect(paths, sigma=sigma) if kind == "MULTI"
+          else aod_spectrum_equirect(paths, sigma=sigma))
+    return eq.to(device)
+
+
 def spectrum_for_paths(paths, grid: ArrayGrid, cfg: Config, yaw: float = 0.0):
     kind = cfg.spectrum.upper()
-    if kind in ("MULTI", "AOD3"):
-        # projection family: splat at the angle of arrival on the sphere, then
-        # look through the same pinhole the beamformed spectra use
-        from rf_spectra import (aod_spectrum_equirect, equirect_to_perspective,
-                                multichannel_spectrum_equirect)
-        eq = (multichannel_spectrum_equirect(paths) if kind == "MULTI"
-              else aod_spectrum_equirect(paths))
-        persp = equirect_to_perspective(eq.to(grid.theta.device), cfg.width, cfg.height,
-                                        cfg.fov_deg, yaw_rad=yaw)
+    if kind in PROJECTION_KINDS:
+        from rf_spectra import equirect_to_perspective
+        eq = projection_equirect(paths, kind, grid.theta.device, cfg.splat_sigma)
+        persp = equirect_to_perspective(eq, cfg.width, cfg.height, cfg.fov_deg, yaw_rad=yaw)
         return None, persp                                   # [C, H, W]
     response = paths_to_response(paths, cfg.time_interval_ns, device=grid.theta.device)
     if kind == "CBF":
@@ -286,15 +300,32 @@ def generate(cfg: Config):
     print(f"pass 1/2: {len(groups)} positions x {len(VIEW_YAWS)} views")
     specs, poses, per_view, cfr_curve = [], [], [], None
     t_start = time.time()
+    projection = cfg.spectrum.upper() in PROJECTION_KINDS
     for i, (rx_loc, yaws) in enumerate(groups):
         if i % 50 == 0:
             print(f"  {i}/{len(groups)}")
+        eq = None
         for yaw in yaws:
-            scene.remove("rx") if "rx" in scene.receivers else None
-            scene.add(Receiver(name="rx", position=list(rx_loc),
-                               orientation=[yaw, 0.0, 0.0]))
-            paths = solve_paths(solver, scene, cfg, view_index=len(specs))
-            _, spec_db = spectrum_for_paths(paths, grid, cfg, yaw=yaw)
+            if projection and eq is not None:
+                # same position, same paths: cut the next face from the sphere
+                from rf_spectra import equirect_to_perspective
+                spec_db = equirect_to_perspective(eq, cfg.width, cfg.height, cfg.fov_deg, yaw_rad=yaw)
+            else:
+                scene.remove("rx") if "rx" in scene.receivers else None
+                scene.add(Receiver(name="rx", position=list(rx_loc),
+                                   orientation=[yaw, 0.0, 0.0]))
+                # The sampling lattice is seeded per *position*: the four faces
+                # of one sphere must come from one path set, or a path near a
+                # face boundary can exist in one face and be missing in the
+                # next. Randomising the lattice across positions still gives the
+                # multi-view fit independent residuals to average.
+                paths = solve_paths(solver, scene, cfg, view_index=i)
+                if projection:
+                    eq = projection_equirect(paths, cfg.spectrum.upper(), grid.theta.device, cfg.splat_sigma)
+                    from rf_spectra import equirect_to_perspective
+                    spec_db = equirect_to_perspective(eq, cfg.width, cfg.height, cfg.fov_deg, yaw_rad=yaw)
+                else:
+                    _, spec_db = spectrum_for_paths(paths, grid, cfg, yaw=yaw)
             specs.append(spec_db.cpu().numpy().astype(np.float32))
             poses.append((rx_loc, yaw))
 
@@ -312,7 +343,8 @@ def generate(cfg: Config):
                                      "magnitude_db": np.asarray(mag_db).reshape(-1).tolist()}
                     except Exception as exc:
                         print(f"  cfr unavailable: {type(exc).__name__}: {exc}")
-            scene.remove("rx")
+            if "rx" in scene.receivers:
+                scene.remove("rx")
 
     all_db = np.stack(specs)
     multi = all_db.ndim == 4                                  # [n, C, H, W]
@@ -424,6 +456,8 @@ def main():
                     help="transmitter position; the default is the NIST measurement Tx")
     ap.add_argument("--frequency", type=float, default=60e9,
                     help="carrier in Hz; the tutorial's dataset cells use 2.4e9")
+    ap.add_argument("--splat-sigma", type=float, default=3.0,
+                    help="MULTI/AOD3: splat kernel width in equirect pixels (1/3 deg); 3 is the tutorial's")
     ap.add_argument("--poses-from", default=None,
                     help="a dataset's sparse/0/images.txt: generate at exactly those poses "
                          "(the released data's, for a like-for-like comparison)")

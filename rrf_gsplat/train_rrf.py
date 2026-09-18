@@ -422,6 +422,10 @@ def main():
     ap.add_argument("--eval-subset", type=int, default=64, help="test views for the running eval")
     ap.add_argument("--max-train-views", type=int, default=None, help="data-efficiency ablation")
     ap.add_argument("--init-from", default=None, help="rrf_state.pt of another run (warm start)")
+    ap.add_argument("--init-geometry-only", action="store_true",
+                    help="with --init-from: take means/scales/quats/opacities from that run but "
+                         "start the colours from zero (does an RF-adapted geometry transfer to "
+                         "another transmitter?)")
     ap.add_argument("--save-renders", type=int, default=16, help="test renders to write")
     ap.add_argument("--db-range", type=float, nargs=2, default=None,
                     help="min max dB for the colormap; default from generation_meta.json")
@@ -473,7 +477,11 @@ def main():
                 train_opacity=not cfg.freeze_opacity, train_geometry=cfg.train_geometry)
     if cfg.init_from:
         model.load_state(torch.load(cfg.init_from, map_location=device))
-        print(f"warm start from {cfg.init_from}")
+        if cfg.init_geometry_only:
+            model.params["sh0"].data.zero_(); model.params["shN"].data.zero_()
+            print(f"geometry (and opacity) from {cfg.init_from}, colours from zero")
+        else:
+            print(f"warm start from {cfg.init_from}")
     print(f"{model.n_gaussians:,} Gaussians from visual iteration {model.visual_iteration}; "
           f"mode {cfg.mode}, {channels} channel(s), SH degree {cfg.sh_degree}; "
           f"geometry {'trained' if cfg.train_geometry else 'frozen'}, densify {cfg.densify}")

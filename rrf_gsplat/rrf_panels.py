@@ -158,9 +158,14 @@ def render(found):
     by = {g: [r for r in runs if r["run"].startswith(pre)] for g, (_, pre) in GROUPS.items()}
     meters, cards = [], []
 
+    enc = found.get("encoding")
+    if enc:
+        # the physical metric first: what the field decodes to
+        meters.append(_meter(f"{enc['multi']['az']:.1f}&deg; / {enc['multi']['zen']:.1f}&deg; / {enc['multi']['delay']:.1f} ns",
+                             "decoded AoD azimuth / zenith / delay RMSE, one channel per quantity"))
     c0 = next((r for r in by["baseline"]), None)
     if c0:
-        meters.append(_meter(f"{c0['psnr_rgb']:.2f}", "gsplat RRF on the released MVDR data, PSNR (published 16.02)", "dB"))
+        meters.append(_meter(f"{c0['psnr_rgb']:.2f}", "gsplat RRF on the released MVDR data, PSNR after jet mapping (published 16.02)", "dB"))
     if by["colour"]:
         best = min(by["colour"], key=lambda r: r["rmse_db"])
         rgb = next((r for r in by["colour"] if r["mode"] == "rgb"), None)
@@ -272,7 +277,11 @@ def render(found):
   <p>RF-3DGS fine-tunes colour and opacity of a frozen visual 3DGS on jet PNGs through an RGB
   rasteriser. On gsplat the target can be the spectrum itself, so the colour function and the
   normalisation become experiments, every model is scored in dB against float truth, and the
-  cost of a moved transmitter has a number. Source: <code>rrf_gsplat/</code>.</p></div>
+  cost of a moved transmitter has a number. The physical metrics come first: dB error against the
+  float spectrum and, for the multi-channel model, the angle and delay the field decodes to. PSNR
+  is kept as a compatibility number &mdash; every model's output is mapped through jet and scored
+  against the PNG the way the paper does &mdash; not as anything that was optimised.
+  Source: <code>rrf_gsplat/</code>.</p></div>
   <div class="meters">{''.join(meters)}</div>
   <div class="rrf-grid" style="margin-top:14px">{''.join(cards)}</div>
 </section>

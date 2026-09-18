@@ -36,13 +36,19 @@ add in power, not in dB and not in colour space. Everything else — geometry,
 zeroed SH init, INRIA's learning rates (f_dc 0.0025, f_rest /20, opacity 0.05,
 Adam ε 1e-15), λ_SSIM 0.2, one random view per step — is the same for all three.
 
-## One evaluation for every model
+## One evaluation for every model — physical metrics first
 
+- **What the field decodes to** (`--mode multi`, `eval_encoding.py`): RMSE of
+  the departure azimuth and zenith in degrees and of the delay in ns, on the
+  held-out pixels a path reaches. This is the metric a beam-management or
+  localisation use would feel, and the primary one here.
 - **dB RMSE / MAE against the float truth** on the held-out positions. An RGB
   prediction goes back through the jet inverse (4096-entry nearest-neighbour
   LUT; round-trip error ≤ 1.4 % of the span).
-- **PSNR / SSIM after jet mapping**, so every mode has the number the paper
-  reports. A `db` or `power` prediction is mapped through jet first.
+- **PSNR / SSIM after jet mapping** — a *compatibility* number, not a training
+  target: every model's output (dB, power or multi-channel) is mapped through
+  jet and scored against the PNG the way the paper does. No run here optimises
+  it; the `db`/`power`/`multi` losses live in the physical domain.
 - The split holds out whole receiver positions (160 × 4 yaws = 640 views), as
   the released split does.
 
