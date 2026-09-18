@@ -169,8 +169,13 @@ has a tail:
 
 Carrying the azimuth as cos and sin removes the seam at ±180° that the
 single channel had (the pinhole resampling interpolated across it, and the
-field had to fit a jump that is not physical): azimuth median 1.8° → 0.6°,
-P90 and RMSE halved. The typical pixel decodes to within 1° of both angles; the RMSE
+field had to fit a jump that is not physical). The controlled A/B — the
+same dataset, five channels in both, the seamed azimuth carried twice in the
+control — gives azimuth median 1.86° → 0.59°, P90 11.7° → 5.9°, RMSE 19.1°
+→ 9.8°, while zenith, delay and power are identical to two decimals. So the
+seam costs its own channel a factor of three and nothing else: an unfittable
+feature in one channel does not leak into the others through the shared
+opacity. The typical pixel decodes to within 1° of both angles; the RMSE
 is carried by the 3 % of pixels where two comparable paths with opposite
 departure angles share a pixel and the encoded mean lands between them (the
 same tail exists in the target itself: `diag_encoding_truth.py` puts the
