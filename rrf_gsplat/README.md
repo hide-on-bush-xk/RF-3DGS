@@ -204,14 +204,14 @@ exclusively, per the reporting contract in `CLAUDE.md`:
 
 | pipeline | dataset (3200 views unless stated) | fine-tune | evaluation | total |
 | --- | --- | --- | --- | --- |
-| as published: Sionna 0.19 + TF, INRIA `train.py` 30k→40k | MISSING (the 1.1 s/view CPU figure was taken beside a running GPU job; re-measurement pending) | 272 s incl. its own test pass | (inside) | MISSING |
+| as published: Sionna 0.19 + TF (CPU: no OptiX in WSL, no GPU for TF 2.15 on Windows), INRIA `train.py` 30k→40k | 0.9 h (1.0 s/view: 0.4 s paths + 0.6 s MVDR, exclusive; the authors' GPU box would be faster — MISSING) | 272 s incl. its own test pass | (inside) | ≈ 1 h on this machine |
 | as published + engineering fixes: Sionna 2.1 on the GPU, same spectra (2.4 GHz, tutorial materials, M = 10), INRIA `train.py` | 222 s (14.4 views/s) | 272 s | (inside) | ≈ 8.2 min |
 | this work, full data: 800 positions, `db`, gsplat, 10k it | 311 s (10.3 views/s, 60 GHz) | 168 s | 35 s | 8.6 min |
 | this work, method: 160 positions, `db`, 2k it | 33 s (640 views) | 36 s | 35 s | **≈ 1.7 min** (live page: 104 s measured click-to-render, 2k it, 32-position test) |
 
 Decomposition of the speed-up against the published pipeline: the
 **engineering** part (ray tracing on the GPU through Sionna 2.1) takes the
-dataset from ~1 h (MISSING until re-measured) to under 4 min; the **method**
+dataset from 0.9 h on this machine's CPU to under 4 min; the **method**
 part (the dB target converging 3.6× sooner, 160 positions losing 0.06 dB
 on Tx-A and 0.4 dB on Tx-B, 2k iterations) takes the rest from 8 min to
 under 2. Training alone is not the number: at 2k iterations the evaluation

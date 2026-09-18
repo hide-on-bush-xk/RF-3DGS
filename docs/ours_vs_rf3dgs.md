@@ -308,7 +308,9 @@ $$\mathbb{E}_{\mathbf{w}\sim\mathcal N(0,I)}\bigl[(\mathbf{J}_n^\top \mathbf{w})
   rgb 16.87(发布 checkpoint 16.02)、db 17.66;CBF 上 db 13.95 vs rgb 13.68。三套数据 db 都赢。
 - **教程材料的单位错误**:cell 6 的电导率公式把频率除以 1e-9,ITU 类材料全成了 1e16–1e24 S/m 的完美导体;
   `sionna_port/tutorial_materials.py` 提供原样与修正两种变体。
-- **工程**:torch 侧 SH 走 autograd 一步 101 ms;改成线性映射 + gsplat CUDA SH 后 49 ms(rgb)/ 22 ms(db);INRIA 光栅器 27 ms 仍更快。
+- **工程**:torch 侧 SH 走 autograd 一步 101 ms;改成线性映射 + gsplat CUDA SH 后 49 ms(rgb)/ 22 ms(db)。光栅器本身(独占 GPU,30 次中位数,
+  渲染 + L1 + 反传)gsplat 在每个分辨率都更快:300×200 4.4 vs 5.6 ms,1200×800 9.5 vs 31.3 ms,2400×1600 25.5 vs 113 ms;
+  单面 300×200 的数不外推(kernel launch 与 Python 编排支配)。
 - **几何解冻**:db 模型 18.75 / 3.91 dB → 21.53 / 2.85 dB,本阶段最大单项收益。位移诊断:位置中位数只动 6 mm、最大 21 cm,
   变的是尺度与朝向。跨 Tx 分解(范围内 RMSE):视觉几何 4.82 → 搬来 Tx-A 适配几何 4.58 → 在 Tx-B 上再解冻 3.83,
   即**解冻收益 = 24% 可迁移的几何修正 + 76% Tx 专属的重塑**;把适配几何冻结在 Tx-A 自身上重拟合颜色得 2.81,

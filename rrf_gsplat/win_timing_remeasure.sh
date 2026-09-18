@@ -35,12 +35,20 @@ for _ in range(60):
 def post(path, body, timeout=900):
     req = urllib.request.Request(base + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     t0 = time.time(); r = json.loads(urllib.request.urlopen(req, timeout=timeout).read()); return r, time.time() - t0
-post("/api/coverage", {"tx": [0.0, -5.0, 2.0], "threshold": -85})          # warm-up
-cov = [post("/api/coverage", {"tx": [x, -5.0, 2.0], "threshold": -85})[1] for x in (0.0, 1.0, 2.0, 3.0, 4.0)]
-post("/api/optimize", {"tx": [0.0, -5.0, 2.0], "threshold": -85, "steps": 1})   # warm-up (kernel compile)
-opt = [post("/api/optimize", {"tx": [x, -5.0, 2.0], "threshold": -85, "steps": 5})[1] for x in (0.0, 1.0, 2.0, 3.0, 4.0)]
-print(f"coverage (239 rx, 50k samples): median {statistics.median(cov):.3f} s over 5, all {[round(v,3) for v in cov]}")
-print(f"optimise 5 steps (20k samples, reverse mode): median {statistics.median(opt):.2f} s over 5, all {[round(v,2) for v in opt]}")
+# five indoor transmitter positions at AP height (the active-measurement candidates)
+POS = [[0.0, -5.0, 2.0], [0.0, -7.0, 2.0], [8.0, -7.0, 2.0], [8.0, -11.0, 2.0], [8.0, -3.0, 2.0]]
+post("/api/coverage", {"tx": POS[0], "threshold": -85})          # warm-up
+cov = [post("/api/coverage", {"tx": p, "threshold": -85})[1] for p in POS]
+post("/api/optimize", {"tx": POS[0], "threshold": -85, "steps": 1})   # warm-up (kernel compile)
+opt = []
+for p in POS:
+    r, t = post("/api/optimize", {"tx": p, "threshold": -85, "steps": 5})
+    if len(r["history"]) == 5:
+        opt.append(t)
+    else:
+        print(f"  optimise from {p}: only {len(r['history'])} steps (blocked), excluded")
+print(f"coverage (239 rx, 50k samples): median {statistics.median(cov):.3f} s over {len(cov)}, all {[round(v,3) for v in cov]}")
+print(f"optimise 5 steps (20k samples, reverse mode): median {statistics.median(opt):.2f} s over {len(opt)} valid, all {[round(v,2) for v in opt]}")
 EOF
 kill $SRV 2>/dev/null; taskkill //F //IM python.exe >/dev/null 2>&1
 echo "== done $(date)" >> $LOG

@@ -90,15 +90,19 @@ def main():
     rows = []
     for width, height in ((300, 200), (600, 400), (1200, 800), (2400, 1600)):
         view, K = camera(width, height, device)
-        for _ in range(3):
+        for _ in range(3):                                   # warm-up, excluded
             step(g, view, K, width, height); g["sh"].grad = None; g["opacity"].grad = None
-        torch.cuda.synchronize(); t0 = time.time()
+        times = []
         for _ in range(cfg.reps):
+            torch.cuda.synchronize(); t0 = time.time()
             step(g, view, K, width, height); g["sh"].grad = None; g["opacity"].grad = None
-        torch.cuda.synchronize()
-        ms = (time.time() - t0) / cfg.reps * 1000
-        rows.append({"width": width, "height": height, "ms_per_step": ms, "it_per_s": 1000 / ms})
-        print(f"{cfg.which:7s} {width}x{height}: {ms:6.1f} ms/step ({1000/ms:5.1f} it/s)")
+            torch.cuda.synchronize(); times.append((time.time() - t0) * 1000)
+        times.sort()
+        ms = times[len(times) // 2]                          # median, per the reporting contract
+        rows.append({"width": width, "height": height, "ms_per_step_median": ms, "ms_per_step_mean": sum(times) / len(times),
+                     "ms_min": times[0], "ms_max": times[-1], "it_per_s": 1000 / ms, "reps": cfg.reps})
+        print(f"{cfg.which:7s} {width}x{height}: median {ms:6.1f} ms/step ({1000/ms:5.1f} it/s); mean {sum(times)/len(times):6.1f}, "
+              f"min {times[0]:.1f}, max {times[-1]:.1f} over {cfg.reps} after 3 warm-ups")
     os.makedirs(os.path.join(REPO, "output", "rrf"), exist_ok=True)
     json.dump({"which": cfg.which, "gaussians": int(g["means"].shape[0]), "rows": rows},
               open(os.path.join(REPO, "output", "rrf", f"bench_resolution_{cfg.which}.json"), "w"), indent=1)
