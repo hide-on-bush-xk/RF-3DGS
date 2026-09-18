@@ -131,3 +131,24 @@ was tried to let weakly-constrained materials converge faster than
 normalised gradient descent allows; it keeps the unconstrained ones still
 but its sign-like steps overshoot on noisy gradients (identifiable-material
 error 0.051 vs 0.025), so `ngd` stays the default.
+
+## Interactive planner (`interactive.py` + `interactive.html`)
+
+The interaction Aerial's digital-twin demo offers — place a radio unit on the
+map, run, look at the coverage — on this scene, without Omniverse: a Python
+HTTP server keeps the scene and the 239-point indoor receiver grid in memory,
+and one HTML page talks to it.
+
+```text
+PYTHONUTF8=1 python tx_planning/interactive.py          # then open http://localhost:8765
+```
+
+- click the floor plan → one batched solve → coverage map and fraction (0.2 s)
+- **Optimise from here** → optimize_tx.py's loop through Sionna's gradient with the wall constraints (5 steps ≈ 2 s)
+- **Retrain RRF here** → a 160-position dataset for that transmitter, remapped, and a 2k-iteration `db` fine-tune in WSL;
+  measured 45 s + 60 s = **104 s** from click to held-out PSNR and renders
+
+Aerial's UI components are Omniverse Kit extensions and cannot be reused
+outside Omniverse; what is borrowed is the interaction and the data model
+(static RU × mobile UE grid, CIR per pair). Dr.Jit's JIT flags are per thread,
+so the server is single-threaded on purpose; the retrain job only shells out.

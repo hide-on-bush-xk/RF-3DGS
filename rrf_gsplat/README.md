@@ -124,11 +124,17 @@ is where the capacity goes; frozen opacity −0.22 dB; 2k iterations (36 s) 17.4
 lrs with the means at 10× its final lr) takes the same model from 18.75 /
 3.91 dB to **21.53 / 2.85 dB** — the largest single gain here. RF-3DGS's
 frozen geometry assumes the visual geometry is the radio geometry; that
-assumption costs a dB of RMSE. gsplat's MCMC densification with its default
-hyper-parameters diverges from this converged start (`--densify mcmc
---cap-max 1300000`: 14.7 dB at 1k iterations, 5.3 by 8k), and the cap-at-N
-variant hits a CUDA error in the relocation kernel; a low-noise, late-start,
-relocate-only configuration is the next thing to try.
+assumption costs a dB of RMSE. What moved (`diag_displacement.py`): the
+means by 6 mm median and 21 cm at most, neither onto new surfaces nor into
+free space — the gain is in scales and rotations. And it transfers: the
+Tx-A-adapted geometry, frozen and with colours reset, fine-tuned on Tx-B
+gives 17.99 dB / 4.58 dB in-range RMSE against 17.86 / 4.82 from the visual
+geometry (`--init-from ... --init-geometry-only`); unfreezing on Tx-B itself
+gives 19.43 / 3.83. So the position basis stays Tx-invariant and the local
+shape adapted once carries over. gsplat's MCMC densification with its default
+hyper-parameters diverges from this converged start (NaN loss by 4k
+iterations at either cap); a low-noise, late-start, relocate-only
+configuration is the next thing to try.
 
 **Multi-channel targets** (`--mode multi`, 2.4 GHz, tutorial materials):
 path power, AoD azimuth, AoD zenith and delay each get a channel. Decoded on
@@ -136,6 +142,13 @@ the same held-out pixels, the per-quantity channels give 19.0° / 11.6° / 8.2 n
 (azimuth / zenith / delay RMSE) where the tutorial's angle × amplitude RGB
 encoding decodes to 48.6° / 56.6°. With one channel per quantity the
 amplitude no longer needs to be multiplied into the angle at all.
+
+Where the 19° comes from (`diag_encoding_truth.py`, no RRF involved): the
+target's own power-weighted mean angle is already 12.6° from the strongest
+path in the pixel at the tutorial's splat width (σ = 3 px), 4.9° at σ = 1.
+But a σ = 1 target trains *worse* (22.6° / 19.7° / 11.3 ns): it covers less
+than half the pixels and is spikier, and the field's own error dominates.
+The kernel is not the lever; the representation is.
 
 **Transmitter moved** (Tx-B at (8.2, −5.4, 2.0), Tx-A's dB range): cold start
 reaches PSNR 17 in 1500 iterations (≈ 27 s), warm start from the Tx-A `db`

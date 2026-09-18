@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Transmitter Planner</title>
+<style>
+:root { --bg:#f4f5f3; --surface:#fff; --sunk:#eceee9; --ink:#16181a; --muted:#5b6166; --line:#dfe3de; --accent:#0b6e6b;
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0e1215; --surface:#171c20; --sunk:#12171a; --ink:#e7ecea;
+  --muted:#93a0a6; --line:#242e33; --accent:#58c5be; --s1:#3987e5; --s2:#d95926; --s3:#199e70; } }
+:root[data-theme="dark"] { --bg:#0e1215; --surface:#171c20; --sunk:#12171a; --ink:#e7ecea; --muted:#93a0a6; --line:#242e33; --accent:#58c5be; }
+* { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font-family:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif; }
+.wrap { padding:16px; display:grid; grid-template-columns:minmax(360px,560px) 1fr; gap:16px; }
+@media (max-width:900px) { .wrap { grid-template-columns:1fr; } }
+h1 { font-size:22px; margin:0 0 6px; } h2 { font-size:16px; margin:0 0 6px; }
+.card { background:var(--surface); border:1px solid var(--line); border-radius:4px; padding:14px 16px; margin-bottom:14px; }
+.note { color:var(--muted); font-size:13px; }
+canvas { width:100%; height:auto; display:block; border:1px solid var(--line); border-radius:4px; cursor:crosshair; background:var(--sunk); }
+.row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:10px; font-size:13px; }
+button { background:var(--accent); color:#fff; border:0; border-radius:3px; padding:7px 12px; font-size:13px; cursor:pointer; }
+button:disabled { opacity:.5; cursor:default; } input[type=number] { width:70px; }
+.meters { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:4px; overflow:hidden; }
+.meter { background:var(--surface); padding:10px 12px; } .meter b { display:block; font-size:22px; } .meter span { font-family:ui-monospace,monospace; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+.mono { font-family:ui-monospace,monospace; font-size:12px; white-space:pre-wrap; color:var(--muted); }
+.renders { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; } .renders img { width:100%; border:1px solid var(--line); border-radius:3px; }
+.renders figcaption { font-size:11px; color:var(--muted); }
+svg text { font-family:ui-monospace,monospace; }
+</style></head>
+<body><div class="wrap">
+<div>
+  <div class="card">
+    <h1>Transmitter planner</h1>
+    <p class="note">Click the floor plan to put the transmitter there. Coverage is one Sionna solve over every indoor receiver
+      (under a second). <b>Optimise</b> slides it along Sionna's own gradient; <b>Retrain</b> regenerates a 160-position dataset
+      for that transmitter and fine-tunes the radiance field, about a minute.</p>
+    <canvas id="map" width="640" height="900"></canvas>
+    <div class="row">
+      <label>threshold <input id="thr" type="number" value="-85" step="1"> dB</label>
+      <label>height <input id="z" type="number" value="2.0" step="0.1"> m</label>
+      <label>steps <input id="steps" type="number" value="15" step="1"></label>
+      <button id="opt">Optimise from here</button>
+      <button id="retrain">Retrain RRF here</button>
+    </div>
+    <div class="row mono" id="msg">pick a position</div>
+  </div>
+</div>
+<div>
+  <div class="card"><div class="meters">
+    <div class="meter"><b id="m-cov">&ndash;</b><span>coverage above threshold</span></div>
+    <div class="meter"><b id="m-mean">&ndash;</b><span>mean gain, dB</span></div>
+    <div class="meter"><b id="m-time">&ndash;</b><span>solve, s</span></div>
+    <div class="meter"><b id="m-tx">&ndash;</b><span>transmitter</span></div>
+  </div></div>
+  <div class="card"><h2>Optimiser path</h2><div id="optpath" class="mono">&ndash;</div></div>
+  <div class="card"><h2>Radiance field for this transmitter</h2><div id="job" class="mono">&ndash;</div><div id="curve"></div><div id="renders" class="renders"></div></div>
+</div>
+</div>
+<script>
+const cv = document.getElementById('map'), ctx = cv.getContext('2d');
+let grid = null, gain = null, tx = null, cands = [], path = [];
+const ramp = t => { const stops=[[227,239,250],[156,195,232],[74,143,211],[31,92,168],[11,47,102]]; t=Math.min(Math.max(t,0),1)*4; const i=Math.min(Math.floor(t),3), f=t-i;
+  const c=stops[i].map((v,k)=>Math.round(v+(stops[i+1][k]-v)*f)); return `rgb(${c[0]},${c[1]},${c[2]})`; };
+function bounds(){ const [lx,ly]=grid.lobby; return {x0:lx[0]-0.5,x1:lx[1]+0.5,y0:ly[0]-0.5,y1:ly[1]+0.5}; }
+function px(x){ const b=bounds(); return 20+(x-b.x0)/(b.x1-b.x0)*(cv.width-40); }
+function py(y){ const b=bounds(); return 20+(b.y1-y)/(b.y1-b.y0)*(cv.height-40); }
+function draw(){
+  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--sunk'); ctx.fillRect(0,0,cv.width,cv.height);
+  const b=bounds(), s=(cv.width-40)/(b.x1-b.x0)*1.0;
+  let vmin=-105, vmax=-65; if(gain){ const f=gain.filter(v=>v>-129); if(f.length){ f.sort((a,b)=>a-b); vmin=f[Math.floor(f.length*0.02)]; vmax=f[Math.floor(f.length*0.98)]; } }
+  grid.rx.forEach((p,i)=>{ const v = gain ? gain[i] : null; ctx.fillStyle = v===null ? '#c8ccc6' : (v<=-129 ? '#bfc3bd' : ramp((v-vmin)/((vmax-vmin)||1)));
+    ctx.fillRect(px(p[0])-s/2+0.5, py(p[1])-s/2+0.5, s-1, s-1); });
+  cands.forEach(c=>{ ctx.beginPath(); ctx.arc(px(c.tx[0]),py(c.tx[1]),4,0,7); ctx.fillStyle='#fff'; ctx.fill(); ctx.strokeStyle='#5b6166'; ctx.stroke(); });
+  if(path.length>1){ ctx.beginPath(); path.forEach((p,i)=> i?ctx.lineTo(px(p[0]),py(p[1])):ctx.moveTo(px(p[0]),py(p[1]))); ctx.strokeStyle='#1baf7a'; ctx.lineWidth=3; ctx.stroke(); ctx.lineWidth=1; }
+  if(tx){ ctx.beginPath(); ctx.arc(px(tx[0]),py(tx[1]),8,0,7); ctx.fillStyle='#eb6834'; ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke(); ctx.lineWidth=1; }
+  ctx.fillStyle='#5b6166'; ctx.font='11px monospace'; ctx.fillText(`${vmin.toFixed(0)} .. ${vmax.toFixed(0)} dB`, 22, cv.height-6);
+}
+async function post(url, body){ const r = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return r.json(); }
+async function place(x,y){
+  tx=[x,y,parseFloat(document.getElementById('z').value)]; path=[]; draw();
+  document.getElementById('msg').textContent='solving...';
+  const res = await post('/api/coverage',{tx, threshold:parseFloat(document.getElementById('thr').value)});
+  if(res.error){ document.getElementById('msg').textContent=res.error; return; }
+  gain=res.gain_db; show(res); draw();
+}
+function show(res){
+  document.getElementById('m-cov').textContent=(res.coverage*100).toFixed(1)+'%';
+  const f=res.gain_db.filter(v=>v>-129); document.getElementById('m-mean').textContent=(f.reduce((a,b)=>a+b,0)/f.length).toFixed(1);
+  document.getElementById('m-time').textContent=res.seconds.toFixed(2);
+  document.getElementById('m-tx').textContent=res.tx.map(v=>v.toFixed(2)).join(', ');
+  document.getElementById('msg').textContent=`coverage ${(res.coverage*100).toFixed(1)}% above ${document.getElementById('thr').value} dB at (${res.tx.map(v=>v.toFixed(2)).join(', ')})`;
+}
+cv.addEventListener('click', e=>{ const r=cv.getBoundingClientRect(); const X=(e.clientX-r.left)*cv.width/r.width, Y=(e.clientY-r.top)*cv.height/r.height;
+  const b=bounds(); place(b.x0+(X-20)/(cv.width-40)*(b.x1-b.x0), b.y1-(Y-20)/(cv.height-40)*(b.y1-b.y0)); });
+document.getElementById('opt').onclick = async ()=>{ if(!tx) return; const btn=document.getElementById('opt'); btn.disabled=true;
+  document.getElementById('msg').textContent='optimising (reverse-mode solves)...';
+  const res = await post('/api/optimize',{tx, threshold:parseFloat(document.getElementById('thr').value), steps:parseInt(document.getElementById('steps').value)});
+  btn.disabled=false; if(res.history.length){ path=res.history.map(h=>h.tx); tx=res.final.tx; gain=res.final.gain_db; show(res.final); draw();
+    document.getElementById('optpath').textContent = res.history.map(h=>`step ${String(h.step).padStart(2)}  (${h.tx.map(v=>v.toFixed(2)).join(', ')})  soft ${h.objective.toFixed(4)}  coverage ${(h.coverage*100).toFixed(1)}%`).join('\n'); } };
+document.getElementById('retrain').onclick = async ()=>{ if(!tx) return; const r = await post('/api/retrain',{tx, positions:160, iterations:2000, mode:'db'});
+  if(r.error){ document.getElementById('job').textContent=r.error; return; } poll(); };
+async function poll(){ const s = await (await fetch('/api/status')).json(); const el=document.getElementById('job');
+  if(s.state==='generating'||s.state==='training'){ el.textContent=`${s.state}... ${((Date.now()/1000)-s.started).toFixed(0)} s  ${(s.log||[]).join(' | ')}`; setTimeout(poll,2000); return; }
+  if(s.state==='error'){ el.textContent='error: '+s.error; return; }
+  if(s.state==='done'){ const R=s.results; el.textContent=`${(s.log||[]).join(' | ')} | total ${s.total_seconds.toFixed(0)} s | held-out PSNR(jet) ${R.final.psnr_rgb.toFixed(2)} dB, RMSE ${R.final.rmse_db_in_range.toFixed(2)} dB in range`;
+    const h=R.history, W=520,H=160, xs=h.map(p=>p.iteration), ys=h.map(p=>p.psnr_rgb), y0=Math.min(...ys), y1=Math.max(...ys);
+    const pts=h.map(p=>`${40+(p.iteration/xs[xs.length-1])*(W-50)},${10+(H-30)-(p.psnr_rgb-y0)/((y1-y0)||1)*(H-30)}`).join(' ');
+    document.getElementById('curve').innerHTML=`<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px"><polyline points="${pts}" fill="none" stroke="var(--s3)" stroke-width="2"/><text x="40" y="${H-6}" font-size="10" fill="var(--muted)">0</text><text x="${W-10}" y="${H-6}" text-anchor="end" font-size="10" fill="var(--muted)">${xs[xs.length-1]} it</text><text x="4" y="14" font-size="10" fill="var(--muted)">${y1.toFixed(1)} dB</text><text x="4" y="${H-24}" font-size="10" fill="var(--muted)">${y0.toFixed(1)}</text></svg>`;
+    document.getElementById('renders').innerHTML = R.renders.map(r=>`<figure style="margin:0"><img src="${r.truth}" alt="truth"><figcaption>truth ${r.name}</figcaption><img src="${r.pred}" alt="prediction"><figcaption>RRF</figcaption></figure>`).join(''); } }
+(async()=>{ grid = await (await fetch('/api/grid')).json(); cands = (grid.sweep? grid.sweep.tx.map((t,i)=>({tx:t,cov:grid.sweep.coverage[i]})):[]);
+  const [lx,ly]=grid.lobby; cv.height = Math.round(cv.width*(ly[1]-ly[0]+1)/(lx[1]-lx[0]+1)); draw(); place(grid.tx[0], grid.tx[1]); })();
+</script></body></html>
