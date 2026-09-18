@@ -30,6 +30,14 @@ def main():
 
     meta = json.load(open(os.path.join(cfg.truth, "generation_meta.json")))
     lo0, hi0 = meta["channel_ranges"][0]
+    names_ch = meta.get("channels", ["power_db", "aod_az", "aod_zen", "delay_ns"])
+    pair = "aod_az_cos" in names_ch
+    iz, idl = names_ch.index("aod_zen"), names_ch.index("delay_ns")
+
+    def azimuth(arr):
+        if pair:
+            return np.degrees(np.arctan2(arr[names_ch.index("aod_az_sin")], arr[names_ch.index("aod_az_cos")]))
+        return arr[names_ch.index("aod_az")] * 360 - 180
     names = sorted(f[:-4] for f in os.listdir(os.path.join(cfg.multi, "renders")) if f.endswith(".npy"))
     names = [n for n in names if os.path.exists(os.path.join(cfg.aod3, "renders", n + ".npy"))]
     acc = {"multi": {"az": [], "zen": [], "delay": []}, "aod3": {"az": [], "zen": []}}
@@ -40,10 +48,10 @@ def main():
         if not mask.any():
             continue
         n_pix += int(mask.sum())
-        t_az, t_zen, t_delay = truth[1] * 360 - 180, truth[2] * 180, truth[3]
+        t_az, t_zen, t_delay = azimuth(truth), truth[iz] * 180, truth[idl]
 
         m = np.load(os.path.join(cfg.multi, "renders", n + ".npy")).astype(np.float64)
-        p_az, p_zen, p_delay = m[1] * 360 - 180, m[2] * 180, m[3]
+        p_az, p_zen, p_delay = azimuth(m), m[iz] * 180, m[idl]
         d_az = (p_az - t_az + 180) % 360 - 180
         acc["multi"]["az"].append(d_az[mask] ** 2)
         acc["multi"]["zen"].append((p_zen - t_zen)[mask] ** 2)
@@ -60,16 +68,21 @@ def main():
         acc["aod3"]["az"].append(d_az[mask] ** 2)
         acc["aod3"]["zen"].append((q_zen - t_zen)[mask] ** 2)
 
-    def rmse(lst):
-        return float(np.sqrt(np.concatenate(lst).mean())) if lst else float("nan")
+    def summary(lst):
+        e = np.sqrt(np.concatenate(lst))
+        return {"rmse": float(np.sqrt((e ** 2).mean())), "median": float(np.median(e)), "p90": float(np.percentile(e, 90)),
+                "frac_gt_45": float((e > 45).mean())}
 
     result = {"views": len(names), "pixels": n_pix,
-              "multi": {k: rmse(v) for k, v in acc["multi"].items()},
-              "aod3": {k: rmse(v) for k, v in acc["aod3"].items()}}
-    print(f"{len(names)} views, {n_pix:,} pixels with a path")
-    print(f"  AoD azimuth RMSE : MULTI {result['multi']['az']:6.2f} deg | AOD3 (angle x amp, decoded) {result['aod3']['az']:6.2f} deg")
-    print(f"  AoD zenith  RMSE : MULTI {result['multi']['zen']:6.2f} deg | AOD3 {result['aod3']['zen']:6.2f} deg")
-    print(f"  delay RMSE       : MULTI {result['multi']['delay']:6.2f} ns  | AOD3 has no delay channel")
+              "multi": {k: summary(v) for k, v in acc["multi"].items()},
+              "aod3": {k: summary(v) for k, v in acc["aod3"].items()}}
+    print(f"{len(names)} views, {n_pix:,} pixels with a path  (RMSE / median / P90; share > 45 deg)")
+    for q, unit in (("az", "deg"), ("zen", "deg"), ("delay", "ns")):
+        mm = result["multi"][q]; line = f"  {q:6s} MULTI {mm['rmse']:6.2f} / {mm['median']:5.2f} / {mm['p90']:6.2f} {unit}"
+        if q != "delay":
+            line += f"  (>45: {mm['frac_gt_45']*100:.1f}%)"
+            aa = result["aod3"][q]; line += f" | AOD3 decoded {aa['rmse']:6.2f} / {aa['median']:5.2f} / {aa['p90']:6.2f} {unit} (>45: {aa['frac_gt_45']*100:.1f}%)"
+        print(line)
     out = cfg.out or os.path.join(os.path.dirname(cfg.multi.rstrip("/")), "encoding_comparison.json")
     json.dump(result, open(out, "w"), indent=1)
     print("wrote", out)

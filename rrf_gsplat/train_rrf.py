@@ -358,9 +358,12 @@ def evaluate_multi(model, data, idx, ch_ranges, channel_names, save_dir=None, ma
     mc = mask_channel
     span0 = float(hi[mc, 0, 0] - lo[mc, 0, 0])
     tot = {"psnr_rgb": 0.0, "ssim_rgb": 0.0, "rmse_db": 0.0, "mae_db": 0.0, "rmse_db_in_range": 0.0, "n": 0}
+    pair = ("aod_az_cos" in channel_names) and ("aod_az_sin" in channel_names)
     for c in range(len(channel_names)):
-        if c != mc:
+        if c != mc and channel_names[c] not in ("aod_az_cos", "aod_az_sin"):
             tot[f"rmse_{channel_names[c]}"] = 0.0
+    if pair:
+        tot["rmse_aod_az"] = 0.0; tot["median_aod_az"] = 0.0
     for i in idx:
         img = model.render(data["viewmats"][i], data["Ks"][i], data["width"], data["height"], span0).clamp(0, 1)
         gt_f = data["float"][i].float()
@@ -375,8 +378,13 @@ def evaluate_multi(model, data, idx, ch_ranges, channel_names, save_dir=None, ma
         tot["mae_db"] += float(d0.abs().mean())
         tot["rmse_db_in_range"] += float(torch.sqrt(((pred_f[mc] - gt_f[mc].clamp(float(lo[mc, 0, 0]), float(hi[mc, 0, 0]))) ** 2).mean()))
         mask = gt_n[mc] > 0.02
+        if pair and mask.any():
+            ic, is_ = channel_names.index("aod_az_cos"), channel_names.index("aod_az_sin")
+            az_p = torch.rad2deg(torch.atan2(pred_f[is_], pred_f[ic])); az_t = torch.rad2deg(torch.atan2(gt_f[is_], gt_f[ic]))
+            d = ((az_p - az_t + 180.0) % 360.0 - 180.0)[mask]
+            tot["rmse_aod_az"] += float(torch.sqrt((d ** 2).mean())); tot["median_aod_az"] += float(d.abs().median())
         for c in range(len(channel_names)):
-            if c == mc:
+            if c == mc or channel_names[c] in ("aod_az_cos", "aod_az_sin"):
                 continue
             d = pred_f[c] - gt_f[c]
             name = channel_names[c]

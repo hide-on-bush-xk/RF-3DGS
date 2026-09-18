@@ -259,8 +259,8 @@ def channel_ranges(all_db: np.ndarray, kind: str):
         # physical sits below -150 dB here.
         hit = power > -150.0
         rng = [[float(np.percentile(power[hit], 1)), float(np.percentile(power[hit], 99.99))],
-               [0.0, 1.0], [0.0, 1.0],
-               [float(np.percentile(all_db[:, 3][hit], 0.1)), float(np.percentile(all_db[:, 3][hit], 99.9))]]
+               [-1.0, 1.0], [-1.0, 1.0], [0.0, 1.0],
+               [float(np.percentile(all_db[:, 4][hit], 0.1)), float(np.percentile(all_db[:, 4][hit], 99.9))]]
         return rng
     lo, hi = float(all_db.min()), float(all_db.max())          # AOD3: one range, it is a picture
     return [[lo, hi]] * all_db.shape[1]

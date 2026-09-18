@@ -115,12 +115,24 @@ def main():
     def rmse(lst):
         return float(torch.sqrt(torch.cat(lst).mean()))
 
+    def dist(lst):
+        # squared errors -> |error|: median, P90, and the share above 90 deg (a wrap would put mass near 180)
+        e = torch.sqrt(torch.cat(lst)).cpu().numpy()
+        import numpy as _np
+        hist, edges = _np.histogram(e, bins=[0, 2, 5, 10, 20, 45, 90, 135, 181])
+        return {"median": float(_np.median(e)), "p90": float(_np.percentile(e, 90)),
+                "frac_gt_90": float((e > 90).mean()), "hist": hist.tolist(), "edges": edges.tolist()}
+
     result = {"positions": [gi for gi, _ in chosen], "hit_pixels": n_hit, "sigmas": {}}
     print(f"\n{len(chosen)} positions, {n_hit:,} equirect pixels with a path")
     print("sigma | encoded mean vs strongest path: az / zen / delay | after pinhole resampling: az / zen | AOD3 decoded: az / zen")
     for s in cfg.sigmas:
         r = {k: rmse(v) for k, v in rows[s].items()}
         result["sigmas"][str(s)] = r
+        for key in ("az_enc", "az_enc_persp", "az_aod3"):
+            d = dist(rows[s][key]); r[key + "_dist"] = d
+            print(f"        {key:13s} |err| median {d['median']:5.2f} deg, P90 {d['p90']:6.2f}, >90 deg: {d['frac_gt_90']*100:.2f}%  "
+                  f"hist{d['edges'][:-1]} = {d['hist']}")
         print(f"{s:5.1f} | {r['az_enc']:6.2f} deg / {r['zen_enc']:6.2f} deg / {r['dl_enc']:6.2f} ns | "
               f"{r['az_enc_persp']:6.2f} / {r['zen_enc_persp']:6.2f} deg | {r['az_aod3']:6.2f} / {r['zen_aod3']:6.2f} deg")
     json.dump(result, open(cfg.out, "w"), indent=1)

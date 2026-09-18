@@ -160,9 +160,11 @@ def render(found):
 
     enc = found.get("encoding")
     if enc:
-        # the physical metric first: what the field decodes to
-        meters.append(_meter(f"{enc['multi']['az']:.1f}&deg; / {enc['multi']['zen']:.1f}&deg; / {enc['multi']['delay']:.1f} ns",
-                             "decoded AoD azimuth / zenith / delay RMSE, one channel per quantity"))
+        # the physical metric first: what the field decodes to, as the median
+        # (the RMSE is carried by a few percent of multi-path pixels)
+        m = enc["multi"]
+        meters.append(_meter(f"{m['az']['median']:.1f}&deg; / {m['zen']['median']:.1f}&deg; / {m['delay']['median']:.1f} ns",
+                             f"decoded AoD azimuth / zenith / delay, median per pixel (P90 {m['az']['p90']:.0f}&deg; / {m['zen']['p90']:.0f}&deg; / {m['delay']['p90']:.0f} ns)"))
     c0 = next((r for r in by["baseline"]), None)
     if c0:
         meters.append(_meter(f"{c0['psnr_rgb']:.2f}", "gsplat RRF on the released MVDR data, PSNR after jet mapping (published 16.02)", "dB"))
@@ -218,9 +220,12 @@ def render(found):
         enc = found.get("encoding")
         enc_html = ""
         if enc:
-            enc_html = _table(["decoded from", "AoD azimuth RMSE (deg)", "AoD zenith RMSE (deg)", "delay RMSE (ns)"],
-                              [["one channel per quantity (MULTI)", f"{enc['multi']['az']:.2f}", f"{enc['multi']['zen']:.2f}", f"{enc['multi']['delay']:.2f}"],
-                               ["angle &times; amplitude RGB (the tutorial's AoD encoding)", f"{enc['aod3']['az']:.2f}", f"{enc['aod3']['zen']:.2f}", "&ndash;"]])
+            def cell(q):
+                return f"{q['median']:.2f} / {q['p90']:.1f} / {q['rmse']:.1f}"
+            mm, aa = enc["multi"], enc["aod3"]
+            enc_html = _table(["decoded from", "AoD azimuth (deg): median / P90 / RMSE", "AoD zenith (deg)", "delay (ns)", "pixels > 45&deg; (az)"],
+                              [["one channel per quantity (MULTI)", cell(mm["az"]), cell(mm["zen"]), cell(mm["delay"]), f"{mm['az']['frac_gt_45']*100:.1f}%"],
+                               ["angle &times; amplitude RGB (the tutorial's AoD encoding)", cell(aa["az"]), cell(aa["zen"]), "&ndash;", f"{aa['az']['frac_gt_45']*100:.1f}%"]])
         cards.append(
             '<figure class="card wide"><h2>Multi-channel targets</h2>'
             '<p class="rrf-note">gsplat rasterises any number of channels, so path power, departure '

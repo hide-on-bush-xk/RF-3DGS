@@ -130,25 +130,49 @@ free space — the gain is in scales and rotations. And it transfers: the
 Tx-A-adapted geometry, frozen and with colours reset, fine-tuned on Tx-B
 gives 17.99 dB / 4.58 dB in-range RMSE against 17.86 / 4.82 from the visual
 geometry (`--init-from ... --init-geometry-only`); unfreezing on Tx-B itself
-gives 19.43 / 3.83. So the position basis stays Tx-invariant and the local
-shape adapted once carries over. gsplat's MCMC densification with its default
+gives 19.43 / 3.83. Read as a decomposition: **24 % of the unfreezing gain
+is a transferable geometric correction, 76 % is specific to the transmitter
+it was fitted on.** That is not a frozen-versus-joint artefact — the adapted
+geometry frozen on Tx-A itself, colours refit from zero, reaches 21.55 /
+2.81, the same as the joint fit. `diag_shape.py` finds no directional
+signature of Tx-A in the change (rotation axes isotropic to the Tx
+direction; extent along it +7 % against +3 % along other directions; the
+short axis aligns *less* with surface normals afterwards, so this is not a
+move towards 2DGS-like flatness). The position basis stays Tx-invariant;
+the shape adaptation is Tx-specific without being Tx-directional — the
+measured cost of a colour function with no incident-direction argument.
+gsplat's MCMC densification with its default
 hyper-parameters diverges from this converged start (NaN loss by 4k
 iterations at either cap); a low-noise, late-start, relocate-only
 configuration is the next thing to try.
 
 **Multi-channel targets** (`--mode multi`, 2.4 GHz, tutorial materials):
-path power, AoD azimuth, AoD zenith and delay each get a channel. Decoded on
-the same held-out pixels, the per-quantity channels give 19.0° / 11.6° / 8.2 ns
-(azimuth / zenith / delay RMSE) where the tutorial's angle × amplitude RGB
-encoding decodes to 48.6° / 56.6°. With one channel per quantity the
-amplitude no longer needs to be multiplied into the angle at all.
+path power, AoD azimuth (as cos and sin, so the channel has no seam), AoD
+zenith and delay each get a channel. Decoded on the same 20.4M held-out
+pixels a path reaches, reported as **median / P90 / RMSE** because the error
+has a tail:
 
-Where the 19° comes from (`diag_encoding_truth.py`, no RRF involved): the
-target's own power-weighted mean angle is already 12.6° from the strongest
-path in the pixel at the tutorial's splat width (σ = 3 px), 4.9° at σ = 1.
-But a σ = 1 target trains *worse* (22.6° / 19.7° / 11.3 ns): it covers less
-than half the pixels and is spikier, and the field's own error dominates.
-The kernel is not the lever; the representation is.
+| decoded from | AoD azimuth | AoD zenith | delay |
+| --- | --- | --- | --- |
+| one channel per quantity | **1.8° / 11.0° / 19.0°** | **0.7° / 7.7° / 11.6°** | **2.3 / 11.5 / 8.2 ns** |
+| the tutorial's angle × amplitude RGB | 26.9° / 85.6° / 48.6° | 29.6° / 90.5° / 56.6° | — |
+
+The typical pixel decodes to within 2° of azimuth and 1° of zenith; the RMSE
+is carried by the 3 % of pixels where two comparable paths with opposite
+departure angles share a pixel and the encoded mean lands between them (the
+same tail exists in the target itself: `diag_encoding_truth.py` puts the
+target's median at 0.2° and its RMSE at 8.9° with no field involved). The
+tutorial's encoding is bad in the median too: decoding it divides two
+learned channels, and δ(a/b)/(a/b) = √((δa/a)² + (δb/b)²) is unbounded as
+the amplitude channel → 0. The gain of one channel per quantity is
+conditioning, not capacity.
+
+Splat width in degrees: the equirect grid is 1/3° per pixel, so σ = 3 px is
+1°, ten times sharper than an M = 10 array resolves (θ₃dB ≈ 102°/M = 10.2°).
+A σ = 1 (0.33°) target trains worse (zenith median 1.5°, P90 27°): its
+bandwidth exceeds what the field represents. Matching σ to the array's
+beamwidth (≈ θ₃dB/2.355 ≈ 4.3°, 13 px) would make the six spectra comparable
+at one angular resolution and take σ off the list of free parameters.
 
 **Transmitter moved** (Tx-B at (8.2, −5.4, 2.0), Tx-A's dB range): cold start
 reaches PSNR 17 in 1500 iterations (≈ 27 s), warm start from the Tx-A `db`
