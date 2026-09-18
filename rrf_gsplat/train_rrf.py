@@ -140,6 +140,31 @@ def load_views(source, names, views, device, want_float):
 # --------------------------------------------------------------------------
 # model
 # --------------------------------------------------------------------------
+def sh_basis(deg, dirs):
+    """Real SH basis up to degree 3 for unit directions [N,3] -> [N,(deg+1)^2].
+
+    Same ordering and constants as INRIA's utils/sh_utils.eval_sh, so the
+    coefficients mean the same thing.
+    """
+    x, y, z = dirs[:, 0], dirs[:, 1], dirs[:, 2]
+    cols = [torch.full_like(x, 0.28209479177387814)]
+    if deg >= 1:
+        cols += [-0.4886025119029199 * y, 0.4886025119029199 * z, -0.4886025119029199 * x]
+    if deg >= 2:
+        xx, yy, zz, xy, yz, xz = x * x, y * y, z * z, x * y, y * z, x * z
+        cols += [1.0925484305920792 * xy, -1.0925484305920792 * yz,
+                 0.31539156525252005 * (2.0 * zz - xx - yy),
+                 -1.0925484305920792 * xz, 0.5462742152960396 * (xx - yy)]
+    if deg >= 3:
+        cols += [-0.5900435899266435 * y * (3 * xx - yy), 2.890611442640554 * xy * z,
+                 -0.4570457994644658 * y * (4 * zz - xx - yy),
+                 0.3731763325901154 * z * (2 * zz - 3 * xx - 3 * yy),
+                 -0.4570457994644658 * x * (4 * zz - xx - yy),
+                 1.445305721320277 * z * (xx - yy),
+                 -0.5900435899266435 * x * (xx - 3 * yy)]
+    return torch.stack(cols, dim=1)
+
+
 class RRF(torch.nn.Module):
     """Frozen geometry from the visual checkpoint; colours and opacity learn."""
 
@@ -160,25 +185,43 @@ class RRF(torch.nn.Module):
         # for any channel count. DC and the rest are separate parameters so
         # they can take INRIA's separate learning rates (Adam ignores gradient
         # scaling, so a single tensor could not emulate that).
-        self.sh_dc = torch.nn.Parameter(torch.zeros(n, channels, 1, device=device))
-        self.sh_rest = torch.nn.Parameter(torch.zeros(n, channels, k - 1, device=device))
+        # [N, K, C] (coefficient-major), the layout gsplat's SH kernel takes
+        self.sh_dc = torch.nn.Parameter(torch.zeros(n, 1, channels, device=device))
+        self.sh_rest = torch.nn.Parameter(torch.zeros(n, k - 1, channels, device=device))
         self.opacity_logit = torch.nn.Parameter(opacity.to(device).clone(),
                                                 requires_grad=train_opacity)
         self.visual_iteration = it
 
     @property
     def sh(self):
-        return torch.cat([self.sh_dc, self.sh_rest], dim=2)
+        return torch.cat([self.sh_dc, self.sh_rest], dim=1)               # [N, K, C]
 
     def colours(self, cam_center):
-        """View-dependent per-Gaussian value(s), [N, C]; the +0.5 is INRIA's."""
+        """View-dependent per-Gaussian value(s), [N, C]; the +0.5 is INRIA's.
+
+        The SH basis depends only on the (frozen) means and the camera, so it
+        is a constant per view and the colour is one linear map of the
+        coefficients. Evaluating it that way costs one multiply-add in the
+        backward pass instead of autograd through INRIA's eval_sh expression,
+        which was two thirds of a training step for 1M Gaussians.
+        """
         if self.sh_degree == 0:
-            return self.sh_dc[:, :, 0] * 0.28209479177387814 + 0.5
-        dirs = F.normalize(self.means - cam_center[None], dim=-1)
-        return eval_sh(self.sh_degree, self.sh, dirs) + 0.5
+            return self.sh_dc[:, 0, :] * 0.28209479177387814 + 0.5
+        with torch.no_grad():
+            dirs = F.normalize(self.means - cam_center[None], dim=-1)
+            basis = sh_basis(self.sh_degree, dirs)                  # [N, K]
+        return (self.sh * basis[:, :, None]).sum(dim=1) + 0.5
 
     def render(self, viewmat, K, width, height, span_db):
         from gsplat import rasterization
+        if self.mode == "rgb" and self.sh_degree > 0:
+            # gsplat evaluates 3-channel SH in CUDA (and adds INRIA's 0.5 and
+            # clamps at 0 itself); its backward is a third of the torch path's
+            img, alpha, _ = rasterization(
+                self.means, self.quats, self.scales, torch.sigmoid(self.opacity_logit[:, 0]),
+                self.sh, viewmat[None], K[None], width, height,
+                sh_degree=self.sh_degree, backgrounds=torch.zeros(1, 3, device=self.means.device))
+            return img[0].permute(2, 0, 1)
         cam_center = torch.linalg.inv(viewmat)[:3, 3]
         col = self.colours(cam_center)
         if self.mode == "rgb":
@@ -285,7 +328,13 @@ def main():
     views = read_colmap_text(os.path.join(cfg.source, "sparse", "0"))
     train_names, test_names = ensure_split(cfg.source)
     if cfg.max_train_views:
-        train_names = train_names[:: max(1, len(train_names) // cfg.max_train_views)][:cfg.max_train_views]
+        # Keep whole positions (all four yaws), not every k-th image: images
+        # are position-major, so every 4th image would be the same yaw at
+        # every position, and the model would never see the other three.
+        per_pos, n_pos = 4, len(train_names) // 4
+        keep = max(1, cfg.max_train_views // per_pos)
+        pos_idx = np.linspace(0, n_pos - 1, keep).round().astype(int)
+        train_names = [train_names[p * per_pos + k] for p in pos_idx for k in range(per_pos)]
     t0 = time.time()
     train = load_views(cfg.source, train_names, views, device, want_float=True)
     test = load_views(cfg.source, test_names, views, device, want_float=True)
@@ -297,7 +346,11 @@ def main():
                 train_opacity=not cfg.freeze_opacity)
     if cfg.init_from:
         st = torch.load(cfg.init_from, map_location=device)
-        model.sh_dc.data.copy_(st["sh_dc"]); model.sh_rest.data.copy_(st["sh_rest"])
+        for name in ("sh_dc", "sh_rest"):                 # accept the older [N, C, K] layout
+            t = st[name]
+            if t.shape != getattr(model, name).shape:
+                t = t.permute(0, 2, 1).contiguous()
+            getattr(model, name).data.copy_(t)
         model.opacity_logit.data.copy_(st["opacity_logit"])
         print(f"warm start from {cfg.init_from}")
     print(f"{model.means.shape[0]:,} Gaussians from visual iteration {model.visual_iteration}; "

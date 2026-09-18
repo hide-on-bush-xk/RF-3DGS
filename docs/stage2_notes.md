@@ -84,3 +84,28 @@ scattering, scat_keep_prob=0.1, num_samples=1e6)` + `MVDR_spectrum(time_interval
 版本 60 GHz、31 万条路径、每视图 0.097 s(10.3 views/s),3200 视图 5 分钟。同频同设置的对比待补(见下)。
 场景加载:0.19 无法读 V1.1 的 Sionna 2 格式材料,用 `NIST_lobby_V1.0_material_assigned_ascii.xml`(网格名按
 `ascii_rename_map.json` 转写)。TF 在 WSL 下无 GPU,OptiX 也没有,所以这是 CPU 数字;作者的 GPU 机器会更快。
+
+## Tx 移动一次的成本(2026-09-18 02:02)
+
+| 流水线 | 每视图 | 3200 视图 | RRF 微调 10k 步 |
+| --- | --- | --- | --- |
+| 教程(Sionna 0.19 + TF,CPU,2.4 GHz,62k 路径) | 1.1 s | ≈1.0 h | INRIA 光栅器 272 s(37 it/s,RTX 3060) |
+| 本移植(Sionna 2.1 + OptiX GPU,2.4 GHz 同设置) | 0.068 s(14.8 views/s) | 3.6 min | 同上 |
+| 本移植,60 GHz,312k 路径 | 0.097 s(10.3 views/s) | 5.2 min | gsplat 763 s(13 it/s) |
+| 本移植,Tx 移到 (8.2, −5.4, 2.0),60 GHz | 0.102 s(9.8 views/s) | 5.4 min | 冷/热启动实验见下 |
+
+- 同设置(2.4 GHz)下数据集生成快 **16×**;60 GHz 且路径数 5× 时仍快 11×。
+- **意外**:gsplat 版训练器 13 it/s,比 INRIA 光栅器的 37 it/s 慢 3×。原因待剖析(torch 侧对 100 万高斯逐步算
+  SH、python 开销);INRIA 的 SH 在 CUDA 里。INRIA `--eval` 报告的测试 PSNR 16.82(其内部评估,非 render+metrics)。
+- Tx-B 数据集的全局范围是 −228.5…−69.9 dB;重映射到 Tx-A 的 −175.75…−101.52,这样热启动看到同一套 dB 映射。
+
+## 训练器提速(rrf_gsplat/profile_step.py,1,014,142 高斯,884k 在视野内)
+
+| 一步(fwd+bwd) | rgb | db |
+| --- | --- | --- |
+| 原始:torch `eval_sh` 走 autograd | 101 ms | 36 ms |
+| SH 基在 no_grad 下算好、颜色 = 系数的线性映射 | 65 ms | 23 ms |
+| rgb 改用 gsplat 内置 CUDA SH(系数 [N,K,3] 布局) | 49 ms | 22 ms |
+
+INRIA 光栅器 27 ms/步(37 it/s)仍比 gsplat 的 rgb 路径快;gsplat 的价值在通道数,不在速度。db/power 模式 22 ms。
+`sh_basis` 与 INRIA `eval_sh` 逐项一致(最大差 1e-6)。
