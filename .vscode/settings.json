@@ -14,5 +14,7 @@
     },
     "cmake.sourceDirectory": "${workspaceFolder}/SIBR_viewers",
     "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda"
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "//typecheck": "The INRIA code trips Pylance's basic mode (receive() returning Nones, memoryview(ndarray), optional tb_writer); it runs fine, so the checker is off for this repo only.",
+    "python.analysis.typeCheckingMode": "off"
 }
