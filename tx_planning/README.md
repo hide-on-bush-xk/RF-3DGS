@@ -16,6 +16,7 @@ pictures.
 | 1 | `tx_sweep.py` — brute-force ground truth: candidate Tx positions × indoor Rx grid, structured CIRs | verified |
 | 2 | `optimize_tx.py` — gradient ascent on a coverage objective, Tx position from Sionna's own gradient | verified |
 | 3 | `fit_materials.py` — fit every material's scattering coefficient to PDPs observed from Tx A, score at held-out Tx B | verified |
+| 3b | `active_measurement.py` — pick the second transmitter position by the twin's own sensitivity, before measuring | verified |
 | 4 | real scenes: geometry from gsplat / 2DGS instead of the Blender model | later |
 
 ## Running
@@ -29,6 +30,7 @@ python tx_sweep.py    --scene-xml %SCENE% --tx-grid-step 2 --rx-step 1
 python optimize_tx.py --scene-xml %SCENE% --init-from ../output/tx_planning/tx_sweep.npz ^
                       --objective coverage --threshold-db -85 --tx-height 2.0 --rx-step 1
 python fit_materials.py --scene-xml %SCENE% --steps 25 --samples 30000
+python active_measurement.py --scene-xml %SCENE%
 ```
 
 `tx_sweep.npz` holds `tx_positions`, `rx_positions`, `gain_db [n_tx, n_rx]`,
@@ -89,3 +91,35 @@ starts at 0.5. The fitted twin is scored at Tx B = (0, −3, 2), which it never 
   which walls a second transmitter position would have to illuminate — i.e.
   where to measure next. That is the active-measurement question a planner can
   ask that RadioSight's per-AP twin cannot.
+
+## Stage 3b: where to measure next (`active_measurement.py`)
+
+Transmitter A leaves 22 of 29 materials unconstrained. Before measuring
+anything, the twin can say what a candidate second position *would* reveal:
+the sensitivity ‖∂PDP/∂s_n‖² of that position's PDPs to each material,
+estimated with four random projections and one backward pass each
+(Hutchinson: E[(J·w)²] = ‖J‖²). A candidate is scored by
+Σ_n log(1 + sens_C(n) / (sens_A(n) + floor)) — large for materials A never
+saw, saturating for those it already pins down — and the twin is then fitted
+from A plus the best candidate, versus A plus the median-scoring one.
+Held-out transmitters: (0, −3), (8, −15), (8, 1), i.e. main room and both
+corridor ends; six candidates on a 4 m grid.
+
+| fitted from | mean RMSE at the 3 held-out Tx | materials identifiable |
+|---|---|---|
+| prior (all 0.5) | 1.24 dB | 0 |
+| A only | 0.30 dB | 7 |
+| A + median-scoring C = (8, −3) | 0.25 dB | 7 |
+| **A + chosen C = (0, 1)** | **0.17 dB** | 8 |
+
+The chosen position halves the held-out error; an arbitrary second position
+takes off a sixth. The score is computed from the prior alone, so this is
+the planner's loop: fit → ask the twin where it is blind → measure there.
+The 4 m candidate grid and 25-step fits are the smoke setting; the ranking
+is cheap (about 1 s per candidate) next to the fits.
+
+Optimiser note: `adam-rel` (Adam with ε tied to the largest running gradient)
+was tried to let weakly-constrained materials converge faster than
+normalised gradient descent allows; it keeps the unconstrained ones still
+but its sign-like steps overshoot on noisy gradients (identifiable-material
+error 0.051 vs 0.025), so `ngd` stays the default.
