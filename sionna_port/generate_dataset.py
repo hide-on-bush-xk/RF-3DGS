@@ -68,6 +68,7 @@ class Config:
     materials: str = "uniform"      # uniform | tutorial | tutorial-asis
     poses_from: str = None          # images.txt of a dataset whose exact poses to reuse
     splat_sigma: float = 3.0        # projection family: splat kernel width in equirect pixels
+    power_floor_db: float = -150.0  # projection family: splat power under this is a kernel tail, not a path
     # Cheap views, decorrelated between views, and let the fit do the averaging.
     #
     # Sionna's solver shoots samples_per_src rays from a fixed lattice, so a low
@@ -78,6 +79,7 @@ class Config:
     # residual is independent between views and the radiance field accumulates
     # towards the high-sample answer while each view stays cheap.
     per_view_seed: bool = True
+    seed_per_view: bool = False     # pre-fix behaviour: every view (not position) gets its own lattice and solve; for A/B only
     bandwidth_hz: float = 400e6     # link budget only; scales SNR and capacity
     dashboard: bool = True
 
@@ -220,7 +222,7 @@ def element_gain_fn(theta: torch.Tensor, phi: torch.Tensor) -> torch.Tensor:
 PROJECTION_KINDS = ("MULTI", "AOD3")
 
 
-def projection_equirect(paths, kind: str, device, sigma: float = 3.0):
+def projection_equirect(paths, kind: str, device, sigma: float = 3.0, power_floor_db: float = -150.0):
     """The projection family's whole-sphere image for one receiver position.
 
     Splatted at the angle of arrival in the world frame, so it does not
@@ -230,7 +232,7 @@ def projection_equirect(paths, kind: str, device, sigma: float = 3.0):
     pixel, i.e. how much the encoded mean angle departs from any real path.
     """
     from rf_spectra import aod_spectrum_equirect, multichannel_spectrum_equirect
-    eq = (multichannel_spectrum_equirect(paths, sigma=sigma) if kind == "MULTI"
+    eq = (multichannel_spectrum_equirect(paths, sigma=sigma, power_floor_db=power_floor_db) if kind == "MULTI"
           else aod_spectrum_equirect(paths, sigma=sigma))
     return eq.to(device)
 
@@ -239,7 +241,7 @@ def spectrum_for_paths(paths, grid: ArrayGrid, cfg: Config, yaw: float = 0.0):
     kind = cfg.spectrum.upper()
     if kind in PROJECTION_KINDS:
         from rf_spectra import equirect_to_perspective
-        eq = projection_equirect(paths, kind, grid.theta.device, cfg.splat_sigma)
+        eq = projection_equirect(paths, kind, grid.theta.device, cfg.splat_sigma, cfg.power_floor_db)
         persp = equirect_to_perspective(eq, cfg.width, cfg.height, cfg.fov_deg, yaw_rad=yaw)
         return None, persp                                   # [C, H, W]
     response = paths_to_response(paths, cfg.time_interval_ns, device=grid.theta.device)
@@ -250,14 +252,14 @@ def spectrum_for_paths(paths, grid: ArrayGrid, cfg: Config, yaw: float = 0.0):
     raise ValueError(f"unknown spectrum type {cfg.spectrum!r}")
 
 
-def channel_ranges(all_db: np.ndarray, kind: str):
+def channel_ranges(all_db: np.ndarray, kind: str, power_floor_db: float = -150.0):
     """Per-channel (min, max) for a multi-channel dataset, [C, 2]."""
     if kind == "MULTI":
         power = all_db[:, 0]
         # Pixels a path reaches. The pinhole resampling blends the -200 dB
         # floor into edge pixels, so "above the floor" is not enough; nothing
         # physical sits below -150 dB here.
-        hit = power > -150.0
+        hit = power > power_floor_db     # the encoder truncated there; a face pixel resampled across the hit/floor edge is not a hit
         rng = [[float(np.percentile(power[hit], 1)), float(np.percentile(power[hit], 99.99))],
                [-1.0, 1.0], [-1.0, 1.0], [0.0, 1.0],
                [float(np.percentile(all_db[:, 4][hit], 0.1)), float(np.percentile(all_db[:, 4][hit], 99.9))]]
@@ -305,8 +307,8 @@ def generate(cfg: Config):
         if i % 50 == 0:
             print(f"  {i}/{len(groups)}")
         eq = None
-        for yaw in yaws:
-            if projection and eq is not None:
+        for j, yaw in enumerate(yaws):
+            if projection and eq is not None and not cfg.seed_per_view:
                 # same position, same paths: cut the next face from the sphere
                 from rf_spectra import equirect_to_perspective
                 spec_db = equirect_to_perspective(eq, cfg.width, cfg.height, cfg.fov_deg, yaw_rad=yaw)
@@ -319,9 +321,9 @@ def generate(cfg: Config):
                 # face boundary can exist in one face and be missing in the
                 # next. Randomising the lattice across positions still gives the
                 # multi-view fit independent residuals to average.
-                paths = solve_paths(solver, scene, cfg, view_index=i)
+                paths = solve_paths(solver, scene, cfg, view_index=(i * len(yaws) + j) if cfg.seed_per_view else i)
                 if projection:
-                    eq = projection_equirect(paths, cfg.spectrum.upper(), grid.theta.device, cfg.splat_sigma)
+                    eq = projection_equirect(paths, cfg.spectrum.upper(), grid.theta.device, cfg.splat_sigma, cfg.power_floor_db)
                     from rf_spectra import equirect_to_perspective
                     spec_db = equirect_to_perspective(eq, cfg.width, cfg.height, cfg.fov_deg, yaw_rad=yaw)
                 else:
@@ -349,7 +351,7 @@ def generate(cfg: Config):
     all_db = np.stack(specs)
     multi = all_db.ndim == 4                                  # [n, C, H, W]
     if multi:
-        ranges = channel_ranges(all_db, cfg.spectrum.upper())
+        ranges = channel_ranges(all_db, cfg.spectrum.upper(), cfg.power_floor_db)
         spec_min, spec_max = ranges[0]
         print(f"channel ranges: {[(round(a, 2), round(b, 2)) for a, b in ranges]}")
     else:
@@ -456,6 +458,8 @@ def main():
                     help="transmitter position; the default is the NIST measurement Tx")
     ap.add_argument("--frequency", type=float, default=60e9,
                     help="carrier in Hz; the tutorial's dataset cells use 2.4e9")
+    ap.add_argument("--power-floor-db", type=float, default=-150.0,
+                    help="MULTI: splat power under this is a kernel tail and is dropped (paper: noise-floor truncation)")
     ap.add_argument("--splat-sigma", type=float, default=3.0,
                     help="MULTI/AOD3: splat kernel width in equirect pixels (1/3 deg); 3 is the tutorial's")
     ap.add_argument("--poses-from", default=None,
@@ -475,6 +479,8 @@ def main():
     ap.add_argument("--no-dashboard", dest="dashboard", action="store_false")
     ap.add_argument("--samples-per-src", type=int, default=1_000_000,
                     dest="samples_per_src")
+    ap.add_argument("--seed-per-view", dest="seed_per_view", action="store_true",
+                    help="pre-fix behaviour for A/B tests: one lattice and solve per view instead of per position")
     ap.add_argument("--fixed-seed", dest="per_view_seed", action="store_false",
                     help="reuse one sampling lattice for every view, which "
                          "correlates the sampling residual across views")

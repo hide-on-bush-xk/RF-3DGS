@@ -185,16 +185,28 @@ learned channels, and δ(a/b)/(a/b) = √((δa/a)² + (δb/b)²) is unbounded as
 the amplitude channel → 0. The gain of one channel per quantity is
 conditioning, not capacity.
 
-Splat width as a measurement, not a hyper-parameter: sweeping σ over
-0.33° / 1° / 2° / 4.3° (1 / 3 / 6 / 13 equirect pixels, (cos, sin) target),
-the decoded azimuth error is smallest at **σ\* ≈ 2°** (median 0.57°, P90
-5.3°; 0.33° gives 0.93° / 9.7°, 4.3° gives 0.70° / 6.2°). That minimum is
-the field's representation bandwidth: θ₃dB = 2.355 σ\* ≈ 4.7°, i.e. the
-radiance field resolves angles like an M ≈ 22 array (the paper's M = 10
-array has θ₃dB ≈ 10°). Zenith and delay keep improving with smoother
-targets. Caveat: the set of pixels a path reaches grows with σ (8.8M →
-32M), so the rows are not scored on one support; a fixed-support version
-is pending.
+Splat width, swept over 0.33° / 1° / 2° / 4.3° (1 / 3 / 6 / 13 equirect
+pixels, (cos, sin) target). The set of pixels a path reaches grows with σ
+(8.8M → 32M), so every row is scored twice: on its own support, and on the
+fixed support of the σ = 0.33° dataset (8.8M pixels, the kernel cores):
+
+| σ | azimuth, own support | azimuth, fixed support | zenith, fixed | delay, fixed |
+| --- | --- | --- | --- | --- |
+| 0.33° | 0.93° / 9.7° | 0.93° / 9.7° | 1.63° / 29.4° | 3.3 / 19.1 ns |
+| 1° | 0.59° / 5.9° | **0.56° / 3.9°** | 0.68° / 4.2° | 2.3 / 13.0 ns |
+| 2° | **0.57° / 5.3°** | 0.64° / 5.3° | **0.64° / 3.2°** | 2.3 / 13.0 ns |
+| 4.3° | 0.70° / 6.2° | 0.95° / 9.7° | 0.72° / 3.6° | 2.3 / 12.8 ns |
+
+(median / P90.) On a fixed support the azimuth optimum is σ\* = 1°, not
+the 2° the growing support suggested: the pixels a wider kernel adds are
+easier in the median and moved the minimum. Zenith is flat from 1° on
+with its best tail at 2°; delay is flat from 1° on. Hypothesis, not a
+conclusion: if the σ that minimises the decoded error measures the field's
+angular bandwidth, θ₃dB ≈ 2.355 σ\* is 2.4° on the fixed support (an
+M ≈ 43 array equivalent) and 4.7° on the growing one (M ≈ 22); the number
+moves with the support, so it is not settled, and the paper's 5.94° median
+beam-pointing error is a different quantity (an M = 10 beam pointed by the
+field) rather than a comparison point.
 
 **Transmitter moved** (Tx-B at (8.2, −5.4, 2.0), Tx-A's dB range): cold start
 reaches PSNR 17 in 1500 iterations, warm start from the Tx-A `db` model in

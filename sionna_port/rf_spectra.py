@@ -306,7 +306,7 @@ MULTI_CHANNELS = ("power_db", "aod_az_cos", "aod_az_sin", "aod_zen", "delay_ns")
 
 
 def multichannel_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0,
-                                   floor_db: float = -200.0):
+                                   floor_db: float = -200.0, power_floor_db: float = -150.0):
     """One physical quantity per channel, splatted at the angle of arrival.
 
     Returns [5, 180*scale, 360*scale]:
@@ -320,16 +320,25 @@ def multichannel_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0,
     and Delay pictures, no channel is a product of an angle and an amplitude:
     the amplitude has its own channel.
     """
-    return multichannel_from_arrays(*_path_arrays(paths), scale=scale, sigma=sigma, floor_db=floor_db)
+    return multichannel_from_arrays(*_path_arrays(paths), scale=scale, sigma=sigma, floor_db=floor_db,
+                                    power_floor_db=power_floor_db)
 
 
 def multichannel_from_arrays(amp, tau, theta_r, phi_r, theta_t, phi_t,
-                             scale: int = 3, sigma: float = 3.0, floor_db: float = -200.0):
+                             scale: int = 3, sigma: float = 3.0, floor_db: float = -200.0,
+                             power_floor_db: float = -150.0):
     """The same, from per-path tensors (amplitude, delay [s], AoA, AoD in rad).
 
     Split out so a smoke test can feed one synthetic path and check that the
     channels decode to exactly that path. Zero paths is a valid input: every
     pixel gets floor_db and zeros.
+
+    `power_floor_db` truncates the splat: a Gaussian kernel's tail carries
+    10 log10 of a vanishing power (exp(-r^2/2 sigma^2) at 40 px is -386 dB),
+    which is a numerical residue, not a path-loss value. Pixels whose
+    splatted power falls under this floor are treated as untouched (floor_db,
+    zero angles and delay), the way the paper truncates path loss at the
+    noise floor of its training samples.
     """
     device = amp.device
     h, w_px = 180 * scale, 360 * scale
@@ -342,7 +351,7 @@ def multichannel_from_arrays(amp, tau, theta_r, phi_r, theta_t, phi_t,
                            w * theta_t, w * tau * 1e9])
     img = equirect_splat(theta_r, phi_r, stacked, scale, sigma)
     power, cos_az, sin_az, zen, delay = img
-    hit = power > 0
+    hit = power > 10.0 ** (power_floor_db / 10.0)
     p = power.clamp_min(1e-300)
     out[0] = torch.where(hit, 10 * torch.log10(p), torch.full_like(power, floor_db))
     out[1] = torch.where(hit, cos_az / p, torch.zeros_like(cos_az))

@@ -422,6 +422,11 @@ def main():
     ap.add_argument("--densify", choices=["none", "mcmc"], default="none",
                     help="mcmc: gsplat's MCMC strategy (implies --train-geometry)")
     ap.add_argument("--cap-max", type=int, default=None, help="MCMC cap; default: the checkpoint's count")
+    ap.add_argument("--geometry-fraction", type=float, default=0.11, help="size of the random geometry subset")
+    ap.add_argument("--geometry-seed", type=int, default=0)
+    ap.add_argument("--geometry-subset", choices=["all", "needles", "discs", "random"], default="all",
+                    help="with --train-geometry: let only the needle-like (s_max/s_mid > 3, s_mid/s_min < 3) or "
+                         "disc-like (s_mid/s_min > 3, s_max/s_mid < 3) Gaussians of the checkpoint move")
     ap.add_argument("--mask-channel", type=int, default=0,
                     help="multi: the channel whose value above 0.02 marks pixels a path reaches "
                          "(0 for MULTI's power; 2 for AOD3's amplitude)")
@@ -502,6 +507,19 @@ def main():
            "means": 1.6e-5 * model.spatial_lr_scale, "scales": 5e-3, "quats": 1e-3}
     optimizers = {name: torch.optim.Adam([p], lr=lrs[name], eps=1e-15)
                   for name, p in model.params.items() if p.requires_grad}
+    geom_mask = None
+    if cfg.train_geometry and cfg.geometry_subset != "all":
+        sc = torch.sort(torch.exp(model.params["scales"].detach()), dim=1).values      # min, mid, max
+        mid_min, max_mid = sc[:, 1] / sc[:, 0], sc[:, 2] / sc[:, 1]
+        if cfg.geometry_subset == "needles":
+            sel = (max_mid > 3) & (mid_min < 3)
+        elif cfg.geometry_subset == "discs":
+            sel = (mid_min > 3) & (max_mid < 3)
+        else:                                   # random control of a given size: no shape criterion at all
+            g = torch.Generator().manual_seed(cfg.geometry_seed)
+            sel = (torch.rand(sc.shape[0], generator=g) < cfg.geometry_fraction).to(sc.device)
+        geom_mask = sel.float()
+        print(f"geometry trains on the {cfg.geometry_subset} only: {int(sel.sum()):,} of {sel.numel():,} Gaussians ({sel.float().mean():.1%})")
     strategy = state = None
     if cfg.densify == "mcmc":
         from gsplat.strategy import MCMCStrategy
@@ -552,6 +570,11 @@ def main():
         for opt in optimizers.values():
             opt.zero_grad(set_to_none=True)
         loss.backward()
+        if geom_mask is not None:
+            for name in ("means", "scales", "quats"):
+                g = model.params[name].grad
+                if g is not None:
+                    g.mul_(geom_mask[:, None])
         for opt in optimizers.values():
             opt.step()
         if strategy is not None:

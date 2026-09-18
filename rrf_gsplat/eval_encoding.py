@@ -26,6 +26,8 @@ def main():
     ap.add_argument("--aod3", required=True, help="run dir of the AOD3 model (renders/*.npy = [3,H,W] encoded values)")
     ap.add_argument("--truth", required=True, help="the MULTI dataset (spectra_float/*.npy, generation_meta.json)")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--support", default=None,
+                    help="another MULTI dataset whose reached pixels define the evaluation support (fixed-support comparison across sigma)")
     cfg = ap.parse_args()
 
     meta = json.load(open(os.path.join(cfg.truth, "generation_meta.json")))
@@ -45,6 +47,10 @@ def main():
     for n in names:
         truth = np.load(os.path.join(cfg.truth, "spectra_float", n + ".npy")).astype(np.float64)
         mask = (truth[0] - lo0) / (hi0 - lo0) > 0.02
+        if cfg.support:
+            sup = np.load(os.path.join(cfg.support, "spectra_float", n + ".npy"))[0]
+            smeta = json.load(open(os.path.join(cfg.support, "generation_meta.json")))["channel_ranges"][0]
+            mask &= (sup - smeta[0]) / (smeta[1] - smeta[0]) > 0.02
         if not mask.any():
             continue
         n_pix += int(mask.sum())
