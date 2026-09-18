@@ -114,6 +114,23 @@ The dB target wins in every setting tried.
 is where the capacity goes; frozen opacity −0.22 dB; 2k iterations (36 s) 17.45;
 160 of 800 positions −0.06 dB, 40 positions −1.3 dB.
 
+**Geometry.** Unfreezing means/scales/quats (`--train-geometry`, INRIA's
+lrs with the means at 10× its final lr) takes the same model from 18.75 /
+3.91 dB to **21.53 / 2.85 dB** — the largest single gain here. RF-3DGS's
+frozen geometry assumes the visual geometry is the radio geometry; that
+assumption costs a dB of RMSE. gsplat's MCMC densification with its default
+hyper-parameters diverges from this converged start (`--densify mcmc
+--cap-max 1300000`: 14.7 dB at 1k iterations, 5.3 by 8k), and the cap-at-N
+variant hits a CUDA error in the relocation kernel; a low-noise, late-start,
+relocate-only configuration is the next thing to try.
+
+**Multi-channel targets** (`--mode multi`, 2.4 GHz, tutorial materials):
+path power, AoD azimuth, AoD zenith and delay each get a channel. Decoded on
+the same held-out pixels, the per-quantity channels give 19.0° / 11.6° / 8.2 ns
+(azimuth / zenith / delay RMSE) where the tutorial's angle × amplitude RGB
+encoding decodes to 48.6° / 56.6°. With one channel per quantity the
+amplitude no longer needs to be multiplied into the angle at all.
+
 **Transmitter moved** (Tx-B at (8.2, −5.4, 2.0), Tx-A's dB range): cold start
 reaches PSNR 17 in 1500 iterations (≈ 27 s), warm start from the Tx-A `db`
 model in 1250; in `rgb` a warm start *hurts* (2000 → 3250). Measured end to
