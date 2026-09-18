@@ -65,6 +65,7 @@ class Config:
     # paper reports at 60 GHz: it gives 312,683 at depth 1. See
     # calibrate_paths.py for the sweep this came from.
     scattering_coefficient: float = 0.7
+    materials: str = "uniform"      # uniform | tutorial | tutorial-asis
     # Cheap views, decorrelated between views, and let the fit do the averaging.
     #
     # Sionna's solver shoots samples_per_src rays from a fixed lattice, so a low
@@ -136,7 +137,12 @@ def build_scene(cfg: Config):
                                  vertical_spacing=0.5, horizontal_spacing=0.5,
                                  pattern="tr38901", polarization="V")
 
-    if cfg.scattering_coefficient > 0:
+    if cfg.materials != "uniform":
+        # the notebook's per-material definitions replace the ITU placeholders
+        import tutorial_materials
+        tutorial_materials.apply(scene, cfg.frequency,
+                                 variant="asis" if cfg.materials == "tutorial-asis" else "fixed")
+    elif cfg.scattering_coefficient > 0:
         for material in scene.radio_materials.values():
             material.scattering_coefficient = cfg.scattering_coefficient
     return scene
@@ -338,6 +344,10 @@ def main():
                     help="transmitter position; the default is the NIST measurement Tx")
     ap.add_argument("--frequency", type=float, default=60e9,
                     help="carrier in Hz; the tutorial's dataset cells use 2.4e9")
+    ap.add_argument("--materials", choices=["uniform", "tutorial", "tutorial-asis"], default="uniform",
+                    help="uniform: ITU materials with one scattering coefficient; tutorial: the "
+                         "notebook's per-material definitions with the conductivity formulas' "
+                         "frequency unit fixed; tutorial-asis: exactly the notebook (near-PEC walls)")
     ap.add_argument("--num-positions", type=int, default=800)
     ap.add_argument("--max-depth", type=int, default=1)
     ap.add_argument("--diffraction", action="store_true")

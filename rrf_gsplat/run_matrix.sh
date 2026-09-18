@@ -44,6 +44,17 @@ if want ablate; then
   run a_mvdr_db_iters2k    --source $REG/3dgs_MVDR_100_gpct --mode db --iterations 2000
 fi
 
+# Materials: the tutorial's per-material definitions (frequency unit fixed)
+# against the uniform 0.7 calibration, same everything else.
+if want materials; then
+  if [ -d $REPO/$REG/3dgs_MVDR_tut_gpct ]; then
+    run e3_mvdr_tut_db  --source $REG/3dgs_MVDR_tut_gpct --mode db
+    run e3_mvdr_tut_rgb --source $REG/3dgs_MVDR_tut_gpct --mode rgb
+  else
+    echo "no tutorial-materials dataset yet"
+  fi
+fi
+
 # Tx moved: cold start against warm start from the Tx-A model, on the Tx-B
 # dataset (generated with --tx by sionna_port/generate_dataset.py).
 if want txmove; then
