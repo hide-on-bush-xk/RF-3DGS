@@ -33,6 +33,14 @@ python fit_materials.py --scene-xml %SCENE% --steps 25 --samples 30000
 python active_measurement.py --scene-xml %SCENE%
 ```
 
+The dashboard picks these outputs up with `--planning-dir`
+(`planning_panels.py` renders the section; first file name found per kind wins):
+
+```
+python sionna_port/dashboard.py output/ablation.json --out output/dashboard.html ^
+       --reference-root . --comparison output/comparison.json --planning-dir output/tx_planning
+```
+
 `tx_sweep.npz` holds `tx_positions`, `rx_positions`, `gain_db [n_tx, n_rx]`,
 `n_paths`, and per-pair ragged CIRs (`cir_a`, `cir_tau`, `cir_aod`, `cir_aoa`
 as object arrays keyed by `cir_keys`), with the run config in `meta`. That is

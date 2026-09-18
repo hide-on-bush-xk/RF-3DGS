@@ -20,6 +20,13 @@ try:
     import comparison_table
 except ImportError:
     comparison_table = None
+try:
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "..", "tx_planning"))
+    import planning_panels
+except ImportError:
+    planning_panels = None
 
 # Categorical slots from the data-viz reference palette, assigned in fixed order.
 SERIES_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
@@ -489,11 +496,20 @@ def build(data, preview_dir=None):
         except Exception as exc:
             print(f"comparison table skipped: {type(exc).__name__}: {exc}")
 
+    planning_html = ""
+    if planning_panels is not None and data.get("_planning_dir"):
+        try:
+            planning_html = planning_panels.render(
+                planning_panels.collect(data["_planning_dir"]))
+        except Exception as exc:
+            print(f"planning panels skipped: {type(exc).__name__}: {exc}")
+
     best = max(runs, key=lambda r: r["metrics_mean"]["num_paths"])
     fastest = min(runs, key=lambda r: r["mean_solve_seconds"])
 
     extra_css = ((reference_panels.CSS if reference_panels else "")
-                 + (comparison_table.CSS if comparison_table else ""))
+                 + (comparison_table.CSS if comparison_table else "")
+                 + (planning_panels.CSS if planning_panels else ""))
     return f"""<title>RF-3DGS Channel Ablation</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500&display=swap">
@@ -517,6 +533,7 @@ def build(data, preview_dir=None):
 
 {reference_html}
 {comparison_html}
+{planning_html}
 <section>
   <div class="meters">
     <div class="meter"><b>{best['metrics_mean']['num_paths']:,.0f}</b><span>most paths ({best['label']})</span></div>
@@ -580,6 +597,8 @@ def main():
                     help="a generation output directory to show alongside them")
     ap.add_argument("--comparison", default=None,
                     help="comparison.json from comparison_grid.py")
+    ap.add_argument("--planning-dir", default=None,
+                    help="output/tx_planning, to add the transmitter-planning panels")
     args = ap.parse_args()
 
     with open(args.ablation_json, encoding="utf-8") as fid:
@@ -587,6 +606,7 @@ def main():
     data["_source"] = args.ablation_json
     data["_reference_root"] = args.reference_root
     data["_regen_dir"] = args.regen_dir
+    data["_planning_dir"] = args.planning_dir
     if args.comparison:
         with open(args.comparison, encoding="utf-8") as fid:
             data["_comparison"] = json.load(fid)
