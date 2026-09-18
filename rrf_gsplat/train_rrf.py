@@ -12,6 +12,11 @@ channels, so the target no longer has to be an RGB picture:
                  powers, and the loss is taken on 10 log10 of the sum. This is
                  the composition rule that matches what the spectrum is.
 
+Geometry is frozen as in RF-3DGS unless --train-geometry; --densify mcmc adds
+gsplat's MCMC strategy (relocate dead Gaussians, add up to --cap-max, inject
+noise), which -- unlike the INRIA densifier gated by densify_until_iter --
+works in the 30k -> 40k window the RF fine-tune lives in.
+
 Every run is evaluated the same way: predicted dB against the float truth
 (when the dataset has spectra_float/), and a paper-comparable PSNR after
 mapping the prediction through the jet colormap. Wall time is logged so the
@@ -36,7 +41,6 @@ import torch.nn.functional as F
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
 from utils.loss_utils import l1_loss, ssim          # noqa: E402  (pure torch)
-from utils.sh_utils import eval_sh                  # noqa: E402
 
 from jet import jet_rgb, jet_inverse               # noqa: E402
 
@@ -166,61 +170,93 @@ def sh_basis(deg, dirs):
 
 
 class RRF(torch.nn.Module):
-    """Frozen geometry from the visual checkpoint; colours and opacity learn."""
+    """Geometry from the visual checkpoint; colours and opacity learn.
 
-    def __init__(self, ckpt_path, mode, channels, sh_degree, device, train_opacity=True):
+    Parameters live in a ParameterDict under gsplat's names (means, scales,
+    quats, opacities, sh0, shN) so a densification strategy can replace them;
+    everything reads through the properties below.
+    """
+
+    def __init__(self, ckpt_path, mode, channels, sh_degree, device,
+                 train_opacity=True, train_geometry=False):
         super().__init__()
         (m, it) = torch.load(ckpt_path, weights_only=False, map_location="cpu")
-        (_, xyz, f_dc, f_rest, scaling, rotation, opacity, *_) = m
+        (_, xyz, f_dc, f_rest, scaling, rotation, opacity, *rest) = m
+        self.spatial_lr_scale = float(rest[-1]) if rest else 1.0
         # The checkpoint holds nn.Parameters of the visual training, so every
         # tensor still requires grad; detach, or exp()/normalize() become graph
         # nodes that are freed after the first backward.
-        xyz, scaling, rotation, opacity = (t.detach() for t in (xyz, scaling, rotation, opacity))
-        self.register_buffer("means", xyz.to(device))
-        self.register_buffer("scales", torch.exp(scaling).to(device))
-        self.register_buffer("quats", F.normalize(rotation, dim=-1).to(device))
+        xyz, scaling, rotation, opacity = (t.detach().to(device) for t in (xyz, scaling, rotation, opacity))
         self.mode, self.channels, self.sh_degree = mode, channels, sh_degree
         n, k = xyz.shape[0], (sh_degree + 1) ** 2
         # RF-3DGS zeroes every SH coefficient before RF training; the same here,
         # for any channel count. DC and the rest are separate parameters so
         # they can take INRIA's separate learning rates (Adam ignores gradient
-        # scaling, so a single tensor could not emulate that).
-        # [N, K, C] (coefficient-major), the layout gsplat's SH kernel takes
-        self.sh_dc = torch.nn.Parameter(torch.zeros(n, 1, channels, device=device))
-        self.sh_rest = torch.nn.Parameter(torch.zeros(n, k - 1, channels, device=device))
-        self.opacity_logit = torch.nn.Parameter(opacity.to(device).clone(),
-                                                requires_grad=train_opacity)
+        # scaling, so a single tensor could not emulate that). [N, K, C]
+        # (coefficient-major) is the layout gsplat's SH kernel takes.
+        self.params = torch.nn.ParameterDict({
+            "means": torch.nn.Parameter(xyz.clone(), requires_grad=train_geometry),
+            "scales": torch.nn.Parameter(scaling.clone(), requires_grad=train_geometry),    # log
+            "quats": torch.nn.Parameter(rotation.clone(), requires_grad=train_geometry),
+            "opacities": torch.nn.Parameter(opacity.reshape(-1).clone(), requires_grad=train_opacity),  # logit [N]
+            "sh0": torch.nn.Parameter(torch.zeros(n, 1, channels, device=device)),
+            "shN": torch.nn.Parameter(torch.zeros(n, k - 1, channels, device=device)),
+        })
         self.visual_iteration = it
+        self.last_info = None
+
+    @property
+    def means(self):
+        return self.params["means"]
+
+    @property
+    def scales(self):
+        return torch.exp(self.params["scales"])
+
+    @property
+    def quats(self):
+        return F.normalize(self.params["quats"], dim=-1)
+
+    @property
+    def opacities(self):
+        return torch.sigmoid(self.params["opacities"])
 
     @property
     def sh(self):
-        return torch.cat([self.sh_dc, self.sh_rest], dim=1)               # [N, K, C]
+        return torch.cat([self.params["sh0"], self.params["shN"]], dim=1)   # [N, K, C]
+
+    @property
+    def n_gaussians(self):
+        return int(self.params["means"].shape[0])
 
     def colours(self, cam_center):
         """View-dependent per-Gaussian value(s), [N, C]; the +0.5 is INRIA's.
 
-        The SH basis depends only on the (frozen) means and the camera, so it
-        is a constant per view and the colour is one linear map of the
-        coefficients. Evaluating it that way costs one multiply-add in the
-        backward pass instead of autograd through INRIA's eval_sh expression,
-        which was two thirds of a training step for 1M Gaussians.
+        The SH basis depends only on the means and the camera; with frozen
+        geometry it is a constant per view and the colour is one linear map of
+        the coefficients, so the backward pass is one multiply-add instead of
+        autograd through INRIA's eval_sh expression (two thirds of a step for
+        1M Gaussians). With trainable geometry the basis carries a gradient.
         """
         if self.sh_degree == 0:
-            return self.sh_dc[:, 0, :] * 0.28209479177387814 + 0.5
-        with torch.no_grad():
+            return self.params["sh0"][:, 0, :] * 0.28209479177387814 + 0.5
+        ctx = torch.enable_grad() if self.params["means"].requires_grad else torch.no_grad()
+        with ctx:
             dirs = F.normalize(self.means - cam_center[None], dim=-1)
             basis = sh_basis(self.sh_degree, dirs)                  # [N, K]
         return (self.sh * basis[:, :, None]).sum(dim=1) + 0.5
 
     def render(self, viewmat, K, width, height, span_db):
         from gsplat import rasterization
+        device = self.means.device
         if self.mode == "rgb" and self.sh_degree > 0:
             # gsplat evaluates 3-channel SH in CUDA (and adds INRIA's 0.5 and
             # clamps at 0 itself); its backward is a third of the torch path's
-            img, alpha, _ = rasterization(
-                self.means, self.quats, self.scales, torch.sigmoid(self.opacity_logit[:, 0]),
-                self.sh, viewmat[None], K[None], width, height,
-                sh_degree=self.sh_degree, backgrounds=torch.zeros(1, 3, device=self.means.device))
+            img, alpha, info = rasterization(
+                self.means, self.quats, self.scales, self.opacities, self.sh,
+                viewmat[None], K[None], width, height, sh_degree=self.sh_degree,
+                backgrounds=torch.zeros(1, 3, device=device))
+            self.last_info = info
             return img[0].permute(2, 0, 1)
         cam_center = torch.linalg.inv(viewmat)[:3, 3]
         col = self.colours(cam_center)
@@ -230,14 +266,35 @@ class RRF(torch.nn.Module):
             # value in [0,1] is dB above the floor as a fraction of the span;
             # composite linear powers, read back in dB
             col = torch.pow(10.0, col.clamp(0.0, 1.0) * span_db / 10.0)
-        img, alpha, _ = rasterization(
-            self.means, self.quats, self.scales, torch.sigmoid(self.opacity_logit[:, 0]),
-            col, viewmat[None], K[None], width, height, sh_degree=None,
-            backgrounds=torch.zeros(1, self.channels, device=col.device))
+        img, alpha, info = rasterization(
+            self.means, self.quats, self.scales, self.opacities, col,
+            viewmat[None], K[None], width, height, sh_degree=None,
+            backgrounds=torch.zeros(1, self.channels, device=device))
+        self.last_info = info
         img = img[0].permute(2, 0, 1)                      # [C,H,W]
         if self.mode == "power":
             img = torch.log10(img + 1e-12) * 10.0 / span_db
         return img
+
+    def load_state(self, st):
+        """rrf_state.pt of another run; accepts the earlier layouts too."""
+        p = self.params
+        if "sh0" in st:
+            p["sh0"].data.copy_(st["sh0"]); p["shN"].data.copy_(st["shN"])
+            p["opacities"].data.copy_(st["opacities"].reshape(-1))
+            for k in ("means", "scales", "quats"):
+                if k in st and st[k].shape == p[k].shape:
+                    p[k].data.copy_(st[k])
+            return
+        for name, key in (("sh0", "sh_dc"), ("shN", "sh_rest")):
+            t = st[key]
+            if t.shape != p[name].shape:
+                t = t.permute(0, 2, 1).contiguous()     # the older [N, C, K] layout
+            p[name].data.copy_(t)
+        p["opacities"].data.copy_(st["opacity_logit"].reshape(-1))
+
+    def state(self):
+        return {k: v.data for k, v in self.params.items()} | {"mode": self.mode, "sh_degree": self.sh_degree}
 
 
 # --------------------------------------------------------------------------
@@ -249,7 +306,7 @@ def psnr(a, b):
 
 
 @torch.no_grad()
-def evaluate(model, data, idx, span, vmin, save_dir=None, mode_target="rgb"):
+def evaluate(model, data, idx, span, vmin, save_dir=None):
     """dB RMSE against the float truth, and PSNR/SSIM on jet RGB for every mode."""
     tot = {"psnr_rgb": 0.0, "ssim_rgb": 0.0, "rmse_db": 0.0, "mae_db": 0.0,
            "rmse_db_in_range": 0.0, "n": 0}
@@ -293,6 +350,49 @@ def evaluate(model, data, idx, span, vmin, save_dir=None, mode_target="rgb"):
     return {k: v / n for k, v in tot.items()}
 
 
+@torch.no_grad()
+def evaluate_multi(model, data, idx, ch_ranges, channel_names, save_dir=None, mask_channel=0):
+    """Per-channel errors in native units on pixels the mask channel reaches;
+    PSNR/SSIM of the mask channel (the power) after jet mapping."""
+    lo, hi = ch_ranges[:, 0, None, None], ch_ranges[:, 1, None, None]
+    mc = mask_channel
+    span0 = float(hi[mc, 0, 0] - lo[mc, 0, 0])
+    tot = {"psnr_rgb": 0.0, "ssim_rgb": 0.0, "rmse_db": 0.0, "mae_db": 0.0, "rmse_db_in_range": 0.0, "n": 0}
+    for c in range(len(channel_names)):
+        if c != mc:
+            tot[f"rmse_{channel_names[c]}"] = 0.0
+    for i in idx:
+        img = model.render(data["viewmats"][i], data["Ks"][i], data["width"], data["height"], span0).clamp(0, 1)
+        gt_f = data["float"][i].float()
+        gt_n = ((gt_f - lo) / (hi - lo)).clamp(0, 1)
+        pred_f = img * (hi - lo) + lo
+        gt_rgb = data["rgb"][i].float() / 255.0
+        pred_rgb = jet_rgb(img[mc])
+        tot["psnr_rgb"] += psnr(pred_rgb, gt_rgb)
+        tot["ssim_rgb"] += float(ssim(pred_rgb[None], gt_rgb[None]))
+        d0 = pred_f[mc] - gt_f[mc]
+        tot["rmse_db"] += float(torch.sqrt((d0 ** 2).mean()))
+        tot["mae_db"] += float(d0.abs().mean())
+        tot["rmse_db_in_range"] += float(torch.sqrt(((pred_f[mc] - gt_f[mc].clamp(float(lo[mc, 0, 0]), float(hi[mc, 0, 0]))) ** 2).mean()))
+        mask = gt_n[mc] > 0.02
+        for c in range(len(channel_names)):
+            if c == mc:
+                continue
+            d = pred_f[c] - gt_f[c]
+            name = channel_names[c]
+            if name == "aod_az":                  # channel is (phi+180)/360: wrap-aware, in degrees
+                d = (d * 360.0 + 180.0) % 360.0 - 180.0
+            elif name == "aod_zen":
+                d = d * 180.0
+            tot[f"rmse_{name}"] += float(torch.sqrt((d[mask] ** 2).mean())) if mask.any() else 0.0
+        tot["n"] += 1
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            np.save(os.path.join(save_dir, data["names"][i] + ".npy"), pred_f.cpu().numpy().astype(np.float32))
+    n = max(tot.pop("n"), 1)
+    return {k: v / n for k, v in tot.items()}
+
+
 # --------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -300,12 +400,23 @@ def main():
     ap.add_argument("--source", required=True, help="dataset dir: images/, sparse/0, [spectra_float/]")
     ap.add_argument("--checkpoint", default=os.path.join(REPO, "RF-3DGS_dataset/blender_visual_trained/chkpnt30000.pth"))
     ap.add_argument("--out", required=True)
-    ap.add_argument("--mode", choices=["rgb", "db", "power"], default="rgb")
+    ap.add_argument("--mode", choices=["rgb", "db", "power", "multi"], default="rgb",
+                    help="multi: one channel per float channel of the dataset (generation_meta "
+                         "channel_ranges), L1 on channels 1.. masked to pixels the power channel "
+                         "reaches; SSIM and PSNR on channel 0")
     ap.add_argument("--sh-degree", type=int, default=3)
     ap.add_argument("--iterations", type=int, default=10_000, help="RF-3DGS: 30k -> 40k")
     ap.add_argument("--feature-lr", type=float, default=0.0025)
     ap.add_argument("--opacity-lr", type=float, default=0.05)
     ap.add_argument("--freeze-opacity", action="store_true")
+    ap.add_argument("--train-geometry", action="store_true",
+                    help="unfreeze means/scales/quats (INRIA lrs; means at 10x its final lr)")
+    ap.add_argument("--densify", choices=["none", "mcmc"], default="none",
+                    help="mcmc: gsplat's MCMC strategy (implies --train-geometry)")
+    ap.add_argument("--cap-max", type=int, default=None, help="MCMC cap; default: the checkpoint's count")
+    ap.add_argument("--mask-channel", type=int, default=0,
+                    help="multi: the channel whose value above 0.02 marks pixels a path reaches "
+                         "(0 for MULTI's power; 2 for AOD3's amplitude)")
     ap.add_argument("--lambda-dssim", type=float, default=0.2)
     ap.add_argument("--eval-every", type=int, default=1000)
     ap.add_argument("--eval-subset", type=int, default=64, help="test views for the running eval")
@@ -316,6 +427,8 @@ def main():
                     help="min max dB for the colormap; default from generation_meta.json")
     ap.add_argument("--seed", type=int, default=0)
     cfg = ap.parse_args()
+    if cfg.densify == "mcmc":
+        cfg.train_geometry = True
 
     torch.manual_seed(cfg.seed)
     device = torch.device("cuda")
@@ -323,15 +436,21 @@ def main():
 
     # -- range of the colormap: what a normalised value means in dB ----------
     meta_path = os.path.join(cfg.source, "generation_meta.json")
+    meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
     if cfg.db_range:
         vmin, vmax = cfg.db_range
-    elif os.path.exists(meta_path):
-        meta = json.load(open(meta_path))
+    elif meta:
         vmin, vmax = meta["spec_min_db"], meta["spec_max_db"]
     else:
         vmin, vmax = 0.0, 1.0      # released data: no float truth, dB numbers are relative
         print("no generation_meta.json: dB errors are in normalised units x span=1")
     span = vmax - vmin
+    channel_names = meta.get("channels")
+    ch_ranges = None
+    if cfg.mode == "multi":
+        if not channel_names:
+            raise SystemExit("--mode multi needs a multi-channel dataset (channels in generation_meta.json)")
+        ch_ranges = torch.tensor(meta["channel_ranges"], device=device, dtype=torch.float32)  # [C,2]
 
     views = read_colmap_text(os.path.join(cfg.source, "sparse", "0"))
     train_names, test_names = ensure_split(cfg.source)
@@ -349,32 +468,53 @@ def main():
     print(f"loaded {len(train_names)} train / {len(test_names)} test views in {time.time()-t0:.0f} s; "
           f"float truth: {'yes' if 'float' in test else 'no'}; range {vmin:.1f}..{vmax:.1f} dB")
 
-    channels = 3 if cfg.mode == "rgb" else 1
+    channels = 3 if cfg.mode == "rgb" else (int(ch_ranges.shape[0]) if cfg.mode == "multi" else 1)
     model = RRF(cfg.checkpoint, cfg.mode, channels, cfg.sh_degree, device,
-                train_opacity=not cfg.freeze_opacity)
+                train_opacity=not cfg.freeze_opacity, train_geometry=cfg.train_geometry)
     if cfg.init_from:
-        st = torch.load(cfg.init_from, map_location=device)
-        for name in ("sh_dc", "sh_rest"):                 # accept the older [N, C, K] layout
-            t = st[name]
-            if t.shape != getattr(model, name).shape:
-                t = t.permute(0, 2, 1).contiguous()
-            getattr(model, name).data.copy_(t)
-        model.opacity_logit.data.copy_(st["opacity_logit"])
+        model.load_state(torch.load(cfg.init_from, map_location=device))
         print(f"warm start from {cfg.init_from}")
-    print(f"{model.means.shape[0]:,} Gaussians from visual iteration {model.visual_iteration}; "
-          f"mode {cfg.mode}, {channels} channel(s), SH degree {cfg.sh_degree}")
+    print(f"{model.n_gaussians:,} Gaussians from visual iteration {model.visual_iteration}; "
+          f"mode {cfg.mode}, {channels} channel(s), SH degree {cfg.sh_degree}; "
+          f"geometry {'trained' if cfg.train_geometry else 'frozen'}, densify {cfg.densify}")
 
-    # INRIA's groups: f_dc at feature_lr, f_rest at feature_lr/20, opacity at opacity_lr.
-    groups = [{"params": [model.sh_dc], "lr": cfg.feature_lr},
-              {"params": [model.sh_rest], "lr": cfg.feature_lr / 20.0}]
-    if not cfg.freeze_opacity:
-        groups.append({"params": [model.opacity_logit], "lr": cfg.opacity_lr})
-    opt = torch.optim.Adam(groups, lr=0.0, eps=1e-15)
+    # INRIA's groups: f_dc at feature_lr, f_rest at feature_lr/20, opacity at
+    # opacity_lr; geometry (when trained) at INRIA's scaling/rotation lrs and
+    # the means at ten times INRIA's final position lr. One Adam per tensor,
+    # which is what gsplat's strategies expect.
+    lrs = {"sh0": cfg.feature_lr, "shN": cfg.feature_lr / 20.0, "opacities": cfg.opacity_lr,
+           "means": 1.6e-5 * model.spatial_lr_scale, "scales": 5e-3, "quats": 1e-3}
+    optimizers = {name: torch.optim.Adam([p], lr=lrs[name], eps=1e-15)
+                  for name, p in model.params.items() if p.requires_grad}
+    strategy = state = None
+    if cfg.densify == "mcmc":
+        from gsplat.strategy import MCMCStrategy
+        strategy = MCMCStrategy(cap_max=cfg.cap_max or model.n_gaussians, refine_start_iter=500,
+                                refine_stop_iter=int(0.8 * cfg.iterations), refine_every=100,
+                                min_opacity=0.005, verbose=False)
+        strategy.check_sanity(model.params, optimizers)
+        state = strategy.initialize_state()
 
     def target(i):
         if cfg.mode == "rgb":
             return train["rgb"][i].float() / 255.0
+        if cfg.mode == "multi":
+            f = train["float"][i].float()                                  # [C,H,W]
+            lo, hi = ch_ranges[:, 0, None, None], ch_ranges[:, 1, None, None]
+            return ((f - lo) / (hi - lo)).clamp(0, 1)
         return ((train["float"][i].float() - vmin) / span).clamp(0, 1)[None]
+
+    def multi_loss(img, gt):
+        """L1 on every channel, channels 1.. only where the power channel is above
+        the floor (an angle or delay means nothing where no path arrives); SSIM on
+        the power channel."""
+        mc = cfg.mask_channel
+        mask = (gt[mc] > 0.02).float()
+        others = [c for c in range(gt.shape[0]) if c != mc]
+        l1 = (img[mc] - gt[mc]).abs().mean()
+        if others:
+            l1 = l1 + ((img[others] - gt[others]).abs() * mask[None]).sum() / (mask.sum() * len(others) + 1)
+        return (1 - cfg.lambda_dssim) * l1 + cfg.lambda_dssim * (1 - ssim(img[mc:mc+1][None], gt[mc:mc+1][None]))
 
     n_train = len(train_names)
     eval_idx = list(range(0, len(test_names), max(1, len(test_names) // cfg.eval_subset)))[:cfg.eval_subset]
@@ -385,31 +525,52 @@ def main():
         i = int(rng.integers(n_train))
         img = model.render(train["viewmats"][i], train["Ks"][i], train["width"], train["height"], span)
         gt = target(i)
-        loss = (1 - cfg.lambda_dssim) * l1_loss(img, gt) + cfg.lambda_dssim * (1 - ssim(img[None], gt[None]))
-        opt.zero_grad(set_to_none=True)
+        if cfg.mode == "multi":
+            loss = multi_loss(img, gt)
+        else:
+            loss = (1 - cfg.lambda_dssim) * l1_loss(img, gt) + cfg.lambda_dssim * (1 - ssim(img[None], gt[None]))
+        if strategy is not None:
+            # gsplat's MCMC regularisers, its defaults
+            loss = loss + 0.01 * model.opacities.abs().mean() + 0.01 * model.scales.abs().mean()
+            strategy.step_pre_backward(model.params, optimizers, state, it, model.last_info)
+        for opt in optimizers.values():
+            opt.zero_grad(set_to_none=True)
         loss.backward()
-        opt.step()
+        for opt in optimizers.values():
+            opt.step()
+        if strategy is not None:
+            strategy.step_post_backward(model.params, optimizers, state, it, model.last_info,
+                                        lr=lrs["means"])
         if it % cfg.eval_every == 0 or it == cfg.iterations:
             torch.cuda.synchronize()
-            m = evaluate(model, test, eval_idx, span, vmin)
-            m.update(iteration=it, seconds=time.time() - t_train, loss=float(loss))
+            m = (evaluate_multi(model, test, eval_idx, ch_ranges, channel_names, mask_channel=cfg.mask_channel)
+                 if cfg.mode == "multi"
+                 else evaluate(model, test, eval_idx, span, vmin))
+            m.update(iteration=it, seconds=time.time() - t_train, loss=float(loss.detach()),
+                     gaussians=model.n_gaussians)
             history.append(m)
             print(f"  it {it:6d}  {m['seconds']:6.0f} s  loss {m['loss']:.4f}  "
                   f"PSNR(jet) {m['psnr_rgb']:5.2f}  SSIM {m['ssim_rgb']:.3f}  "
-                  f"RMSE {m['rmse_db']:5.2f} dB  (subset {len(eval_idx)})")
+                  f"RMSE {m['rmse_db']:5.2f} dB  (subset {len(eval_idx)}"
+                  + (f", {m['gaussians']:,} Gaussians" if strategy is not None else "") + ")")
     torch.cuda.synchronize(); train_seconds = time.time() - t_train
 
     os.makedirs(cfg.out, exist_ok=True)
-    final = evaluate(model, test, list(range(len(test_names))), span, vmin)
-    if cfg.save_renders:
-        evaluate(model, test, list(range(min(cfg.save_renders, len(test_names)))), span, vmin,
-                 save_dir=os.path.join(cfg.out, "renders"))
-    torch.save({"sh_dc": model.sh_dc.data, "sh_rest": model.sh_rest.data,
-                "opacity_logit": model.opacity_logit.data,
-                "mode": cfg.mode, "sh_degree": cfg.sh_degree},
-               os.path.join(cfg.out, "rrf_state.pt"))
+    all_idx = list(range(len(test_names)))
+    if cfg.mode == "multi":
+        final = evaluate_multi(model, test, all_idx, ch_ranges, channel_names, mask_channel=cfg.mask_channel)
+        if cfg.save_renders:
+            evaluate_multi(model, test, all_idx[:cfg.save_renders], ch_ranges, channel_names,
+                           save_dir=os.path.join(cfg.out, "renders"), mask_channel=cfg.mask_channel)
+    else:
+        final = evaluate(model, test, all_idx, span, vmin)
+        if cfg.save_renders:
+            evaluate(model, test, all_idx[:cfg.save_renders], span, vmin,
+                     save_dir=os.path.join(cfg.out, "renders"))
+    torch.save(model.state(), os.path.join(cfg.out, "rrf_state.pt"))
     result = {"config": vars(cfg), "db_range": [vmin, vmax], "n_train": n_train,
-              "n_test": len(test_names), "gaussians": int(model.means.shape[0]),
+              "channels": channel_names, "channel_ranges": meta.get("channel_ranges"),
+              "n_test": len(test_names), "gaussians": model.n_gaussians,
               "train_seconds": train_seconds, "iters_per_second": cfg.iterations / train_seconds,
               "total_seconds": time.time() - t_start, "history": history, "final": final}
     with open(os.path.join(cfg.out, "results.json"), "w") as fid:
@@ -417,7 +578,7 @@ def main():
     print(f"\nfinal on {len(test_names)} test views: PSNR(jet) {final['psnr_rgb']:.2f} dB, "
           f"SSIM {final['ssim_rgb']:.3f}, RMSE {final['rmse_db']:.2f} dB, MAE {final['mae_db']:.2f} dB; "
           f"{cfg.iterations} iterations in {train_seconds:.0f} s "
-          f"({cfg.iterations/train_seconds:.0f} it/s); wrote {cfg.out}")
+          f"({cfg.iterations/train_seconds:.0f} it/s); {model.n_gaussians:,} Gaussians; wrote {cfg.out}")
 
 
 if __name__ == "__main__":

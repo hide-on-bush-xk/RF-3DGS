@@ -276,3 +276,46 @@ dB 目标在 CBF 上同样有效(RMSE −7%,PSNR +0.27),幅度比 MVDR 小;CBF �
 | RF-3DGS 教程流水线(本机 CPU) | ≈1 h | 54 s(INRIA,2000 步) | ≈1 h |
 
 160 个位置的代价是终值低 0.4 dB(17.45 vs 17.86)。
+
+## 光栅器速度 vs 分辨率(rrf_gsplat/bench_resolution.py,同一 1.01M 高斯,一步 = 渲染 + L1 + 反传到 SH 与 opacity)
+
+| 分辨率 | INRIA(Windows,rf-3dgs) | gsplat 1.6(WSL) |
+| --- | --- | --- |
+| 300×200 | 6.8 ms(148 it/s) | **4.9 ms**(202 it/s) |
+| 600×400 | 12.2 ms | **5.5 ms** |
+| 1200×800 | 33.4 ms | **9.9 ms** |
+| 2400×1600 | 120.4 ms | **27.2 ms** |
+
+- 之前"INRIA 37 it/s 比 gsplat 快"的说法是错的:那是两条完整训练循环的对比(含 Adam、SSIM、数据取样),
+  光栅器本身 gsplat 在每个分辨率上都更快,分辨率越高差距越大(2400×1600 时 4.4×)。
+- 由此也看出我们训练循环的开销:光栅器一步 5 ms,而 db 训练一步 22 ms、rgb 49 ms——大头在 SH 张量的
+  cat/反传拷贝和 Adam 更新(4900 万参数);rgb 路径还多一次 [N,K,3] 拼接。可优化,但与结论无关。
+
+## 频率核实:发布数据集是 2.4 GHz(sionna_port/generate_dataset.py --poses-from,output/freqcheck/)
+
+在发布 CBF/MVDR 数据集**完全相同的 48 个位姿**(从 images.txt 反算:rx = −Rᵀt,yaw 匹配)上,用教程材料分别在 2.4 GHz
+和 60 GHz 生成谱,与发布数据对比:
+
+| 证据 | 2.4 GHz | 60 GHz |
+| --- | --- | --- |
+| 发布 CBF 目录的 `cbf_power.csv`(均值 −27.4 dB,std 13.3)vs 我们 CBF 谱峰值 | 均值 −29.1,**偏差 +1.6 dB(std 4.2)** | 均值 −61.6,偏差 +34.2 dB |
+| 逐视图相关(csv vs 我们的峰值) | 0.962 | 0.968 |
+| 与发布 PNG 的结构相关(逐图归一化后),CBF | 0.552 | 0.553 |
+| 与发布 PNG 的结构相关,MVDR | 0.820 | 0.854 |
+
+- 结构相关两个频率几乎一样(阵列响应按波长归一化,谱的形状对频率不敏感),**绝对电平是决定性的**:
+  csv 里记录的 CBF 功率与 2.4 GHz 的计算值只差 1.6 dB,与 60 GHz 差 34 dB(自由空间 28 dB + 材料差异)。
+- csv 与图片在同一个生成循环里写出,所以发布的 CBF/TCBF/MVDR/AoD/Delay 数据集是 **2.4 GHz** 的,与 notebook
+  的 `scene.frequency = 2.4e9` 一致;只有 MPC 的 cell 是 60 GHz。论文正文和 README 说的 60 GHz / mmWave 与发布数据不符。
+- 我们第一阶段"s=0.7 在 60 GHz 复现 30 万条路径"因此只是与论文数字的巧合,不是与发布数据的对齐。
+- MVDR 与发布数据的结构相关 0.82–0.85,说明移植的 MVDR 谱与作者的基本一致;CBF 只有 0.55(裸导向矢量 vs 流形矢量、
+  逐图归一化等细节还有差异)。
+
+## gsplat 相机模型(10 分钟核查)
+
+`gsplat.rasterization(camera_model=...)` 支持 `pinhole | ortho | fisheye | ftheta`,**没有 equirect**。实测(rrf_gsplat 里的
+一次性脚本):fisheye(等距投影 r = f·θ)无论把 f 设成多大 FoV,图像内最大 θ = 89.8°——它在 z ≤ 0 处剔除,**单张最多一个半球**;
+ftheta 需要 `FThetaCameraDistortionParameters` torch 类和 `with_ut=True`。结论:一次性消掉四面拼接的三个问题做不到,
+但**两张 180° fisheye(前/后半球)**把接缝从 4 条减到 1 条(赤道大圆)、消掉极冠、且等距投影的立体角 Jacobian 光滑(sinθ/θ)。
+代价:生成端要按 fisheye 角网格算谱(CBF/MVDR 的导向矢量网格可以任意定义,投影谱本来就是等距柱状重采样),训练端加
+`camera_model="fisheye"`(建议 `with_ut=True`)。

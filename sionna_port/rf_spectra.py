@@ -302,6 +302,39 @@ def aod_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0):
     return _log_rgb(img)
 
 
+MULTI_CHANNELS = ("power_db", "aod_az", "aod_zen", "delay_ns")
+
+
+def multichannel_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0,
+                                   floor_db: float = -200.0):
+    """One physical quantity per channel, splatted at the angle of arrival.
+
+    Returns [4, 180*scale, 360*scale]:
+      power_db  10 log10 of the splatted path power (the MPC spectrum)
+      aod_az    power-weighted mean departure azimuth, (phi + 180) / 360 in [0, 1]
+                (circular mean, so paths straddling +-180 average correctly)
+      aod_zen   power-weighted mean departure zenith, theta / 180 in [0, 1]
+      delay_ns  power-weighted mean delay in ns
+    Pixels no path touches get floor_db and zeros. Unlike the tutorial's AoD
+    and Delay pictures, no channel is a product of an angle and an amplitude:
+    the amplitude has its own channel.
+    """
+    amp, tau, theta_r, phi_r, theta_t, phi_t = _path_arrays(paths)
+    w = amp * amp
+    stacked = torch.stack([w, w * torch.cos(phi_t), w * torch.sin(phi_t),
+                           w * theta_t, w * tau * 1e9])
+    img = equirect_splat(theta_r, phi_r, stacked, scale, sigma)
+    power, cos_az, sin_az, zen, delay = img
+    hit = power > 0
+    out = torch.zeros(4, *power.shape, device=power.device, dtype=power.dtype)
+    out[0] = torch.where(hit, 10 * torch.log10(power.clamp_min(1e-300)), torch.full_like(power, floor_db))
+    az = torch.atan2(sin_az, cos_az)                               # [-pi, pi]
+    out[1] = torch.where(hit, (torch.rad2deg(az) + 180.0) / 360.0, torch.zeros_like(az))
+    out[2] = torch.where(hit, torch.rad2deg(zen / power.clamp_min(1e-300)) / 180.0, torch.zeros_like(zen))
+    out[3] = torch.where(hit, delay / power.clamp_min(1e-300), torch.zeros_like(delay))
+    return out
+
+
 def _log_rgb(img: torch.Tensor) -> torch.Tensor:
     """10log10 with the tutorial's +150 dB offset, clipped at zero."""
     out = torch.zeros_like(img)

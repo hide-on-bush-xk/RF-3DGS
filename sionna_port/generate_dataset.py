@@ -66,6 +66,7 @@ class Config:
     # calibrate_paths.py for the sweep this came from.
     scattering_coefficient: float = 0.7
     materials: str = "uniform"      # uniform | tutorial | tutorial-asis
+    poses_from: str = None          # images.txt of a dataset whose exact poses to reuse
     # Cheap views, decorrelated between views, and let the fit do the averaging.
     #
     # Sionna's solver shoots samples_per_src rays from a fixed lattice, so a low
@@ -105,6 +106,36 @@ def write_images_txt(path, images):
         for img_id, (qvec, tvec, camera_id, name) in sorted(images.items()):
             fid.write(f"{img_id} {' '.join(map(str, qvec))} "
                       f"{' '.join(map(str, tvec))} {camera_id} {name}\n\n")
+
+
+def read_pose_groups(images_txt):
+    """Receiver positions and yaws from a dataset's COLMAP images.txt.
+
+    The file stores the camera-to-world rotation and t = -R_c2w(rx), as the
+    tutorial writes it, so rx = -R^T t; the yaw is whichever of VIEW_YAWS
+    reproduces the rotation. Consecutive views at one position form a group.
+    """
+    def rotmat(q):
+        w, x, y, z = q
+        return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+    yaw_R = {yaw: euler_to_quaternion([yaw, 0.0, 0.0])[0].as_matrix() for yaw in VIEW_YAWS}
+    groups = []
+    with open(images_txt) as fid:
+        for line in fid:
+            p = line.split()
+            if len(p) < 10 or not p[9].lower().endswith(".png"):
+                continue
+            R = rotmat([float(v) for v in p[1:5]])
+            t = np.array([float(v) for v in p[5:8]])
+            rx = (-R.T @ t).tolist()
+            yaw = min(VIEW_YAWS, key=lambda y: np.abs(yaw_R[y] - R).sum())
+            if groups and np.allclose(groups[-1][0], rx, atol=1e-6):
+                groups[-1][1].append(yaw)
+            else:
+                groups.append((rx, [yaw]))
+    return groups
 
 
 def load_rx_locations(path, rng):
@@ -185,13 +216,37 @@ def element_gain_fn(theta: torch.Tensor, phi: torch.Tensor) -> torch.Tensor:
                            device=theta.device).reshape(theta.shape)
 
 
-def spectrum_for_paths(paths, grid: ArrayGrid, cfg: Config):
+def spectrum_for_paths(paths, grid: ArrayGrid, cfg: Config, yaw: float = 0.0):
+    kind = cfg.spectrum.upper()
+    if kind in ("MULTI", "AOD3"):
+        # projection family: splat at the angle of arrival on the sphere, then
+        # look through the same pinhole the beamformed spectra use
+        from rf_spectra import (aod_spectrum_equirect, equirect_to_perspective,
+                                multichannel_spectrum_equirect)
+        eq = (multichannel_spectrum_equirect(paths) if kind == "MULTI"
+              else aod_spectrum_equirect(paths))
+        persp = equirect_to_perspective(eq.to(grid.theta.device), cfg.width, cfg.height,
+                                        cfg.fov_deg, yaw_rad=yaw)
+        return None, persp                                   # [C, H, W]
     response = paths_to_response(paths, cfg.time_interval_ns, device=grid.theta.device)
-    if cfg.spectrum.upper() == "CBF":
+    if kind == "CBF":
         return cbf_spectrum(response, grid)
-    if cfg.spectrum.upper() == "MVDR":
+    if kind == "MVDR":
         return mvdr_spectrum(response, grid, cfg.diagonal_loading)
     raise ValueError(f"unknown spectrum type {cfg.spectrum!r}")
+
+
+def channel_ranges(all_db: np.ndarray, kind: str):
+    """Per-channel (min, max) for a multi-channel dataset, [C, 2]."""
+    if kind == "MULTI":
+        power = all_db[:, 0]
+        hit = power > power.min() + 0.5                      # above the floor
+        rng = [[float(np.percentile(power[hit], 1)), float(np.percentile(power[hit], 99.99))],
+               [0.0, 1.0], [0.0, 1.0],
+               [float(np.percentile(all_db[:, 3][hit], 0.1)), float(np.percentile(all_db[:, 3][hit], 99.9))]]
+        return rng
+    lo, hi = float(all_db.min()), float(all_db.max())          # AOD3: one range, it is a picture
+    return [[lo, hi]] * all_db.shape[1]
 
 
 # --------------------------------------------------------------------------
@@ -214,22 +269,29 @@ def generate(cfg: Config):
     grid = ArrayGrid.build(cfg.M, cfg.width, cfg.height, cfg.fov_deg,
                            element_gain_fn=element_gain_fn, device=device)
 
-    rx_locs = load_rx_locations(cfg.rx_loc_file, rng)[:cfg.num_positions]
+    if cfg.poses_from:
+        # exact poses of an existing dataset (e.g. the released one), grouped
+        # by position so the loop below is unchanged
+        groups = read_pose_groups(cfg.poses_from)[:cfg.num_positions]
+        print(f"poses from {cfg.poses_from}: {sum(len(y) for _, y in groups)} views")
+    else:
+        rx_locs = load_rx_locations(cfg.rx_loc_file, rng)[:cfg.num_positions]
+        groups = [(rx_loc, list(VIEW_YAWS)) for rx_loc in rx_locs]
 
     # Pass 1: collect every spectrum in dB, so the normalisation range comes from
     # the data instead of two hand-picked probe positions.
-    print(f"pass 1/2: {len(rx_locs)} positions x {len(VIEW_YAWS)} views")
+    print(f"pass 1/2: {len(groups)} positions x {len(VIEW_YAWS)} views")
     specs, poses, per_view, cfr_curve = [], [], [], None
     t_start = time.time()
-    for i, rx_loc in enumerate(rx_locs):
+    for i, (rx_loc, yaws) in enumerate(groups):
         if i % 50 == 0:
-            print(f"  {i}/{len(rx_locs)}")
-        for yaw in VIEW_YAWS:
+            print(f"  {i}/{len(groups)}")
+        for yaw in yaws:
             scene.remove("rx") if "rx" in scene.receivers else None
             scene.add(Receiver(name="rx", position=list(rx_loc),
                                orientation=[yaw, 0.0, 0.0]))
             paths = solve_paths(solver, scene, cfg, view_index=len(specs))
-            _, spec_db = spectrum_for_paths(paths, grid, cfg)
+            _, spec_db = spectrum_for_paths(paths, grid, cfg, yaw=yaw)
             specs.append(spec_db.cpu().numpy().astype(np.float32))
             poses.append((rx_loc, yaw))
 
@@ -250,8 +312,15 @@ def generate(cfg: Config):
             scene.remove("rx")
 
     all_db = np.stack(specs)
-    spec_min, spec_max = float(all_db.min()), float(all_db.max())
-    print(f"global dB range: [{spec_min:.2f}, {spec_max:.2f}]")
+    multi = all_db.ndim == 4                                  # [n, C, H, W]
+    if multi:
+        ranges = channel_ranges(all_db, cfg.spectrum.upper())
+        spec_min, spec_max = ranges[0]
+        print(f"channel ranges: {[(round(a, 2), round(b, 2)) for a, b in ranges]}")
+    else:
+        ranges = None
+        spec_min, spec_max = float(all_db.min()), float(all_db.max())
+        print(f"global dB range: [{spec_min:.2f}, {spec_max:.2f}]")
 
     # Pass 2: write PNGs against that one range, plus the float arrays.
     import imageio.v2 as imageio
@@ -261,7 +330,8 @@ def generate(cfg: Config):
     focal = cfg.width / (2 * math.tan(math.radians(cfg.fov_deg) / 2))
     images = {}
     for n, (spec_db, (rx_loc, yaw)) in enumerate(zip(specs, poses), start=1):
-        norm = np.clip((spec_db - spec_min) / (spec_max - spec_min), 0.0, 1.0)
+        preview = spec_db[0] if multi else spec_db           # the PNG shows channel 0
+        norm = np.clip((preview - spec_min) / (spec_max - spec_min), 0.0, 1.0)
         rgb = (jet(norm)[..., :3] * 255).astype(np.uint8)
         imageio.imwrite(os.path.join(cfg.out_dir, "images", f"{n:05d}.png"), rgb)
         if cfg.save_float:
@@ -281,6 +351,11 @@ def generate(cfg: Config):
                           "normalization": "global",
                           "seconds": elapsed,
                           "views_per_second": len(images) / max(elapsed, 1e-9)}
+    if multi:
+        from rf_spectra import MULTI_CHANNELS
+        meta["channels"] = (list(MULTI_CHANNELS) if cfg.spectrum.upper() == "MULTI"
+                            else ["aod3_zen_x_amp", "aod3_az_x_amp", "aod3_amp"])
+        meta["channel_ranges"] = ranges
     with open(os.path.join(cfg.out_dir, "generation_meta.json"), "w") as fid:
         json.dump(meta, fid, indent=1)
     print(f"wrote {len(images)} views to {cfg.out_dir} "
@@ -339,11 +414,16 @@ def main():
     ap.add_argument("--scene-xml", required=True)
     ap.add_argument("--rx-loc-file", required=True)
     ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--spectrum", default="MVDR", choices=["CBF", "MVDR"])
+    ap.add_argument("--spectrum", default="MVDR", choices=["CBF", "MVDR", "MULTI", "AOD3"],
+                    help="MULTI: one channel each for path power (dB), AoD azimuth, AoD zenith "
+                         "and delay; AOD3: the tutorial's angle-times-amplitude RGB encoding")
     ap.add_argument("--tx", dest="tx_loc", type=float, nargs=3, default=(6.905, 0.0, 2 - 1.713),
                     help="transmitter position; the default is the NIST measurement Tx")
     ap.add_argument("--frequency", type=float, default=60e9,
                     help="carrier in Hz; the tutorial's dataset cells use 2.4e9")
+    ap.add_argument("--poses-from", default=None,
+                    help="a dataset's sparse/0/images.txt: generate at exactly those poses "
+                         "(the released data's, for a like-for-like comparison)")
     ap.add_argument("--materials", choices=["uniform", "tutorial", "tutorial-asis"], default="uniform",
                     help="uniform: ITU materials with one scattering coefficient; tutorial: the "
                          "notebook's per-material definitions with the conductivity formulas' "
