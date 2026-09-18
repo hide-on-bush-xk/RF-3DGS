@@ -122,7 +122,7 @@ Sionna 给出每条路径 $k$ 的复增益 $a_k$、时延 $\tau_k$、到达角 $
 | 0.5 | 159,684 | 262,935 | 363,155 |
 | **0.7** | **312,683** | 522,365 | 722,643 |
 
-0.7 复现论文的"> 300,000 MPC / Tx-Rx 对"。作者的 0.19 pipeline 一定在某处设了它——最可能在没公开的语义材料描述符里,这也是 `custom_plastic / leather / cloth` 三种材料 EM 参数缺失的同一个洞。
+0.7 复现论文的"> 300,000 MPC / Tx-Rx 对"。**更正(2026-09-18)**:教程 notebook 的 cell 6 其实逐材料定义了散射系数(0.1–0.8,全局系数 4)、`DirectivePattern` 方向图和 EM 参数,并把 `itu_*` 按名字换成 `custom_*`;见 [stage2_notes.md](stage2_notes.md)。我们的统一 0.7 是等效校准值,不是作者的设定;逐材料版本待接入。
 
 **修掉的第二个缺陷——归一化不一致**。教程里 MVDR/AoD/Delay/MPC 用两个手选探针位置建立全局 dB 范围;CBF/TCBF 走 `jet_colormap_convert`,**逐图按自身 min/max 缩放**(`per_view_normalization` 参数被接收但从未读取)。逐图归一化破坏了 2.2 的假设 2。论文里 CBF/TCBF 恰好是最差的两类并归因于干扰——这是一个可检验的混淆(confound):用全局范围重生成 CBF 再训一次。我们的生成器对六种谱用**同一种**从数据来的全局范围。
 
@@ -261,7 +261,7 @@ $$\mathbb{E}_{\mathbf{w}\sim\mathcal N(0,I)}\bigl[(\mathbf{J}_n^\top \mathbf{w})
 2. **重生成的 MVDR 谱与发布的谱还不能数值对比**:范围、`time_interval_ns`、单元方向图、`synthetic_array` 待逐一对齐;发布的谱峰更尖。
 3. **材料反演用的是合成真值**(同一场景藏一组系数),不是实测。真实的失配来源(几何误差、天线方向图、频率相关 EM 参数、depth > 1 的高阶交互)一个都没进来。
 4. **所有规划实验:一个场景、60 GHz、depth 1、单极化各向同性天线、2 m/1 m 网格、25–30 步。** 2 m 网格上的 59.3% 与 1 m 网格上的 49% 不是同一个数,阈值 −85 dB 是拍的。
-5. **`custom_*` 材料是占位映射**(plastic→chipboard,leather→wood,cloth→ceiling_board),不是作者的值。
+5. **`custom_*` 材料是占位映射**(plastic→chipboard,leather→wood,cloth→ceiling_board),不是作者的值——作者的值在教程 cell 6 里(εr 2.3 / 1.8 / 1.8,σ = 0,散射 0.2 / 0.4 / 0.8),尚未接入。
 6. **CBF/TCBF 归一化混淆是假设**,还没做"用全局范围重生成 + 重训"这个决定性实验。
 7. 平面阵列的前后向模糊在所有版本里都存在;单元方向图在 CBF 与 MVDR 里用法不对称,继承自教程,未改。
 

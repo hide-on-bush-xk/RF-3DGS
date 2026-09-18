@@ -200,9 +200,11 @@ zero.
 | **0.7** | **312,683** | 522,365 | 722,643 |
 
 0.7 at depth 1 reproduces the paper's figure closely, so that is the default in
-`Config`. The authors' 0.19 pipeline must have set this somewhere -- most likely
-in the semantic material descriptor that was never published, which is the same
-missing piece that leaves `custom_*` materials unmapped.
+`Config`. **Correction (2026-09-18):** the tutorial notebook's cell 6 does define every
+material -- per-material scattering coefficients of 0.1-0.8 (a global factor of 4),
+`DirectivePattern` lobes, and the EM parameters of the `custom_*` materials -- and
+swaps `itu_*` for `custom_*` by name. The uniform 0.7 is an equivalent calibration,
+not the authors' setting; see `docs/stage2_notes.md` for the table.
 
 ## Throughput
 
