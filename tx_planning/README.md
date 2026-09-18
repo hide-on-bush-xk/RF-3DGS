@@ -15,7 +15,7 @@ pictures.
 | 0 | `probe_differentiability.py` — is Sionna's solve differentiable in material and Tx position on this scene? | verified (gradient vs finite difference within 5 %) |
 | 1 | `tx_sweep.py` — brute-force ground truth: candidate Tx positions × indoor Rx grid, structured CIRs | verified |
 | 2 | `optimize_tx.py` — gradient ascent on a coverage objective, Tx position from Sionna's own gradient | verified |
-| 3 | material inversion: fit scattering / EM parameters from Tx A observations, evaluate at Tx B | next |
+| 3 | `fit_materials.py` — fit every material's scattering coefficient to PDPs observed from Tx A, score at held-out Tx B | verified |
 | 4 | real scenes: geometry from gsplat / 2DGS instead of the Blender model | later |
 
 ## Running
@@ -28,6 +28,7 @@ SCENE=../sionna_tutorial/RF-3DGS_Sionna_simulation_tutorial/NIST_lobby_v1.0/NIST
 python tx_sweep.py    --scene-xml %SCENE% --tx-grid-step 2 --rx-step 1
 python optimize_tx.py --scene-xml %SCENE% --init-from ../output/tx_planning/tx_sweep.npz ^
                       --objective coverage --threshold-db -85 --tx-height 2.0 --rx-step 1
+python fit_materials.py --scene-xml %SCENE% --steps 25 --samples 30000
 ```
 
 `tx_sweep.npz` holds `tx_positions`, `rx_positions`, `gain_db [n_tx, n_rx]`,
@@ -59,3 +60,32 @@ the same content Aerial's `CIRResultsRequest` returns to its RAN simulator.
   2 m grid, 59 points) from 45.8 % to 59.3 % in 25 steps / 27 s.
 - **AD flags.** Reverse mode needs `solver.loop_mode = "evaluated"` and
   `dr.set_flag(dr.JitFlag.SpillToSharedMemory, False)` (`scene_common.enable_reverse_mode`).
+
+## Stage 3: learning the materials from one transmitter (`fit_materials.py`)
+
+Setup: each of the 29 used materials gets a hidden scattering coefficient in
+[0.2, 0.9]; the "measurement" is the delay-binned PDP (16 × 10 ns, +1 dB
+noise) at the 59 indoor grid points from Tx A = (8, −7, 2). Every material
+starts at 0.5. The fitted twin is scored at Tx B = (0, −3, 2), which it never saw.
+
+| | RMSE at Tx A | RMSE at held-out Tx B |
+|---|---|---|
+| all materials at 0.5 | 1.53 dB | 1.09 dB |
+| fitted from Tx A | 0.98 dB (= the 1 dB noise) | **0.47 dB** |
+
+- **Total power is the wrong observation.** It reached the same Tx A error, and
+  even 0.44 dB at Tx B, with material estimates that were nonsense (a glass at
+  0.80 fitted to 0.01, a wood at 0.89 to 0.12): the split between specular and
+  diffuse barely changes the total, but it reshapes the PDP (spike vs tail).
+- **Adam is the wrong optimiser here.** It moves every parameter at the same
+  rate, so the materials the data does not constrain wander at random.
+  Normalised gradient descent (step ∝ gradient / largest gradient) moves a
+  material in proportion to how much the data cares: with it, the 7 materials
+  whose mean gradient is ≥ 2 % of the largest went from mean |error| 0.161 to
+  **0.025** (concrete 0.71 → 0.74, metal 0.22 → 0.21, glass 0.80 → 0.85, …),
+  and the other 22 stayed within 0.02 of the prior.
+- **Identifiability is the real output.** 12 materials receive exactly zero
+  gradient from Tx A (never on a depth-1 path); the gradient magnitudes say
+  which walls a second transmitter position would have to illuminate — i.e.
+  where to measure next. That is the active-measurement question a planner can
+  ask that RadioSight's per-AP twin cannot.
