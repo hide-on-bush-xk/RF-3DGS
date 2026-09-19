@@ -231,6 +231,38 @@ kernel recovers a lead (top-1 0.19 | 0.19, top-5 0.44 | 0.61 against 0.26 |
 top-1 selector for a 64 × 64 one; and the downstream task picks the kernel
 width (0.33°) that the power-weighted metric picked.
 
+Those floors expose the evaluation protocol rather than the model: a
+random 20 % hold-out leaves every test position 0.23 m from a training
+one, a density no channel sounder delivers. Two protocol changes fix that.
+**Density sweep** (training positions 800 / 160 / 80 / 40 / 20, same
+held-out views, copy baseline drawn from the same subset): the copy's
+azimuth median grows linearly with the spacing, 1.07° → 1.68° → 2.55° →
+3.72° → 4.68° over 0.23 → 0.84 m, while the field stays at 0.59° → 0.60° →
+0.62° → 0.69° → 0.78° with its P90 near 6° throughout (the copy's 131–152°);
+zenith crosses at about 0.3 m and delay at about 0.6 m spacing (40
+positions: 3.12 against 3.10 ns). Twenty positions, 80 images, still give
+0.78° median azimuth. **Leave-one-region** (`make_region_split.py`, the
+south-east corridor end held out, 123 positions, nearest training position
+1.43 m median and 2.75 m at most): the field extrapolates to 1.47° / 17.6°
+azimuth median / P90 against the copy's 7.38° / 93°, zenith 1.99° against
+4.29°, PSNR 14.1 against 16.1 on the random split; delay is the weak
+channel there (6.78 against the copy's 5.95 ns median, 23 against 52 ns at
+P90). A constant predictor (the training pixels' mean) scores 27.6° / 7.2°
+/ 9.5 ns, so none of the three channels is degenerate.
+
+**Delay as analytic range plus learned residual** (`--delay-depth`). A
+path's delay is the scatterer's own delay plus the range from the Gaussian
+to the receiver over c; the second term is a distance, which a directional
+SH colour cannot represent, and it dominates the channel (3 m of depth is
+10 ns against a 2.4 ns error). gsplat renders the alpha-composited depth
+natively (render mode RGB+D), so the delay channel gets Σ wᵢ dᵢ / c added
+in its normalised units and the learned part keeps only the
+view-independent scatter delay. Same data, same everything else: delay
+median 2.42 → **0.95 ns**, P90 12.8 → 6.6 ns, RMSE 8.9 → 6.9 ns,
+power-weighted median 3.54 → 0.40 ns (the copy's 0.44); azimuth, zenith
+and power unchanged (0.62° / 0.96° / PSNR 16.14). It is the one change
+here forced by a measurement rather than borrowed from a paper.
+
 Carrying the azimuth as cos and sin removes the seam at ±180° that the
 single channel had (the pinhole resampling interpolated across it, and the
 field had to fit a jump that is not physical). The controlled A/B — the
