@@ -188,6 +188,7 @@ class RRF(torch.nn.Module):
         # nodes that are freed after the first backward.
         xyz, scaling, rotation, opacity = (t.detach().to(device) for t in (xyz, scaling, rotation, opacity))
         self.mode, self.channels, self.sh_degree = mode, channels, sh_degree
+        self.delay_channel, self.delay_span_ns = None, None   # --delay-depth: delay = learned residual + rendered depth / c
         n, k = xyz.shape[0], (sh_degree + 1) ** 2
         # RF-3DGS zeroes every SH coefficient before RF training; the same here,
         # for any channel count. DC and the rest are separate parameters so
@@ -269,9 +270,17 @@ class RRF(torch.nn.Module):
         img, alpha, info = rasterization(
             self.means, self.quats, self.scales, self.opacities, col,
             viewmat[None], K[None], width, height, sh_degree=None,
-            backgrounds=torch.zeros(1, self.channels, device=device))
+            backgrounds=torch.zeros(1, self.channels, device=device),
+            render_mode="RGB+D" if self.delay_channel is not None else "RGB")
         self.last_info = info
-        img = img[0].permute(2, 0, 1)                      # [C,H,W]
+        img = img[0].permute(2, 0, 1)                      # [C(+1),H,W]
+        if self.delay_channel is not None:
+            # tau = tau_scatter + |p - mu| / c: the second term is the alpha-composited
+            # depth gsplat renders natively (sum_i w_i d_i, metres); the learned channel
+            # keeps only the view-independent part. In the channel's normalised units.
+            depth_m = img[self.channels]
+            img = img[:self.channels].clone()
+            img[self.delay_channel] = img[self.delay_channel] + depth_m / (0.299792458 * self.delay_span_ns)
         if self.mode == "power":
             img = torch.log10(img + 1e-12) * 10.0 / span_db
         return img
@@ -443,6 +452,8 @@ def main():
     ap.add_argument("--db-range", type=float, nargs=2, default=None,
                     help="min max dB for the colormap; default from generation_meta.json")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--delay-depth", action="store_true",
+                    help="multi mode: add the rendered depth / c to the delay channel (analytic range + learned residual)")
     ap.add_argument("--no-eval", action="store_true",
                     help="skip the final test pass (adaptation runs whose only product is the geometry)")
     cfg = ap.parse_args()
@@ -530,6 +541,12 @@ def main():
                                 min_opacity=0.005, verbose=False)
         strategy.check_sanity(model.params, optimizers)
         state = strategy.initialize_state()
+    if cfg.delay_depth:
+        if cfg.mode != "multi" or "delay_ns" not in channel_names:
+            raise SystemExit("--delay-depth needs multi mode with a delay_ns channel")
+        model.delay_channel = channel_names.index("delay_ns")
+        model.delay_span_ns = float(ch_ranges[model.delay_channel, 1] - ch_ranges[model.delay_channel, 0])
+        print(f"delay channel {model.delay_channel}: rendered depth / c added, span {model.delay_span_ns:.1f} ns")
 
     def target(i):
         if cfg.mode == "rgb":

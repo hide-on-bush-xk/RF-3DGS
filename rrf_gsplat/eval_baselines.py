@@ -88,13 +88,31 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--multi", required=True); ap.add_argument("--truth", required=True)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--max-train-views", type=int, default=None,
+                    help="use the same training subset as train_rrf --max-train-views (whole positions, the trainer's rule)")
     cfg = ap.parse_args()
     meta = json.load(open(os.path.join(cfg.truth, "generation_meta.json")))
     ch = {n: i for i, n in enumerate(meta["channels"])}; lo0, hi0 = meta["channel_ranges"][0]
     poses = read_poses(os.path.join(cfg.truth, "sparse", "0", "images.txt"))
     train = [l.strip() for l in open(os.path.join(cfg.truth, "train_index.txt")) if l.strip()]
+    if cfg.max_train_views:                 # the trainer's rule: whole positions, evenly spaced along the training list
+        per_pos, n_pos = 4, len(train) // 4
+        keep = max(1, cfg.max_train_views // per_pos)
+        pos_idx = np.linspace(0, n_pos - 1, keep).round().astype(int)
+        train = [train[p * per_pos + k] for p in pos_idx for k in range(per_pos)]
     test = [l.strip() for l in open(os.path.join(cfg.truth, "test_index.txt")) if l.strip()]
     test = [n for n in test if os.path.exists(os.path.join(cfg.multi, "renders", n + ".npy"))]
+    # constant predictor: the training pixels' circular-mean azimuth, mean zenith, mean delay
+    cs = np.zeros(2); zs = ds = cnt = 0.0
+    for n in train:
+        a = np.load(os.path.join(cfg.truth, "spectra_float", n + ".npy")).astype(np.float64)
+        m = (a[0] - lo0) / (hi0 - lo0) > 0.02
+        if not m.any():
+            continue
+        cs += np.array([a[ch["aod_az_cos"]][m].sum(), a[ch["aod_az_sin"]][m].sum()])
+        zs += a[ch["aod_zen"]][m].sum(); ds += a[ch["delay_ns"]][m].sum(); cnt += m.sum()
+    const = {"az": float(np.degrees(np.arctan2(cs[1], cs[0]))), "zen": float(zs / cnt * 180.0), "delay": float(ds / cnt)}
+    print(f"training subset: {len(train)} views ({len(train)//4} positions); constant predictor az {const['az']:.1f} deg, zen {const['zen']:.1f} deg, delay {const['delay']:.1f} ns")
     # training positions per yaw
     by_yaw = {y: [] for y in range(4)}
     for n in train:
@@ -103,7 +121,7 @@ def main():
     tnames = {y: [n for _, n in v] for y, v in by_yaw.items()}
     load = lambda n: np.load(os.path.join(cfg.truth, "spectra_float", n + ".npy")).astype(np.float64)
 
-    methods = ("nearest", "interp2", "rrf")
+    methods = ("constant", "nearest", "interp2", "rrf")
     err = {m: {"az": [], "zen": [], "delay": []} for m in methods}
     hits = {m: {a: {k: [] for k in (1, 3, 5)} for a in ARRAYS} for m in methods}
     weights, nn_dist, n_pix = [], [], 0
@@ -120,8 +138,11 @@ def main():
         preds = {"nearest": near, "interp2": interp, "rrf": np.load(os.path.join(cfg.multi, "renders", n + ".npy")).astype(np.float64)}
         t_az, t_zen, t_dl = decode(truth, ch)
         pw = 10.0 ** (truth[0][mask] / 10.0); weights.append(pw); n_pix += int(mask.sum())
-        for m, arr in preds.items():
-            p_az, p_zen, p_dl = decode(arr, ch)
+        for m in methods:
+            if m == "constant":
+                p_az = np.full(t_az.shape, const["az"]); p_zen = np.full(t_az.shape, const["zen"]); p_dl = np.full(t_az.shape, const["delay"])
+            else:
+                p_az, p_zen, p_dl = decode(preds[m], ch)
             d_az = ((p_az - t_az + 180) % 360 - 180)[mask]
             err[m]["az"].append(np.abs(d_az)); err[m]["zen"].append(np.abs(p_zen - t_zen)[mask]); err[m]["delay"].append(np.abs(p_dl - t_dl)[mask])
             for a, cell in ARRAYS.items():
