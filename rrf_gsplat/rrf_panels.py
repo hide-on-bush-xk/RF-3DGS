@@ -43,10 +43,11 @@ def collect(rrf_dir):
     if os.path.exists(enc):
         with open(enc, encoding="utf-8") as fid:
             found["encoding"] = json.load(fid)
-    tc = os.path.join(rrf_dir, "transfer_curve.json")
-    if os.path.exists(tc):
-        with open(tc, encoding="utf-8") as fid:
-            found["transfer"] = json.load(fid)
+    for key, name in (("transfer", "transfer_curve.json"), ("transfer_2k", "transfer_curve_2k.json")):
+        tc = os.path.join(rrf_dir, name)
+        if os.path.exists(tc):
+            with open(tc, encoding="utf-8") as fid:
+                found[key] = json.load(fid)
     strip = os.path.join(rrf_dir, "compare_colour_modes.png")
     if os.path.exists(strip):
         import base64
@@ -194,12 +195,15 @@ def transfer_card(tr, width=560, height=260):
     parts.append(f'<text x="{width-pad_r}" y="{height-8}" text-anchor="end" font-size="10" fill="var(--muted)">{xmax:.0f} m from Tx-B</text>')
     parts.append(f'<text x="{width-pad_r}" y="{pad_t-3}" text-anchor="end" font-size="10" fill="var(--muted)">in-range RMSE, dB</text>')
     parts.append("</svg>")
-    cap = (f"{len(rows)} source transmitters; fit b(d) = b0 exp(&minus;d/d_c): d_c = {fit['d_c_m']:.1f} m, b0 = {fit['b0_db']:.2f} dB, R&sup2; {fit['r2']:.2f}"
-           if fit else f"{len(rows)} source transmitters; the fit needs 4")
-    return (f'<figure class="card"><h2>How far an adapted geometry carries</h2>'
-            f'<p class="rrf-note">Geometry unfrozen on a source transmitter, then frozen on Tx-B with colours reset. '
-            f'The benefit over the visual geometry decays with the source\'s distance to Tx-B; its correlation length d_c '
-            f'is the range within which one adaptation serves a moved transmitter.</p>'
+    budget = tr.get("transfer_budget", "10k")
+    cap = (f"{len(rows)} source transmitters, transfer budget {budget} steps; fit b(d) = b0 exp(&minus;d/d_c): d_c = {fit['d_c_m']:.1f} m, "
+           f"b0 = {fit['b0_db']:.2f} dB, R&sup2; {fit['r2']:.2f}"
+           if fit else f"{len(rows)} source transmitters, transfer budget {budget} steps; the fit needs 4")
+    return (f'<figure class="card"><h2>How far an adapted geometry carries ({budget}-step transfer)</h2>'
+            f'<p class="rrf-note">Geometry unfrozen on a source transmitter (10k steps), then frozen on Tx-B with colours reset '
+            f'and refit for {budget} steps (the 2k budget keeps the sign and order of the 10k points; seed noise 0.03 dB). '
+            f'The benefit over the visual geometry falls with the source\'s distance to Tx-B, but not only with it: '
+            f'it tracks how much of Tx-B\'s lit surface the source also lights.</p>'
             + "".join(parts) + f'<figcaption>{cap}</figcaption></figure>')
 
 
@@ -305,9 +309,10 @@ def render(found):
             f'{curves(cold[:2] + warm[:2])}<figcaption>PSNR after jet mapping &middot; final on 640 views: '
             f'{final}</figcaption></figure>')
 
-    tr = found.get("transfer")
-    if tr and tr.get("rows"):
-        cards.append(transfer_card(tr))
+    for key in ("transfer_2k", "transfer"):
+        tr = found.get(key)
+        if tr and tr.get("rows"):
+            cards.append(transfer_card(tr))
 
     # pipeline cost per transmitter position
     tut, gen, inria = found.get("tut019"), found.get("gen"), found.get("inria")
