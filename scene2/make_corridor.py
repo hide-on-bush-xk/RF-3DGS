@@ -131,9 +131,13 @@ def build(out):
     rng = np.random.default_rng(7)
     tint = {"wall": (0.75, 0.72, 0.65), "floor": (0.45, 0.42, 0.40), "ceiling": (0.85, 0.85, 0.82)}
     for cls, t in tint.items():
-        n = rng.random((256, 256, 1)) * 0.5 + 0.5
-        blotch = np.kron(rng.random((16, 16, 1)), np.ones((16, 16, 1)))
-        img = np.clip(255 * np.array(t)[None, None] * (0.6 * n + 0.4 * blotch), 0, 255).astype(np.uint8)
+        # multi-octave blotches (8 / 32 / 128 cells per 512 px), no per-pixel noise: features that
+        # survive the renderer's pixel filter and the trainer's downsampling, so 3DGS can fit them
+        # (per-pixel noise aliased into an unfittable residual: stage 1 stalled at 62k Gaussians, 17.8 dB)
+        img = np.zeros((512, 512, 1))
+        for cells, amp in ((8, 0.45), (32, 0.35), (128, 0.20)):
+            img += amp * np.kron(rng.random((cells, cells, 1)), np.ones((512 // cells, 512 // cells, 1)))
+        img = np.clip(255 * np.array(t)[None, None] * (0.35 + 0.65 * img), 0, 255).astype(np.uint8)
         Image.fromarray(img).save(os.path.join(out, "textures", f"{cls}.png"))
 
     def xml(visual):
