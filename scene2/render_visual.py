@@ -100,10 +100,11 @@ def main():
             pts.append(p); cols.append(np.tile(np.array(tint[cls], np.uint8), (n, 1)))
     pts, cols = np.concatenate(pts), np.concatenate(cols)
     with open(os.path.join(cfg.out, "points3d.ply"), "w") as f:
+        # the trainer's fetchPly wants x y z nx ny nz red green blue (it silently falls back to None otherwise)
         f.write(f"ply\nformat ascii 1.0\nelement vertex {len(pts)}\nproperty float x\nproperty float y\nproperty float z\n"
-                "property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n")
+                "property float nx\nproperty float ny\nproperty float nz\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n")
         for p, c in zip(pts, cols):
-            f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {c[0]} {c[1]} {c[2]}\n")
+            f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} 0 0 0 {c[0]} {c[1]} {c[2]}\n")
     print(f"{len(frames['train'])} train + {len(frames['test'])} test frames, {len(pts):,} initial points, {time.time() - t0:.0f} s -> {cfg.out}")
 
 
