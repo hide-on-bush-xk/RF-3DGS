@@ -62,7 +62,7 @@ class Planner:
 
     def _power_db(self, solver, seed=42, samples=None):
         dr = self.dr
-        paths = solver(scene=self.scene, max_depth=1, samples_per_src=samples or self.samples, los=True,
+        paths = solver(scene=self.scene, max_depth=1, max_num_paths_per_src=10_000_000, samples_per_src=samples or self.samples, los=True,
                        specular_reflection=True, diffuse_reflection=True, refraction=False,
                        synthetic_array=True, seed=seed)
         a_re, a_im = paths.a

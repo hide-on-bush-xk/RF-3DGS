@@ -84,7 +84,7 @@ def main():
 
     def objective():
         paths = solver(scene=scene, max_depth=cfg.max_depth,
-                       samples_per_src=cfg.samples, los=True,
+                       max_num_paths_per_src=10_000_000, samples_per_src=cfg.samples, los=True,
                        specular_reflection=True, diffuse_reflection=True,
                        refraction=False, synthetic_array=True, seed=42)
         a_re, a_im = paths.a

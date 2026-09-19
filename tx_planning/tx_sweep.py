@@ -27,7 +27,7 @@ def solve_tx(solver, scene, cfg):
     per (Tx, Rx) pair: the sampling cost is per source, not per receiver.
     """
     paths = solver(scene=scene, max_depth=cfg.max_depth,
-                   samples_per_src=cfg.samples, los=True,
+                   max_num_paths_per_src=10_000_000, samples_per_src=cfg.samples, los=True,
                    specular_reflection=True, diffuse_reflection=True,
                    refraction=False, synthetic_array=True, seed=cfg.seed)
     a, tau = paths.cir(normalize_delays=False, out_type="numpy")

@@ -44,7 +44,7 @@ def main():
     for samples in (100_000, 400_000):
         res = {}
         for depth in (1, 3):
-            paths = solver(scene=scene, max_depth=depth, samples_per_src=samples, los=True, specular_reflection=True,
+            paths = solver(scene=scene, max_depth=depth, max_num_paths_per_src=10_000_000, samples_per_src=samples, los=True, specular_reflection=True,
                            diffuse_reflection=True, refraction=False, synthetic_array=True, seed=42)
             a_re, a_im = paths.a
             p = np.asarray(dr.square(a_re) + dr.square(a_im))               # [rx, rx_ant, tx, tx_ant, paths]

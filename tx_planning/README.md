@@ -160,11 +160,14 @@ The coverage objective solves at `max_depth 1`. Measured per receiver with
 adds a median +0.15 dB and at most +2.5 dB (corridor ends), raising coverage
 by 2–3 points at every candidate, and it does not change the ranking: the
 depth-1 optimum (8.2, −5.05, 2.0) is also the best at depth 3 (0.627 against
-0.610 for the optimum found on a depth-2 objective). The caveat that matters
-more is the many-receiver solve's sample budget: with all 59 receivers in
-one scene the coverage of one transmitter moves from 59.3 % (20k samples) to
-57.6 % (100k) to 44.1 % (400k), and a depth-3 solve at those budgets loses
-first-order power (P10 −28 dB) instead of adding bounces
-(`depth_check.py`, `depth_orders.py`). Report the objective's sample
-variance, or evaluate per receiver, before comparing candidates closer than
-a few points.
+0.610 for the optimum found on a depth-2 objective). The many-receiver
+solve had a real defect on the way to that answer: with all 59 receivers in
+one scene the coverage of one transmitter fell from 59.3 % (20k samples) to
+57.6 % (100k) to 44.1 % (400k), and a depth-3 solve at those budgets lost
+first-order power (P10 −28 dB) instead of adding bounces. The cause is the
+solver's `max_num_paths_per_src` (default 1e6): the candidate paths of 59
+receivers overflow it and are dropped, so the path count saturates near
+30k and more samples only truncate more (`sampling_cap_check.py`). With
+the cap at 1e7 the coverage is 0.593 at every budget and depth. Every
+many-receiver solve here now passes `max_num_paths_per_src=10_000_000`;
+the optimiser's own runs (20k samples) never reached the cap and stand.

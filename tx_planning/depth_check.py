@@ -69,7 +69,7 @@ def main():
         gains = {}
         for d in cfg.depths:
             t0 = time.time()
-            paths = solver(scene=scene, max_depth=d, samples_per_src=cfg.samples, los=True, specular_reflection=True,
+            paths = solver(scene=scene, max_depth=d, max_num_paths_per_src=10_000_000, samples_per_src=cfg.samples, los=True, specular_reflection=True,
                            diffuse_reflection=True, refraction=False, synthetic_array=True, seed=42)
             a_re, a_im = paths.a
             p_rx = dr.square(a_re) + dr.square(a_im)
