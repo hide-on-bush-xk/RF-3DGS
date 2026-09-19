@@ -111,3 +111,11 @@
 | WiNeRT(OpenReview tPKKXeW33YU) | OpenReview 被机器人验证页挡住;iclr.cc/virtual/2023/poster/10694 打开,标题与作者一致(Orekondy, Pratik, Kadambi, Ye, Soriaga, Behboodi,ICLR 2023) | 是 | 页面给的是 "<0.33ns error in time-of-flight predictions";我之前写的"定位误差中位 0.58 m / 1.21 m"来自搜索摘要,**页面上没核到** | 标题 VERIFIED;**0.58 m / 1.21 m 标 UNVERIFIED,改用 <0.33 ns** |
 
 补一条与本项目直接相关的事实:RF-PGS 和 RadioSight 的通讯作者 Haijian Sun 在 UGA——同校同题,论文定位要考虑这一点。
+
+## RF-PGS 的代码与管线(Ke 的追问,2026-09-19)
+
+- 代码:GitHub `SunLab-UGA/RF-PGS` 存在,README 写 "Code will be released upon paper acceptance";论文原句 "Dataset and codes of this paper will be available after paper acceptance"。**目前没有可查的实现。**
+- 全文页核到的生成细节:Sionna;"we apply path loss thresholds of −160 dB for 2.4 GHz and −190 dB for 60 GHz"(阈值截断);查询方向对齐到"a panoramic camera, using an equirectangular projection"。
+  **没有**:每接收端位置的采样数、随机 seed、散射设置、每视角是否单独 solve、归一化方式、RF-3DGS 基线是重跑还是引用。
+- 结论:无法确认 RF-PGS 是否共享"逐视角 seed"这一违反;能确认的是他们用了截断阈值(与我们的 −150 dB 同类)和全景查询(没有四面针孔的"四面派生"问题)。
+  能说的话:"发布的 RF-3DGS 管线按构造带有这一违反(教程逐视角随机采样散射路径);RF-PGS 的管线未公开,不能判断。"
