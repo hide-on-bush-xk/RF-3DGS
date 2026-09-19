@@ -65,16 +65,24 @@ def main():
     test_idx = set(rng.permutation(len(poses))[:n_test].tolist())
     os.makedirs(os.path.join(cfg.out, "train"), exist_ok=True); os.makedirs(os.path.join(cfg.out, "test"), exist_ok=True)
     scene = mi.load_file(os.path.join(cfg.scene, "corridor_visual.xml"), spp=cfg.spp, resx=cfg.width, resy=cfg.height)
-    sensor = scene.sensors()[0]
-    params = mi.traverse(sensor)
     frames = {"train": [], "test": []}
     t0 = time.time()
     for i, c2w in enumerate(poses):
-        # Mitsuba's camera looks down +z with y up; Blender's looks down -z: flip y and z columns
-        m = c2w.copy(); m[:3, 1] *= -1; m[:3, 2] *= -1
-        params["to_world"] = mi.ScalarTransform4f(m.tolist())
-        params.update()
-        img = mi.render(scene, sensor=sensor, spp=cfg.spp)
+        # Mitsuba's camera frame is x LEFT, y up, z forward (perspective.cpp maps camera +x to the left half of
+        # the film and +y to the top; look_at builds [left, up, dir]). Blender's is x right, y up, z backward:
+        # flip the x and z columns. The first three datasets flipped y and z (the OpenCV frame), which is the
+        # Blender frame rotated 180 deg about the optical axis: every frame was upside-down and mirrored with
+        # respect to the pose the trainer reads, the ceiling lights sat in the bottom half, and 3DGS could not
+        # fit the set (loss flat at 0.2, 17 dB). Checked with output/scene2_densify_test/conv_*.png: lights at
+        # the top and the corridor mouth on the camera's left only with the x,z flip.
+        # A fresh sensor per pose: mutating the XML sensor's to_world through traverse() is not relied upon.
+        m = c2w.copy(); m[:3, 0] *= -1; m[:3, 2] *= -1
+        sensor = mi.load_dict({"type": "perspective", "fov": 90.0, "fov_axis": "x", "near_clip": 0.05, "far_clip": 1000.0,
+                               "to_world": mi.ScalarTransform4f(m.tolist()),
+                               "sampler": {"type": "independent", "sample_count": cfg.spp},
+                               "film": {"type": "hdrfilm", "width": cfg.width, "height": cfg.height, "pixel_format": "rgba",
+                                        "rfilter": {"type": "gaussian"}}})
+        img = mi.render(scene, sensor=sensor, spp=cfg.spp, seed=i)
         rgba = np.clip(np.asarray(mi.Bitmap(img).convert(mi.Bitmap.PixelFormat.RGBA, mi.Struct.Type.UInt8, srgb_gamma=True)), 0, 255)
         split = "test" if i in test_idx else "train"
         name = f"{split}/{i:04d}.png"
