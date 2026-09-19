@@ -1,0 +1,210 @@
+<scene version="2.1.0">
+	<default name="spp" value="256" />
+	<default name="resx" value="1600" />
+	<default name="resy" value="900" />
+	<integrator type="path" id="elm__0" name="elm__0">
+		<integer name="max_depth" value="8" />
+	</integrator>
+	<sensor type="perspective" id="Camera" name="Camera">
+		<string name="fov_axis" value="x" />
+		<float name="fov" value="90.0" />
+		<float name="near_clip" value="0.05" />
+		<float name="far_clip" value="1000.0" />
+		<transform name="to_world"><lookat origin="14 0 -0.088" target="15 0 -0.088" up="0 0 1" /></transform>
+		<sampler type="independent" name="sampler"><integer name="sample_count" value="$spp" /></sampler>
+		<film type="hdrfilm" name="film"><integer name="width" value="$resx" /><integer name="height" value="$resy" /><string name="pixel_format" value="rgba" /><rfilter type="gaussian" name="rfilter" /></film>
+	</sensor>
+	<bsdf id="mat-itu_plasterboard" name="mat-itu_plasterboard" type="itu-radio-material">
+		<string name="type" value="plasterboard" />
+	</bsdf>
+	<bsdf id="mat-itu_concrete" name="mat-itu_concrete" type="itu-radio-material">
+		<string name="type" value="concrete" />
+	</bsdf>
+	<bsdf id="mat-itu_ceiling_board" name="mat-itu_ceiling_board" type="itu-radio-material">
+		<string name="type" value="ceiling_board" />
+	</bsdf>
+	<shape type="ply" id="mesh-floor_corridor" name="mesh-floor_corridor">
+		<string name="filename" value="meshes/floor_corridor.ply" />
+		<ref id="mat-itu_concrete" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-ceiling_corridor" name="mesh-ceiling_corridor">
+		<string name="filename" value="meshes/ceiling_corridor.ply" />
+		<ref id="mat-itu_ceiling_board" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-floor_hall" name="mesh-floor_hall">
+		<string name="filename" value="meshes/floor_hall.ply" />
+		<ref id="mat-itu_concrete" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-ceiling_hall" name="mesh-ceiling_hall">
+		<string name="filename" value="meshes/ceiling_hall.ply" />
+		<ref id="mat-itu_ceiling_board" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-floor_room_N1" name="mesh-floor_room_N1">
+		<string name="filename" value="meshes/floor_room_N1.ply" />
+		<ref id="mat-itu_concrete" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-ceiling_room_N1" name="mesh-ceiling_room_N1">
+		<string name="filename" value="meshes/ceiling_room_N1.ply" />
+		<ref id="mat-itu_ceiling_board" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-floor_room_N2" name="mesh-floor_room_N2">
+		<string name="filename" value="meshes/floor_room_N2.ply" />
+		<ref id="mat-itu_concrete" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-ceiling_room_N2" name="mesh-ceiling_room_N2">
+		<string name="filename" value="meshes/ceiling_room_N2.ply" />
+		<ref id="mat-itu_ceiling_board" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-floor_room_N3" name="mesh-floor_room_N3">
+		<string name="filename" value="meshes/floor_room_N3.ply" />
+		<ref id="mat-itu_concrete" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-ceiling_room_N3" name="mesh-ceiling_room_N3">
+		<string name="filename" value="meshes/ceiling_room_N3.ply" />
+		<ref id="mat-itu_ceiling_board" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-floor_room_S1" name="mesh-floor_room_S1">
+		<string name="filename" value="meshes/floor_room_S1.ply" />
+		<ref id="mat-itu_concrete" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-ceiling_room_S1" name="mesh-ceiling_room_S1">
+		<string name="filename" value="meshes/ceiling_room_S1.ply" />
+		<ref id="mat-itu_ceiling_board" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-floor_room_S2" name="mesh-floor_room_S2">
+		<string name="filename" value="meshes/floor_room_S2.ply" />
+		<ref id="mat-itu_concrete" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-ceiling_room_S2" name="mesh-ceiling_room_S2">
+		<string name="filename" value="meshes/ceiling_room_S2.ply" />
+		<ref id="mat-itu_ceiling_board" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-floor_room_S3" name="mesh-floor_room_S3">
+		<string name="filename" value="meshes/floor_room_S3.ply" />
+		<ref id="mat-itu_concrete" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-ceiling_room_S3" name="mesh-ceiling_room_S3">
+		<string name="filename" value="meshes/ceiling_room_S3.ply" />
+		<ref id="mat-itu_ceiling_board" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_1_0a" name="mesh-corrwall_1_0a">
+		<string name="filename" value="meshes/corrwall_1_0a.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_1_0lintel" name="mesh-corrwall_1_0lintel">
+		<string name="filename" value="meshes/corrwall_1_0lintel.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_1_1a" name="mesh-corrwall_1_1a">
+		<string name="filename" value="meshes/corrwall_1_1a.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_1_1lintel" name="mesh-corrwall_1_1lintel">
+		<string name="filename" value="meshes/corrwall_1_1lintel.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_1_2a" name="mesh-corrwall_1_2a">
+		<string name="filename" value="meshes/corrwall_1_2a.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_1_2lintel" name="mesh-corrwall_1_2lintel">
+		<string name="filename" value="meshes/corrwall_1_2lintel.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_1_end" name="mesh-corrwall_1_end">
+		<string name="filename" value="meshes/corrwall_1_end.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_-1_0a" name="mesh-corrwall_-1_0a">
+		<string name="filename" value="meshes/corrwall_-1_0a.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_-1_0lintel" name="mesh-corrwall_-1_0lintel">
+		<string name="filename" value="meshes/corrwall_-1_0lintel.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_-1_1a" name="mesh-corrwall_-1_1a">
+		<string name="filename" value="meshes/corrwall_-1_1a.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_-1_1lintel" name="mesh-corrwall_-1_1lintel">
+		<string name="filename" value="meshes/corrwall_-1_1lintel.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_-1_2a" name="mesh-corrwall_-1_2a">
+		<string name="filename" value="meshes/corrwall_-1_2a.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_-1_2lintel" name="mesh-corrwall_-1_2lintel">
+		<string name="filename" value="meshes/corrwall_-1_2lintel.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corrwall_-1_end" name="mesh-corrwall_-1_end">
+		<string name="filename" value="meshes/corrwall_-1_end.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-corr_west_end" name="mesh-corr_west_end">
+		<string name="filename" value="meshes/corr_west_end.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-outer_1" name="mesh-outer_1">
+		<string name="filename" value="meshes/outer_1.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-roomend_1_w" name="mesh-roomend_1_w">
+		<string name="filename" value="meshes/roomend_1_w.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-roomend_1_e" name="mesh-roomend_1_e">
+		<string name="filename" value="meshes/roomend_1_e.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-partition_1_0" name="mesh-partition_1_0">
+		<string name="filename" value="meshes/partition_1_0.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-partition_1_1" name="mesh-partition_1_1">
+		<string name="filename" value="meshes/partition_1_1.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-outer_-1" name="mesh-outer_-1">
+		<string name="filename" value="meshes/outer_-1.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-roomend_-1_w" name="mesh-roomend_-1_w">
+		<string name="filename" value="meshes/roomend_-1_w.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-roomend_-1_e" name="mesh-roomend_-1_e">
+		<string name="filename" value="meshes/roomend_-1_e.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-partition_-1_0" name="mesh-partition_-1_0">
+		<string name="filename" value="meshes/partition_-1_0.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-partition_-1_1" name="mesh-partition_-1_1">
+		<string name="filename" value="meshes/partition_-1_1.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-hall_east" name="mesh-hall_east">
+		<string name="filename" value="meshes/hall_east.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-hall_north" name="mesh-hall_north">
+		<string name="filename" value="meshes/hall_north.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-hall_south" name="mesh-hall_south">
+		<string name="filename" value="meshes/hall_south.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-hall_west_n" name="mesh-hall_west_n">
+		<string name="filename" value="meshes/hall_west_n.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+	<shape type="ply" id="mesh-hall_west_s" name="mesh-hall_west_s">
+		<string name="filename" value="meshes/hall_west_s.ply" />
+		<ref id="mat-itu_plasterboard" name="bsdf" />
+	</shape>
+</scene>

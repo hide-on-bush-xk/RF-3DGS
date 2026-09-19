@@ -188,7 +188,7 @@ class RRF(torch.nn.Module):
         # nodes that are freed after the first backward.
         xyz, scaling, rotation, opacity = (t.detach().to(device) for t in (xyz, scaling, rotation, opacity))
         self.mode, self.channels, self.sh_degree = mode, channels, sh_degree
-        self.delay_channel, self.delay_span_ns = None, None   # --delay-depth: delay = learned residual + rendered depth / c
+        self.delay_channel, self.delay_span_ns, self.delay_depth_mode = None, None, "D"   # --delay-depth: delay = learned residual + rendered depth / c
         n, k = xyz.shape[0], (sh_degree + 1) ** 2
         # RF-3DGS zeroes every SH coefficient before RF training; the same here,
         # for any channel count. DC and the rest are separate parameters so
@@ -271,7 +271,7 @@ class RRF(torch.nn.Module):
             self.means, self.quats, self.scales, self.opacities, col,
             viewmat[None], K[None], width, height, sh_degree=None,
             backgrounds=torch.zeros(1, self.channels, device=device),
-            render_mode="RGB+D" if self.delay_channel is not None else "RGB")
+            render_mode=("RGB+" + self.delay_depth_mode) if self.delay_channel is not None else "RGB")
         self.last_info = info
         img = img[0].permute(2, 0, 1)                      # [C(+1),H,W]
         if self.delay_channel is not None:
@@ -443,6 +443,10 @@ def main():
     ap.add_argument("--eval-every", type=int, default=1000)
     ap.add_argument("--eval-subset", type=int, default=64, help="test views for the running eval")
     ap.add_argument("--max-train-views", type=int, default=None, help="data-efficiency ablation")
+    ap.add_argument("--subset-mode", choices=["route", "fps"], default="route",
+                    help="how --max-train-views picks positions: evenly along the training list (route) or farthest-point sampling in space (fps)")
+    ap.add_argument("--delay-depth-mode", choices=["D", "ED"], default="D",
+                    help="--delay-depth range term: accumulated depth sum w d (D) or expected depth sum w d / alpha (ED)")
     ap.add_argument("--init-from", default=None, help="rrf_state.pt of another run (warm start)")
     ap.add_argument("--init-geometry-only", action="store_true",
                     help="with --init-from: take means/scales/quats/opacities from that run but "
@@ -490,7 +494,16 @@ def main():
         # every position, and the model would never see the other three.
         per_pos, n_pos = 4, len(train_names) // 4
         keep = max(1, cfg.max_train_views // per_pos)
-        pos_idx = np.linspace(0, n_pos - 1, keep).round().astype(int)
+        if cfg.subset_mode == "fps":
+            # farthest-point sampling over the positions: the most even spatial coverage a
+            # subset of this size can have (the route order interleaves passes of the walk)
+            pos = np.array([-(views[train_names[p * per_pos] + ".png"][0][:3, :3].T @ views[train_names[p * per_pos] + ".png"][0][:3, 3]) for p in range(n_pos)])
+            chosen = [0]; dmin = np.linalg.norm(pos - pos[0], axis=1)
+            while len(chosen) < keep:
+                j = int(dmin.argmax()); chosen.append(j); dmin = np.minimum(dmin, np.linalg.norm(pos - pos[j], axis=1))
+            pos_idx = np.array(sorted(chosen))
+        else:
+            pos_idx = np.linspace(0, n_pos - 1, keep).round().astype(int)
         train_names = [train_names[p * per_pos + k] for p in pos_idx for k in range(per_pos)]
     t0 = time.time()
     train = load_views(cfg.source, train_names, views, device, want_float=True)
@@ -546,6 +559,7 @@ def main():
             raise SystemExit("--delay-depth needs multi mode with a delay_ns channel")
         model.delay_channel = channel_names.index("delay_ns")
         model.delay_span_ns = float(ch_ranges[model.delay_channel, 1] - ch_ranges[model.delay_channel, 0])
+        model.delay_depth_mode = cfg.delay_depth_mode
         print(f"delay channel {model.delay_channel}: rendered depth / c added, span {model.delay_span_ns:.1f} ns")
 
     def target(i):

@@ -176,7 +176,7 @@ def build(out):
             n = max(1, int(np.ceil(np.linalg.norm(b - a) / step)))
             out_ += [a + (b - a) * t for t in np.linspace(0, 1, n, endpoint=False)]
         return out_ + [pts[-1]]
-    step = 0.4
+    step = 0.2
     route = {"corridor": polyline([(0.6, 0.0), (27.4, 0.0)], step)}
     for r in rooms():
         i = 0.9; xa, xb, ya, yb = r["x0"] + i, r["x1"] - i, r["y0"] + i, r["y1"] - i
@@ -195,6 +195,10 @@ def build(out):
     tx = {"corridor_W": (1.5, 0.0, TX_Z), "corridor_M": (14.0, 0.0, TX_Z), "corridor_E": (27.0, 0.0, TX_Z), "hall": (33.0, 0.0, TX_Z)}
     for r in rooms():
         tx[r["name"]] = ((r["x0"] + r["x1"]) / 2, (r["y0"] + r["y1"]) / 2, TX_Z)
+    # same-room pairs: a second transmitter 1.5 m along x in three rooms (the target S2 and two controls)
+    for r in rooms():
+        if r["name"] in ("room_S2", "room_N2", "room_S1"):
+            tx[r["name"] + "b"] = ((r["x0"] + r["x1"]) / 2 + 1.5, (r["y0"] + r["y1"]) / 2, TX_Z)
     json.dump(tx, open(os.path.join(out, "tx_positions.json"), "w"), indent=1)
     json.dump({"floor_z": FLOOR, "ceil_z": CEIL, "rx_z": RX_Z, "tx_z": TX_Z, "spaces": spaces, "pieces": [(n, c, b) for n, c, b in pieces]},
               open(os.path.join(out, "layout.json"), "w"), indent=1)

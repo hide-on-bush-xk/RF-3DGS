@@ -31,7 +31,7 @@ gpu_busy() {
   u=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | tr -d ' \r'); [ "${u:-100}" -ge 15 ]
 }
 stamp "start"
-for i in $(seq 1 5760); do grep -q "all done" output/scene2_visual.log 2>/dev/null && [ -f scene2/visual_trained/chkpnt30000.pth ] && break; sleep 5; done
+for i in $(seq 1 5760); do [ -f scene2/visual_trained/chkpnt30000.pth ] && grep -q "all done" output/rrf/win_round18.log 2>/dev/null && break; sleep 5; done
 [ -f scene2/visual_trained/chkpnt30000.pth ] || { stamp "no visual checkpoint; stopping"; exit 1; }
 quiet=0; while [ $quiet -lt 24 ]; do if gpu_busy; then quiet=0; else quiet=$((quiet+1)); fi; sleep 5; done
 stamp "visual chain done, gpu quiet ($(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader | tr -d '\r'))"
@@ -48,7 +48,7 @@ TXM="14.0 0.0 0.287"
 # A. density crossover
 gen s2_MULTI_corrM --spectrum MULTI --frequency 2.4e9 --splat-sigma 3 --tx $TXM
 DS=$REG/s2_MULTI_corrM
-for V in 0 460 232 116 60; do
+for V in 0 900 452 224 112; do        # 564 positions at 0.2 m, 20 % held out: 451 / 225 / 113 / 56 / 28 training positions
   name=s2_multi_corrM_depth$( [ $V = 0 ] && echo "" || echo "_v$V" )
   if [ $V = 0 ]; then run $name --source $DS --mode multi --delay-depth --save-renders 300; base $name $DS
   else run $name --source $DS --mode multi --delay-depth --max-train-views $V --save-renders 300; base $name $DS --max-train-views $V; fi
