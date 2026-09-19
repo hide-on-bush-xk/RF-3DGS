@@ -221,6 +221,13 @@ def element_gain_fn(theta: torch.Tensor, phi: torch.Tensor) -> torch.Tensor:
 
 
 PROJECTION_KINDS = ("MULTI", "AOD3")
+# A receiver pose the ray tracer cannot reach at all (a closed room, a
+# transmitter behind two walls at depth 1) gives no paths. The projection
+# targets already render such a view as all-floor; the beamformed spectra
+# raised and killed the run (scene 2, room transmitters). They now get a
+# constant spectrum at this level, below the MVDR numerical floor (about
+# -280 dB), and the count is recorded in generation_meta.json.
+EMPTY_VIEW_DB = -300.0
 
 
 def projection_equirect(paths, kind: str, device, sigma: float = 3.0, power_floor_db: float = -150.0):
@@ -316,6 +323,7 @@ def generate(cfg: Config, shared=None):
     specs, poses, per_view, cfr_curve = [], [], [], None
     t_start = time.time()
     projection = cfg.spectrum.upper() in PROJECTION_KINDS
+    empty_views = 0
     for i, (rx_loc, yaws) in enumerate(groups):
         if i % 50 == 0:
             print(f"  {i}/{len(groups)}")
@@ -340,7 +348,13 @@ def generate(cfg: Config, shared=None):
                     from rf_spectra import equirect_to_perspective
                     spec_db = equirect_to_perspective(eq, cfg.width, cfg.height, cfg.fov_deg, yaw_rad=yaw)
                 else:
-                    _, spec_db = spectrum_for_paths(paths, grid, cfg, yaw=yaw)
+                    try:
+                        _, spec_db = spectrum_for_paths(paths, grid, cfg, yaw=yaw)
+                    except ValueError as exc:
+                        if "no valid paths" not in str(exc):
+                            raise
+                        spec_db = torch.full(tuple(grid.theta.shape[-2:]), EMPTY_VIEW_DB, dtype=torch.float32)
+                        empty_views += 1
             specs.append(spec_db.cpu().numpy().astype(np.float32))
             poses.append((rx_loc, yaw))
 
@@ -400,7 +414,10 @@ def generate(cfg: Config, shared=None):
                           "num_images": len(images), "colormap": "jet",
                           "normalization": "global",
                           "seconds": elapsed,
-                          "views_per_second": len(images) / max(elapsed, 1e-9)}
+                          "views_per_second": len(images) / max(elapsed, 1e-9),
+                          "empty_views": empty_views, "empty_view_db": EMPTY_VIEW_DB}
+    if empty_views:
+        print(f"empty views (no paths at this receiver pose, written at {EMPTY_VIEW_DB:.0f} dB): {empty_views} of {len(images)}")
     if multi:
         from rf_spectra import MULTI_CHANNELS
         meta["channels"] = (list(MULTI_CHANNELS) if cfg.spectrum.upper() == "MULTI"
