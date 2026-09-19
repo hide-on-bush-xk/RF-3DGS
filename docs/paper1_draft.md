@@ -1,0 +1,78 @@
+# What Determines the Quality of a Radio Radiance Field? A Controlled Measurement Anchored on RF-3DGS
+
+*Draft v0.1, 2026-09-19. Every number below is from `docs/stage2_notes.md` and `output/rrf/*`; `[MISSING: …]` marks a number the experiments have not produced yet. Numbers in this draft are on one scene (the NIST lobby) unless a scene-2 row is given.*
+
+## Abstract
+
+Radio radiance fields (RRFs) fit a 3D Gaussian scene to spatial spectra so that the spectrum at an unvisited receiver can be rendered. Recent work changes the representation (planar Gaussians, bidirectional spherical harmonics, receiver-conditioned radiance) and reports PSNR of the rendered spectrum. We ask a prior question: with the representation fixed, what determines reconstruction quality, and does the number reported measure it? Anchored on a reproduction of the published RF-3DGS checkpoint (15.97 dB against the published 16.02 dB), we vary one factor at a time on the same scene, simulator and evaluation and find: (i) cross-view consistency of the training data dominates. Per-view normalisation costs 6.2 dB PSNR; sampling the ray-tracer's diffuse paths per view instead of per position costs 32 % of the decoded power-channel error on path-level targets, and, measured on the beamformed MVDR spectrum, nothing at all (18.75 / 3.91 against 18.69 / 3.94 dB), which bounds the claim to the target type. Both are larger than any representation change we measured, including unfreezing the geometry (−27 % RMSE). (ii) The unfreezing gain is low-dimensional and transmitter-specific: a random 1 % of the Gaussians recovers 73 % of it, ten adapted geometries are nearly orthogonal (five principal components carry 66 % of the energy), and a geometry adapted on one transmitter helps a second one only on the same side of the lobby (+0.33 dB mean) and hurts everywhere else (−0.20 dB mean, plateau −0.46 dB), whatever the distance. (iii) PSNR is blind to the physics: a conductivity unit error that makes every wall a perfect conductor, a 2.3× error in the multi-bounce power share, a factor-34 dB carrier mismatch and the kernel width that decides beam selection all leave PSNR unchanged. We therefore evaluate decoded physical quantities, add the floor those numbers lacked (nearest-measurement lookup) and the ceiling (the target's own encoding), and find that the field beats lookup on azimuth, zenith and delay once measurements are more than about 0.3 m apart, and extrapolates into a held-out corridor end at 1.6° azimuth against 7.4° for lookup. One change forced by these measurements, rendering the delay's range term analytically from the Gaussian depth and learning only the residual, halves the delay error (2.42 → 0.95 ns median) with the other channels unchanged.
+
+## 1. Introduction
+
+- The RRF family (RF-3DGS, WRF-GS, GSRF, RF-PGS, BiWGS, RxGS) differs in what is stored on a Gaussian and how it is composited; all report rendered-spectrum PSNR/SSIM (some dB MAE); none reports what the spectrum decodes to, none has a reproducible anchor, none tests the data pipeline's consistency.
+- Three claims, each with a controlled number: consistency dominates (§3); geometry adaptation is low-dimensional and transmitter-specific (§4); the usual metrics do not see the physics (§5), so we score decoded angles and delays against a lookup floor and an encoding ceiling (§6).
+- One method contribution follows from the floor: an analytic-plus-residual delay channel (§6.3). Contributions list; anchor statement; scope (one lobby at two frequencies and two material sets; a second scene replicates three claims `[MISSING: scene 2 rows]`).
+
+## 2. Anchor, pipeline and protocol
+
+**Anchor (C0).** Published data, published visual checkpoint, our gsplat trainer: PSNR(jet) 15.97 against the published 16.02. RF-PGS reports an RF-3DGS baseline of 14.22 on the same lobby with a different data size; without an anchor, its 20.61 and our 21.53 are not comparable. We compare only against C0.
+
+**Pipeline.** Sionna 2.1 on the GPU (OptiX) replaces the tutorial's Sionna 0.19/TensorFlow; the beamforming (CBF, MVDR, M = 10 UPA) is ported to torch with the angle grid cached per camera model; four 90° pinhole faces per position; gsplat rasterises any channel count, so the target can be the dB spectrum (one channel) or five physical channels (path power, cos/sin of departure azimuth, departure zenith, delay). Geometry frozen from the visual checkpoint unless stated.
+
+**Evaluation.** Decoded azimuth / zenith / delay on the pixels a path reaches, reported as median / P90 / RMSE (the tail is a few percent of two-path pixels); dB RMSE in the dataset's range; PSNR after jet mapping as the compatibility number. Held-out positions (20 %, whole positions), a contiguous held-out region (§6.2), and a training-density sweep with the copy baseline drawn from the same subset (§6.1).
+
+**Reporting.** Timings give the full chain (generation + training + evaluation), the GPU and whether it was exclusive, medians after warm-up, two resolutions; every baseline row appears as "as published" and "as published + engineering fixes" (a "tutorial + batching only" row is MISSING and is listed as such). Seed noise floor of the transfer benefit: 0.03 dB over four seeds. Every criterion in §3–§6 was written before its run; failures are reported as such.
+
+## 3. Cross-view consistency dominates
+
+Alpha compositing assumes one physical field observed consistently from every view. The published pipeline breaks that in two independent places, and we measure each.
+
+| violation | what it breaks | cost (same scene, same everything else) |
+| --- | --- | --- |
+| per-view normalisation of the spectrum | radiance consistency | MVDR rgb PSNR 18.15 → 11.97 (−6.2 dB); CBF at 2.4 GHz RMSE 9.32 → 13.35 dB |
+| per-view sampling of diffuse paths (the tutorial seeds once and draws `scat_keep_prob` per call) | geometric consistency: the four faces of one position see four path sets | power-channel in-range RMSE 12.67 → 8.57 dB (−32 %) on the five-channel path-level target |
+| the same seed change on the beamformed MVDR target | — | 18.75 / 3.91 → 18.69 / 3.94 dB: nothing (noise floor 0.03 dB) |
+
+The third row bounds the claim: a beamformed spectrum is an array statistic over all sampled paths and averages the subset out; a path-level splat is not. For comparison, unfreezing the geometry (§4) gains 27 % and the dB-domain target beats the RGB one in every setting by a smaller margin. The published RF-3DGS tutorial carries the second violation by construction; RF-PGS's pipeline is not public, so we cannot say whether it does.
+
+## 4. Geometry: who carries the adaptation, and how far it travels
+
+- Unfreezing means / scales / rotations: 18.75 / 3.91 → 21.53 / 2.85 dB, reproduced on per-position-seeded data (18.69 / 3.94 → 21.47 / 2.89). Means move 6 mm (median); the gain is in scales and rotations; the adapted geometry frozen with colours refit from zero reaches the same 21.55 / 2.81, so it is not a joint-training artefact.
+- Decomposition on a second transmitter (Tx-B, 5.8 m away): the Tx-A-adapted geometry carried over gives 4.58 dB in-range RMSE against 4.82 for the visual geometry and 3.83 for Tx-B's own adaptation: 24 % of the gain is transferable, 76 % is transmitter-specific. Not a dB-mixing artefact (linear-power compositing gains the same −27.5 %), not generic capacity (a third transmitter's geometry carried over is worse than the visual one, 4.95).
+- Which Gaussians: discs alone (11 %) 21.49 / 2.86; needles alone (40 %) 21.32 / 2.92; a random 11 % 21.27 / 2.91, random 3 % 21.00 / 3.02, random 1 % 20.72 / 3.14. One Gaussian in a hundred recovers 73 % of the gain; shape class is not the variable. Rays average 6–8 Gaussians (N_eff median 5.9 frozen, 7.5 unfrozen).
+- Ten source transmitters, transfer to Tx-B (2k-step budget calibrated against 10k: same signs, same order; noise 0.03 dB): the four sources on Tx-B's side of the lobby all help (mean +0.33 dB, worst +0.12), the six elsewhere all hurt (mean −0.20, best −0.06), independent of distance (5.3 m as useless as 12.8 m). An exponential-plus-plateau fit gives d_c = 5.3 m but its bootstrap 90 % interval is 2–40 m; the plateau, −0.46 dB, is the firm number. Benefit correlates −0.81 with distance and +0.85 with how much of the target's strongly lit surface the source also lights; the two are collinear.
+- Parameter-space check: the ten deformations stacked have a flat spectrum (five components 66 % of energy), mean pairwise cosine 0.18, and their mean carries 26 % of the energy (the 24 % transferable part measured functionally); interpolating a new transmitter's deformation from its neighbours' coefficients is no better than using the mean. Consequence: keep the visual geometry plus a per-transmitter delta on the 1–3 % of Gaussians that carry the gain; no shared low-rank basis emerges from independent adaptations (a jointly trained one is untested).
+
+## 5. The metrics do not see the physics (four instances)
+
+1. The tutorial's conductivity formula divides the frequency by 1e-9 instead of 1e9; every ITU material becomes a perfect conductor (1e16–1e24 S/m). PSNR is unchanged; the depth-3 power share beyond first order goes 13.7 % → 31 % (2.3×), with corridor-end positions missing 45–99 % of their power at depth 1.
+2. The released data are 2.4 GHz (the released CBF power matches 2.4 GHz within 1.6 dB and 60 GHz by 34 dB); the paper's 60 GHz narrative is unaffected by PSNR.
+3. The depth-1 twin's missing power (23–41 % at 60 GHz corridor ends, up to 82 % at 2.4 GHz) is invisible to PSNR; it does not change the ranking of transmitter placements (§7) but it changes the coverage numbers.
+4. The splat kernel width that minimises the decoded error is a property of the metric, not of the field: 1–2° by pixel count, the 0.33° grid limit by power, and zenith prefers the opposite of azimuth (77 % of arriving power sits within ±5° elevation; the azimuth axis is crowded, the zenith axis is sparse). The downstream task (beam selection on strong paths) picks the power-weighted answer.
+
+## 6. Decoded physical accuracy with a floor and a ceiling
+
+**6.0 Encoding.** One channel per quantity, azimuth as (cos, sin): decoded azimuth 0.59° / 5.9° / 9.8° (median / P90 / RMSE), zenith 0.94° / 12.1°, delay 2.42 / 12.8 ns; the tutorial's angle × amplitude RGB decodes to 27° median. The seam at ±180° costs its own channel 3.2× and nothing else (same-channel A/B). Ceiling: the target's own encoding, 0.20°.
+
+**6.1 Floor and density.** Copying the nearest training position's spectrum (0.23 m away in the random split) decodes to 1.07° / 131° / 55° azimuth, 0.79° zenith, 0.86 ns delay: the field's median gain is 1.8× on azimuth and its gain is in the tail; a constant predictor scores 27.6° / 7.2° / 9.5 ns, so no channel is degenerate. Training on 800 / 160 / 80 / 40 / 20 positions (spacing 0.23 → 0.84 m), copy from the same subset, field with the delay decomposition of §6.3: copy azimuth 1.07 → 4.68°, field 0.62 → 0.84°; copy zenith 0.79 → 2.91°, field 0.96 → 1.24°; copy delay 0.86 → 3.88 ns, field 0.95 → 1.43 ns. All three channels cross between 0.23 and 0.35 m spacing. Subsampling is even along the route; a farthest-point subsample, the strongest lookup a subset can get, is `[MISSING: fps rows at 80 and 40 positions, round 18]`. The flatness is the frozen visual geometry carrying the spatial structure; the crossover therefore depends on that geometry's quality (§8).
+
+**6.2 Extrapolation.** Holding out the south-east corridor end (123 positions, nearest training position 1.43 m median, 2.75 m max): field 1.6° / 18.9° azimuth, 2.1° / 28° zenith, 3.1 / 14.0 ns delay against lookup 7.4° / 93°, 4.3° / 98°, 6.0 / 52 ns. The paper's "extrapolation to unvisited locations" is supported at this distance on this scene; the field's delay is the channel that degrades most (0.95 → 3.07 ns).
+
+**6.3 Delay as analytic range plus learned residual.** The lookup floor showed the learned delay channel 3× worse than copying a neighbour (2.42 against 0.86 ns). A path's delay is the scatterer's delay plus the Gaussian-to-receiver range over c; the range is a distance, which a directional SH colour cannot represent, and it dominates the channel (3 m of depth is 10 ns). gsplat renders the composited depth natively, so the delay channel receives Σ wᵢ dᵢ / c and learns only the view-independent part: median 2.42 → 0.95 ns, P90 12.8 → 6.6, power-weighted median 3.54 → 0.40 (the lookup's 0.44), azimuth / zenith / power unchanged. In extrapolation it removes 3.71 ns of median error against 1.47 ns in interpolation while the learned residual degrades, net 6.78 → 3.07 ns. The remaining tail is not multi-path mixing (single-path pixels carry 55 % of the squared error); its sign is negative (mean −1.10 ns), consistent with the accumulated depth being shortened by (1 − α); the expected-depth variant is `[MISSING: ED row, round 18]`. RF-PGS computes time of flight purely from geometry and reports no delay error; BiWGS and RxGS do not encode delay.
+
+**6.4 Beam selection.** With a θ₃dB codebook: M = 10 (10.2°), field top-1 0.68 (power-weighted 0.70), top-3 0.84 (0.91), lookup 0.60 (0.65), 0.74 (0.82); 64 × 64 (1.59°), the 1° kernel's strong-path top-1 0.10 falls below lookup (0.23) and the 0.33° kernel recovers 0.19 (top-5 0.61 against 0.20). The field is a beam selector for the M = 10 array and not a top-1 selector for a 64 × 64 one; the published 5.94° pointing error was obtained on M = 10 data and corresponds to 3.7 beamwidths on the 64 × 64 array the same paper headlines.
+
+## 7. Cost, reported under the contract
+
+Full chain on an exclusive RTX 3060: as published (Sionna 0.19 + TF on the CPU, INRIA trainer) ≈ 1 h; as published + engineering fixes (Sionna 2.1 on the GPU, INRIA trainer) 222 s + 272 s ≈ 8.2 min; this work at 800 positions 311 + 168 + 35 s ≈ 8.6 min; at 160 positions 33 + 36 + 35 s ≈ 1.7 min. Rasteriser step gsplat vs INRIA 4.4 vs 5.6 ms (300 × 200) to 25.5 vs 113 ms (2400 × 1600). RF-PGS trains in 3 min 53 s on the same lobby; a Gaussian ray tracer needs no retraining. The many-receiver planner solve is capped by the solver's `max_num_paths_per_src`; with the cap raised its coverage is stable across sample budgets, and depth-3 solves change coverage by 2–3 points without changing the placement ranking.
+
+## 8. Limits
+
+One lobby, two frequencies, two material sets, one array; `[MISSING: scene 2: density crossover, zone structure, consistency magnitudes; stage-1 visual PSNR for both scenes]`. MCMC densification untuned; end-to-end differentiability to materials not attempted; a jointly trained shared deformation basis untested; the delay residual's remaining 4.7 ns single-path RMSE has no mechanism yet.
+
+## 9. Conclusion
+
+In the RF-3DGS setting, the consistency of the data pipeline across views matters more than any change to the representation for path-level targets and not at all for beamformed ones; geometry adaptation is a small, distributed, transmitter-specific correction that must not be shared across zones; the common metrics see none of this, and decoded physical accuracy with a lookup floor does. The one algorithmic change that survived this protocol, the analytic delay range, came from the floor, not from a paper.
+
+## Tables and figures (planned)
+
+T1 anchor and protocol; T2 consistency (three rows); T3 geometry decomposition and subsets; F1 transfer benefit by source (zone-coloured, both budgets); F2 deformation spectrum and cosine; T4 metric blindness (four instances); T5 floor / density (both scenes); T6 extrapolation; T7 delay decomposition; T8 beam selection; T9 cost with MISSING rows.
