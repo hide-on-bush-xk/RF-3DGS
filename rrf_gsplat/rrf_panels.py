@@ -31,6 +31,26 @@ GROUPS = {
 }
 
 
+DENSITY_RUNS = {
+    # (run name, training positions); the spacing axis is the measured nearest-training distance from the baselines file
+    "scene 1 (lobby)": [("m_multi_24_tut_cs_depth", 640), ("m_multi_24_tut_cs_depth_v640", 160), ("m_multi_24_tut_cs_depth_v320", 80),
+                        ("m_multi_24_tut_cs_depth_v160", 40), ("m_multi_24_tut_cs_depth_v80", 20)],
+    "scene 2 (corridor)": [("s2_multi_corrM_depth", 451), ("s2_multi_corrM_depth_v900", 225), ("s2_multi_corrM_depth_v452", 113),
+                           ("s2_multi_corrM_depth_v224", 56), ("s2_multi_corrM_depth_v112", 28)],
+}
+
+
+def crossover(rows, ch):
+    """Spacing at which copy - field changes sign (linear interpolation); '< first' / '> last' when it does not."""
+    d = [(r["spacing"], r["copy"][ch] - r["field"][ch]) for r in rows]
+    if d[0][1] > 0:
+        return f"below {d[0][0]:.2f} m"
+    for (x0, y0), (x1, y1) in zip(d[:-1], d[1:]):
+        if y0 <= 0 < y1:
+            return f"{x0 + (x1 - x0) * (-y0) / (y1 - y0):.2f} m"
+    return f"beyond {d[-1][0]:.2f} m"
+
+
 def collect(rrf_dir):
     found = {}
     for key, name in (("summary", "summary.json"), ("tut019", "tutorial_019_timing.json"),
@@ -48,6 +68,26 @@ def collect(rrf_dir):
         if os.path.exists(tc):
             with open(tc, encoding="utf-8") as fid:
                 found[key] = json.load(fid)
+    # density sweeps: copy (nearest training position) against the field, per scene, on the measured spacing axis
+    density = {}
+    for scene, runs in DENSITY_RUNS.items():
+        rows = []
+        for run, npos in runs:
+            p = os.path.join(rrf_dir, f"baselines_{run}.json")
+            if not os.path.exists(p):
+                continue
+            with open(p, encoding="utf-8") as fid:
+                b = json.load(fid)
+            e = b["errors"]
+            rows.append({"positions": npos, "spacing": b["nearest_train_distance_m"]["median"],
+                         "copy": {c: e["nearest"][c]["median"] for c in ("az", "zen", "delay")},
+                         "field": {c: e["rrf"][c]["median"] for c in ("az", "zen", "delay")},
+                         "copy_p90": {c: e["nearest"][c]["p90"] for c in ("az", "zen", "delay")},
+                         "field_p90": {c: e["rrf"][c]["p90"] for c in ("az", "zen", "delay")}})
+        if len(rows) >= 2:
+            density[scene] = sorted(rows, key=lambda r: r["spacing"])
+    if density:
+        found["density"] = density
     strip = os.path.join(rrf_dir, "compare_colour_modes.png")
     if os.path.exists(strip):
         import base64
@@ -216,6 +256,55 @@ def transfer_card(tr, width=560, height=260):
             + "".join(parts) + f'<figcaption>{cap}</figcaption></figure>')
 
 
+def density_card(density, width=560, height=200):
+    """Median decoded error of copy and field against the measured spacing, one panel per channel, both scenes."""
+    chans = (("az", "azimuth, deg"), ("zen", "zenith, deg"), ("delay", "delay, ns"))
+    scenes = list(density)
+    pad_l, pad_r, pad_t, pad_b = 40, 12, 14, 26
+    pw, ph = width - pad_l - pad_r, height - pad_t - pad_b
+    xmax = max(r["spacing"] for rows in density.values() for r in rows) * 1.06
+    svgs = []
+    for ch, unit in chans:
+        ymax = max(max(r["copy"][ch], r["field"][ch]) for rows in density.values() for r in rows) * 1.08
+
+        def px(v):
+            return pad_l + v / xmax * pw
+
+        def py(v):
+            return pad_t + ph - v / ymax * ph
+
+        parts = [f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{unit} against spacing" style="width:100%;height:auto">']
+        for i in range(4):
+            frac = i / 3
+            yy = pad_t + ph - frac * ph
+            parts.append(f'<line x1="{pad_l}" x2="{width-pad_r}" y1="{yy:.1f}" y2="{yy:.1f}" stroke="var(--line)"/>')
+            parts.append(f'<text x="{pad_l-6}" y="{yy+3.5:.1f}" text-anchor="end" font-size="10" fill="var(--muted)">{frac*ymax:.1f}</text>')
+        for si, scene in enumerate(scenes):
+            dash = "" if si == 0 else ' stroke-dasharray="6 4"'
+            for key, k in (("copy", 2), ("field", 1)):
+                pts = " ".join(f"{px(r['spacing']):.1f},{py(r[key][ch]):.1f}" for r in density[scene])
+                parts.append(f'<polyline points="{pts}" fill="none" stroke="var(--s{k})" stroke-width="2"{dash}/>')
+                for r in density[scene]:
+                    parts.append(f'<circle cx="{px(r["spacing"]):.1f}" cy="{py(r[key][ch]):.1f}" r="3.5" fill="var(--s{k})" stroke="var(--bg)" stroke-width="1.5">'
+                                 f'<title>{scene}, {r["positions"]} training positions, spacing {r["spacing"]:.2f} m: {key} median {r[key][ch]:.2f}, P90 {r[key + "_p90"][ch]:.1f}</title></circle>')
+        parts.append(f'<text x="{pad_l}" y="{height-8}" font-size="10" fill="var(--muted)">0</text>')
+        parts.append(f'<text x="{width-pad_r}" y="{height-8}" text-anchor="end" font-size="10" fill="var(--muted)">{xmax:.1f} m to the nearest training position (median)</text>')
+        parts.append(f'<text x="{width-pad_r}" y="{pad_t-3}" text-anchor="end" font-size="10" fill="var(--muted)">median error, {unit}</text>')
+        parts.append("</svg>")
+        svgs.append("".join(parts))
+    legend = (f'<div class="legend"><span><i style="background:var(--s2)"></i>copy the nearest training position</span>'
+              f'<span><i style="background:var(--s1)"></i>field (delay = residual + depth / c)</span>'
+              + "".join(f'<span>{"solid" if si == 0 else "dashed"}: {scene}</span>' for si, scene in enumerate(scenes)) + "</div>")
+    cap = " ".join(f"{scene}: crossover azimuth {crossover(rows, 'az')}, zenith {crossover(rows, 'zen')}, delay {crossover(rows, 'delay')} "
+                   f"({rows[0]['positions']} &rarr; {rows[-1]['positions']} training positions, spacing {rows[0]['spacing']:.2f} &rarr; {rows[-1]['spacing']:.2f} m)."
+                   for scene, rows in density.items())
+    return (f'<figure class="card wide"><h2>Where the field beats a lookup table: training density, both scenes</h2>'
+            f'<p class="rrf-note">Median decoded error on the same held-out images as the training set is thinned; the copy baseline uses the '
+            f'same training subset. The spacing axis is measured (nearest training position, median): the corridor route has a 0.2 m step but '
+            f'the generator applies the tutorial\'s &plusmn;0.5 m position jitter. Hover a point for its P90.</p>'
+            + legend + f'<div class="rrf-grid">{"".join(svgs)}</div><figcaption>{cap}</figcaption></figure>')
+
+
 def render(found):
     runs = found.get("summary") or []
     if not runs and not found.get("tut019"):
@@ -322,6 +411,8 @@ def render(found):
         tr = found.get(key)
         if tr and tr.get("rows"):
             cards.append(transfer_card(tr))
+    if found.get("density"):
+        cards.append(density_card(found["density"]))
 
     # pipeline cost per transmitter position
     tut, gen, inria = found.get("tut019"), found.get("gen"), found.get("inria")
