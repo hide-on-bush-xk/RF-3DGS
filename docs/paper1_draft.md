@@ -264,7 +264,7 @@ Rasteriser step (render + L1 + backward to SH and opacity, 1.01M Gaussians, medi
 
 The many-receiver planner solve used for transmitter placement was found to be truncated by the solver's default path cap (1e6 paths per source): with 59 receivers its coverage fell from 0.593 to 0.441 as the sample budget rose from 20k to 400k; with the cap at 1e7 it is 0.593 at every budget and depth. Coverage of 239 receivers at 50k samples takes 0.084 s (median of 5); five optimisation steps 1.75 s.
 
-## 9. A second scene `[MISSING]`
+## 9. A second scene: three claims replicated on a corridor with closed rooms
 
 To separate topology from the visual geometry's quality, a procedural corridor scene was built with the same pipeline: a 28 m corridor 2.4 m wide, three rooms of 5 × 4.5 m on each side with 0.9 × 2.1 m door openings, and a 10 × 8 m hall; ITU materials (plasterboard, concrete, ceiling board) with uniform scattering 0.7; textured walls so that the visual reconstruction has something to fit; a receiver route at 0.2 m spacing (574 positions) and thirteen transmitters including three same-room pairs. Only three claims are replicated, with the predictions written before any run:
 
