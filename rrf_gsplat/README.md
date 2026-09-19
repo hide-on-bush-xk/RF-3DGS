@@ -164,6 +164,25 @@ N_eff = (Σw)²/Σw² (`diag_neff.py`, Rademacher estimate), has median 5.9
 on the frozen model and 7.5 after unfreezing, with under 4 % of pixels
 below 2, so the equal gain of dB and linear-power compositing is a
 measured fact, not a consequence of one Gaussian owning each pixel.
+
+**How far an adaptation carries** (`transfer_curve.py`, `diag_overlap.py`):
+ten source transmitters across the lobby, each adapted for 10k steps, its
+geometry frozen on Tx-B with colours reset and refit for 2k steps (a budget
+calibrated against the 10k points on A/C/D: same signs, same order; seed
+noise 0.03 dB over four seeds). The benefit over the visual geometry is
++0.57 dB at 1.8 m, +0.34 at 4.2 m, +0.29 at 5.8 m along the east side
+where Tx-B sits, and between −0.06 and −0.35 dB for every source in the
+main hall, the south corridor or the west, whatever its distance (5.3 m
+is as useless as 12.8 m). The fit b(d) = b0 exp(−d/d_c) + c gives d_c =
+5.3 m with a *negative* plateau c = −0.46 dB (R² 0.74): geometry adapted
+elsewhere is worse than the visual geometry. Distance is not the variable
+on its own: the benefit correlates −0.81 with distance and +0.85 with how
+much of Tx-B's strongly lit surface the source also lights (IoU of the
+top-30-dB pixels on the held-out views), and a linear model needs both.
+One adaptation serves a moved transmitter only where the two light the
+same surfaces, about 5 m within one zone; a multi-transmitter deployment
+should keep the visual geometry plus a per-transmitter delta on the 1–3 %
+of Gaussians that carry the gain, not one adapted geometry for the floor.
 gsplat's MCMC densification with its default
 hyper-parameters diverges from this converged start (NaN loss by 4k
 iterations at either cap); a low-noise, late-start, relocate-only
