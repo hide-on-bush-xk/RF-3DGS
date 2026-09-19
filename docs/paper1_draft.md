@@ -161,11 +161,11 @@ The plateau, the orthogonality and the 1 % result say the same thing: a per-tran
 | representation | azimuth | zenith | delay |
 | --- | --- | --- | --- |
 | tutorial's angle × amplitude RGB (AoD3), decoded by channel ratio | 48.6° RMSE | 56.6° RMSE | no channel |
-| one channel per quantity, azimuth as a single angle | 19.0° RMSE | 11.6° RMSE | 8.2 ns RMSE |
+| one channel per quantity, azimuth as a single wrapped angle (same dataset, same five channels) | 1.86° / 11.7° / 19.1° | 0.96° / 11.8° / — | 2.44 / 12.8 / — ns |
 | one channel per quantity, azimuth as (cos, sin) | 0.59° / 5.85° / 9.8° | 0.94° / 12.1° / 14.7° | 2.42 / 12.8 / 8.9 ns |
 | the target's own encoding (ceiling) | 0.20° | — | — |
 
-The seam at ±180° costs its own channel 3.2× and nothing else (same-channel-count A/B). Separating the channels makes gsplat's arbitrary channel count pay: the angle error falls to a fifth of the tutorial's encoding.
+The seam at ±180° costs its own channel 3.2× at the median and 2× at P90 and RMSE, and nothing else: zenith, delay and power agree within 0.02 between the two encodings, so a feature one channel cannot fit does not leak into the others. Separating the channels makes gsplat's arbitrary channel count pay: the angle RMSE falls to a fifth of the tutorial's encoding.
 
 ### 7.2 The floor
 
@@ -278,9 +278,9 @@ To separate topology from the visual geometry's quality, a procedural corridor s
 | scene | Gaussians | resolution | PSNR on training views | PSNR on held-out views |
 | --- | --- | --- | --- | --- |
 | lobby, released checkpoint | 1,014,142 | 1600 × 900 | 39.4 dB (809 views; median 39.8, P10 35.9, min 29.4) | none exist (trained on every frame) |
-| corridor | `[MISSING]` | 800 × 450 | `[MISSING]` | `[MISSING]` (43 held-out frames) |
+| corridor, our checkpoint (30k steps) | 582,363 | 800 × 450 | 26.0 dB (821 views, against the 64-spp targets it was trained on) | 25.3 dB against the 64-spp targets (their Monte-Carlo noise floor is 27.2 dB); 28.8 dB against clean 512-spp re-renders of the same 43 poses (median 29.2, P10 25.0, min 20.4) |
 
-The first two corridor reconstructions failed (17–18 dB, 62–74k Gaussians) because the camera frame handed to the renderer was rotated 180° about the optical axis relative to the poses the trainer reads; the corrected render is running. `[MISSING: Table 13 corridor row; Tables 5, 8, 9 and 2 replicated on the corridor.]`
+The two rows are not the same protocol: the lobby checkpoint was trained on every clean Blender frame and has no held-out views; the corridor was trained on 64-spp Monte-Carlo renders, so its held-out PSNR against those targets is capped by their noise, and the clean-target number is the one to read. The first two corridor reconstructions (17–18 dB, 62–74k Gaussians) failed because the camera frame handed to the renderer was rotated 180° about the optical axis relative to the poses the trainer reads (Mitsuba's camera x axis points left); the corrected dataset trains normally. `[MISSING: Tables 5, 8, 9 and 2 replicated on the corridor; queue running on this checkpoint.]`
 
 ## 10. Limits
 

@@ -34,8 +34,9 @@ def density():
     print("A. density crossover (median errors; copy = nearest training position; field with --delay-depth)")
     rows = [("scene 1 (lobby)", "baselines_%s.json", [("m_multi_24_tut_cs_depth", 800), ("m_multi_24_tut_cs_depth_v640", 160), ("m_multi_24_tut_cs_depth_v320", 80),
                                                         ("m_multi_24_tut_cs_depth_v160", 40), ("m_multi_24_tut_cs_depth_v80", 20)]),
-            ("scene 2 (corridor)", "baselines_%s.json", [("s2_multi_corrM_depth", 230), ("s2_multi_corrM_depth_v460", 115), ("s2_multi_corrM_depth_v232", 58),
-                                                          ("s2_multi_corrM_depth_v116", 29), ("s2_multi_corrM_depth_v60", 15)])]
+            # 564 route positions at 0.2 m, 20 % held out: 451 training positions, then 225 / 113 / 56 / 28 (views = 4 x positions)
+            ("scene 2 (corridor)", "baselines_%s.json", [("s2_multi_corrM_depth", 451), ("s2_multi_corrM_depth_v900", 225), ("s2_multi_corrM_depth_v452", 113),
+                                                          ("s2_multi_corrM_depth_v224", 56), ("s2_multi_corrM_depth_v112", 28)])]
     for scene, pat, runs in rows:
         print(f"  {scene}")
         print(f"  {'positions':>9} {'spacing':>8} {'az copy/field':>16} {'zen copy/field':>16} {'delay copy/field':>18}")
@@ -54,7 +55,8 @@ def zones():
         print("  (no scene-2 target runs yet)"); return
     tx = json.load(open(os.path.join(REPO, "scene2/corridor/tx_positions.json")))
     tgt = np.array(tx["room_S2"])
-    group = {"room_S1": "adjacent room", "room_S3": "adjacent room", "room_N1": "opposite room", "room_N2": "opposite room", "room_N3": "opposite room",
+    group = {"room_S2b": "same room", "room_S1": "adjacent room", "room_S1b": "adjacent room", "room_S3": "adjacent room",
+             "room_N1": "opposite room", "room_N2": "opposite room", "room_N2b": "opposite room", "room_N3": "opposite room",
              "corridor_W": "corridor", "corridor_M": "corridor", "corridor_E": "corridor", "hall": "hall"}
     rows = []
     for name, pos in tx.items():
