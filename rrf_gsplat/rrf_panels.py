@@ -199,8 +199,14 @@ def transfer_card(tr, width=560, height=260):
     parts.append(f'<text x="{width-pad_r}" y="{pad_t-3}" text-anchor="end" font-size="10" fill="var(--muted)">in-range RMSE, dB</text>')
     parts.append("</svg>")
     budget = tr.get("transfer_budget", "10k")
-    cap = (f"{len(rows)} source transmitters, transfer budget {budget} steps; fit b(d) = b0 exp(&minus;d/d_c) + c: d_c = {fit['d_c_m']:.1f} m, "
-           f"b0 = {fit['b0_db']:.2f} dB, plateau c = {fit.get('c_db', 0.0):+.2f} dB, R&sup2; {fit['r2']:.2f}"
+    z = tr.get("zones")
+    zone_txt = (f" Same side of the lobby as Tx-B ({', '.join(z['east_sources'])}): mean {z['east_mean']:+.2f} dB, worst {z['east_min']:+.2f}; "
+                f"elsewhere: mean {z['other_mean']:+.2f} dB, best {z['other_max']:+.2f}." if z else "")
+    bs = (fit or {}).get("bootstrap")
+    bs_txt = (f" Bootstrap 90 %: d_c {bs['d_c_p5']:.1f}&ndash;{bs['d_c_p95']:.1f} m ({bs['share_d_c_at_grid_max']:.0%} of resamples resolve no decay), "
+              f"plateau {bs['c_p5']:+.2f}&ndash;{bs['c_p95']:+.2f} dB." if bs else "")
+    cap = (f"{len(rows)} source transmitters, transfer budget {budget} steps.{zone_txt} Fit b(d) = b0 exp(&minus;d/d_c) + c: d_c = {fit['d_c_m']:.1f} m, "
+           f"b0 = {fit['b0_db']:.2f} dB, plateau c = {fit.get('c_db', 0.0):+.2f} dB, R&sup2; {fit['r2']:.2f}.{bs_txt}"
            if fit else f"{len(rows)} source transmitters, transfer budget {budget} steps; the fit needs 4")
     return (f'<figure class="card"><h2>How far an adapted geometry carries ({budget}-step transfer)</h2>'
             f'<p class="rrf-note">Geometry unfrozen on a source transmitter (10k steps), then frozen on Tx-B with colours reset '

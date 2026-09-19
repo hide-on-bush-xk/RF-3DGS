@@ -86,6 +86,36 @@ def main():
                       "n_points": len(rows)}
         print(f"fit b(d) = b0 exp(-d/d_c): d_c = {dc:.2f} m, b0 = {b0:.2f} dB, R^2 = {out['fit']['r2']:.2f}; "
               f"with offset: d_c = {best2[0]:.2f} m, b0 = {best2[1]:.2f}, c = {best2[2]:+.2f} dB, R^2 = {out['fit']['with_offset']['r2']:.2f}")
+        # bootstrap (resample the points with replacement) for the offset model's d_c and c
+        rng = np.random.default_rng(0); dcs, cs = [], []
+        grid = np.linspace(0.25, 40.0, 320)
+        for _ in range(1000):
+            idx = rng.integers(0, len(d), len(d))
+            if len(set(idx.tolist())) < 4:
+                continue
+            db, bb = d[idx], b[idx]; bestb = None
+            for g in grid:
+                e = np.exp(-db / g); A = np.stack([e, np.ones_like(e)], 1)
+                coef, *_ = np.linalg.lstsq(A, bb, rcond=None); sseb = float(((bb - A @ coef) ** 2).sum())
+                if bestb is None or sseb < bestb[0]:
+                    bestb = (sseb, g, coef[1])
+            dcs.append(bestb[1]); cs.append(bestb[2])
+        dcs, cs = np.array(dcs), np.array(cs)
+        out["fit"]["with_offset"]["bootstrap"] = {"n": int(len(dcs)), "d_c_p5": float(np.percentile(dcs, 5)), "d_c_median": float(np.median(dcs)),
+                                                  "d_c_p95": float(np.percentile(dcs, 95)), "share_d_c_at_grid_max": float((dcs >= grid[-1] - 1e-9).mean()),
+                                                  "c_p5": float(np.percentile(cs, 5)), "c_median": float(np.median(cs)), "c_p95": float(np.percentile(cs, 95))}
+        bs = out["fit"]["with_offset"]["bootstrap"]
+        print(f"bootstrap ({bs['n']} resamples): d_c median {bs['d_c_median']:.1f} m, 90% interval [{bs['d_c_p5']:.1f}, {bs['d_c_p95']:.1f}] m "
+              f"({bs['share_d_c_at_grid_max']:.0%} of resamples hit the 40 m grid limit, i.e. no decay resolved); "
+              f"plateau c median {bs['c_median']:+.2f} dB, 90% [{bs['c_p5']:+.2f}, {bs['c_p95']:+.2f}]")
+        # the binary reading: same side of the lobby as Tx-B (x >= 5) against the rest
+        east = np.array([r["tx"][0] >= 5.0 for r in rows])
+        out["zones"] = {"east_sources": [r["source"] for r, e in zip(rows, east) if e], "east_benefit": b[east].round(3).tolist(),
+                        "other_benefit": b[~east].round(3).tolist(), "east_mean": float(b[east].mean()), "other_mean": float(b[~east].mean()),
+                        "east_min": float(b[east].min()), "other_max": float(b[~east].max())}
+        z = out["zones"]
+        print(f"zones: east side (x >= 5) {z['east_sources']} benefit {z['east_benefit']} (mean {z['east_mean']:+.2f}, min {z['east_min']:+.2f}); "
+              f"other {z['other_benefit']} (mean {z['other_mean']:+.2f}, max {z['other_max']:+.2f})")
     else:
         print(f"{len(rows)} points so far; the fit needs 4")
     json.dump(out, open(os.path.join(OUT, f"transfer_curve{suf}.json"), "w"), indent=1)

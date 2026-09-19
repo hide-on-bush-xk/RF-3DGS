@@ -173,16 +173,28 @@ noise 0.03 dB over four seeds). The benefit over the visual geometry is
 +0.57 dB at 1.8 m, +0.34 at 4.2 m, +0.29 at 5.8 m along the east side
 where Tx-B sits, and between −0.06 and −0.35 dB for every source in the
 main hall, the south corridor or the west, whatever its distance (5.3 m
-is as useless as 12.8 m). The fit b(d) = b0 exp(−d/d_c) + c gives d_c =
-5.3 m with a *negative* plateau c = −0.46 dB (R² 0.74): geometry adapted
-elsewhere is worse than the visual geometry. Distance is not the variable
-on its own: the benefit correlates −0.81 with distance and +0.85 with how
-much of Tx-B's strongly lit surface the source also lights (IoU of the
-top-30-dB pixels on the held-out views), and a linear model needs both.
-One adaptation serves a moved transmitter only where the two light the
-same surfaces, about 5 m within one zone; a multi-transmitter deployment
+is as useless as 12.8 m). The main result is binary: the four sources on
+Tx-B's side of the lobby all help (mean +0.33 dB, worst +0.12), the six
+elsewhere all hurt (mean −0.20 dB, best −0.06), and distance does not
+separate them. An exponential-plus-plateau fit gives d_c = 5.3 m, but a
+1000-resample bootstrap puts its 90 % interval at 2–40 m with 17 % of
+resamples resolving no decay at all, so d_c is reported, not concluded;
+distance and the illumination overlap of the two transmitters (IoU of
+the top-30-dB pixels on the held-out views; benefit correlates −0.81
+with distance and +0.85 with the overlap) are collinear and their
+coefficients cannot be read separately. The plateau is the firm number:
+c = −0.46 dB (bootstrap median −0.50), i.e. geometry adapted elsewhere is
+*worse* than the visual geometry. The adaptation is directional, and
+stacking ten of them (`diag_delta_pca.py`) shows why: the ten deformations
+are nearly orthogonal (mean pairwise cosine 0.18, five principal components
+carry 66 % of the energy), only their mean, 26 % of the energy, is shared
+(the 24 % transferable part measured earlier), and interpolating a new
+transmitter's deformation from its neighbours' coefficients is no better
+than using that mean. One adaptation serves a moved transmitter only
+where the two light the same surfaces; a multi-transmitter deployment
 should keep the visual geometry plus a per-transmitter delta on the 1–3 %
-of Gaussians that carry the gain, not one adapted geometry for the floor.
+of Gaussians that carry the gain, not one adapted geometry for the floor,
+and not a shared low-rank basis taken from independent adaptations.
 gsplat's MCMC densification with its default
 hyper-parameters diverges from this converged start (NaN loss by 4k
 iterations at either cap); a low-noise, late-start, relocate-only
@@ -232,14 +244,22 @@ fixed support of the σ = 0.33° dataset (8.8M pixels, the kernel cores):
 
 (median / P90.) On a fixed support the azimuth optimum is σ\* = 1°, not
 the 2° the growing support suggested: the pixels a wider kernel adds are
-easier in the median and moved the minimum. Zenith is flat from 1° on
-with its best tail at 2°; delay is flat from 1° on. Hypothesis, not a
-conclusion: if the σ that minimises the decoded error measures the field's
-angular bandwidth, θ₃dB ≈ 2.355 σ\* is 2.4° on the fixed support (an
-M ≈ 43 array equivalent) and 4.7° on the growing one (M ≈ 22); the number
-moves with the support, so it is not settled, and the paper's 5.94° median
-beam-pointing error is a different quantity (an M = 10 beam pointed by the
-field) rather than a comparison point.
+kernel tails one path reaches alone, easy in the median, and they moved
+the minimum. Scored support-free instead, every touched pixel weighted by
+its own linear power (`--power-weighted`), the azimuth error falls
+monotonically down to the sweep's finest kernel, σ = 0.33° (the equirect
+grid step): median 0.84°, P90 2.15°, against 1.5° / 5.7° at 1° and
+1.1° / 7.8° at 4.3°; zenith prefers wide kernels (RMSE 2.6° at 2°) and
+delay is flat. So the optimum is a property of the metric's weighting,
+not of the field: by pixel count it sits at 1–2° because smoothing helps
+the many weak pixels, by power it sits at the grid limit because a narrow
+kernel keeps strong paths separate. The "σ\* measures the representation
+bandwidth" reading is dropped. What can be said with its metric attached:
+by power, the field reproduces strong-path azimuth under a 0.33° kernel
+(finer than a 64 × 64 UPA's 1.59° beamwidth); by pixel count, the interior
+optimum is 1–2°. The paper's 5.94° median beam-pointing error is a
+different quantity (an M = 10 beam pointed by the field), not a comparison
+point.
 
 **Transmitter moved** (Tx-B at (8.2, −5.4, 2.0), Tx-A's dB range): cold start
 reaches PSNR 17 in 1500 iterations, warm start from the Tx-A `db` model in

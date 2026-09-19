@@ -26,6 +26,8 @@ def main():
     ap.add_argument("--aod3", required=True, help="run dir of the AOD3 model (renders/*.npy = [3,H,W] encoded values)")
     ap.add_argument("--truth", required=True, help="the MULTI dataset (spectra_float/*.npy, generation_meta.json)")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--power-weighted", action="store_true",
+                    help="score every pixel the kernel touched, each weighted by its own linear power (support-free sigma*)")
     ap.add_argument("--support", default=None,
                     help="another MULTI dataset whose reached pixels define the evaluation support (fixed-support comparison across sigma)")
     cfg = ap.parse_args()
@@ -43,10 +45,14 @@ def main():
     names = sorted(f[:-4] for f in os.listdir(os.path.join(cfg.multi, "renders")) if f.endswith(".npy"))
     names = [n for n in names if os.path.exists(os.path.join(cfg.aod3, "renders", n + ".npy"))]
     acc = {"multi": {"az": [], "zen": [], "delay": []}, "aod3": {"az": [], "zen": []}}
+    weights = []
     n_pix = 0
     for n in names:
         truth = np.load(os.path.join(cfg.truth, "spectra_float", n + ".npy")).astype(np.float64)
         mask = (truth[0] - lo0) / (hi0 - lo0) > 0.02
+        if cfg.power_weighted:
+            mask = truth[0] > -199.0                      # anything the kernel reached; the weight does the rest
+            weights.append(10.0 ** (truth[0][mask] / 10.0))
         if cfg.support:
             sup = np.load(os.path.join(cfg.support, "spectra_float", n + ".npy"))[0]
             smeta = json.load(open(os.path.join(cfg.support, "generation_meta.json")))["channel_ranges"][0]
@@ -76,8 +82,14 @@ def main():
 
     def summary(lst):
         e = np.sqrt(np.concatenate(lst))
-        return {"rmse": float(np.sqrt((e ** 2).mean())), "median": float(np.median(e)), "p90": float(np.percentile(e, 90)),
-                "frac_gt_45": float((e > 45).mean())}
+        if not cfg.power_weighted:
+            return {"rmse": float(np.sqrt((e ** 2).mean())), "median": float(np.median(e)), "p90": float(np.percentile(e, 90)),
+                    "frac_gt_45": float((e > 45).mean())}
+        w = np.concatenate(weights); w = w / w.sum()
+        order = np.argsort(e); cw = np.cumsum(w[order])
+        q = lambda p: float(e[order][np.searchsorted(cw, p)])
+        return {"rmse": float(np.sqrt((w * e ** 2).sum())), "median": q(0.5), "p90": q(0.9), "frac_gt_45": float(w[e > 45].sum()),
+                "weighting": "linear power"}
 
     result = {"views": len(names), "pixels": n_pix,
               "multi": {k: summary(v) for k, v in acc["multi"].items()},

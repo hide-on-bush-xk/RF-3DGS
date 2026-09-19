@@ -37,8 +37,12 @@ def main():
 
     xml = os.path.join(REPO, "sionna_tutorial/RF-3DGS_Sionna_simulation_tutorial/NIST_lobby_v1.0/NIST_lobby_V1.1_sionna12.xml")
     route = os.path.join(REPO, "sionna_tutorial/RF-3DGS_Sionna_simulation_tutorial/NIST_rx_loc.txt")
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--positions", type=int, default=8, help="route positions, evenly spaced (8 in the first run; 40 for the LoS / NLoS split)")
+    args = ap.parse_args()
     groups = read_pose_groups(os.path.join(REPO, "RF-3DGS_dataset/regenerated/3dgs_MVDR_100/sparse/0/images.txt"))
-    positions = [groups[i][0] for i in range(0, len(groups), max(1, len(groups) // 8))][:8]
+    positions = [groups[i][0] for i in range(0, len(groups), max(1, len(groups) // args.positions))][:args.positions]
     out = {}
     for label, kw in SETTINGS:
         cfg = Config(scene_xml=xml, rx_loc_file=route, out_dir="", spectrum="MULTI", dashboard=False, max_depth=3, **kw)
@@ -64,18 +68,30 @@ def main():
             frac = [float(p[n == d].sum() / tot) for d in range(cfg.max_depth + 1)]
             rows.append({"position": [round(float(v), 3) for v in pos], "paths": int(valid.sum()),
                          "paths_by_interactions": [int((n == d).sum()) for d in range(cfg.max_depth + 1)],
-                         "power_fraction_by_interactions": frac, "total_power_db": float(10 * np.log10(tot))})
+                         "power_fraction_by_interactions": frac, "total_power_db": float(10 * np.log10(tot)),
+                         "los": bool((n == 0).any())})
         f = np.array([r["power_fraction_by_interactions"] for r in rows])
         beyond1 = f[:, 2:].sum(1)
+        los = np.array([r["los"] for r in rows])
+        def cls(mask):
+            if not mask.any():
+                return {"n": 0}
+            v = beyond1[mask]
+            return {"n": int(mask.sum()), "median": float(np.median(v)), "mean": float(v.mean()), "p90": float(np.percentile(v, 90)), "max": float(v.max())}
         summary = {"config": kw, "max_depth": cfg.max_depth, "samples_per_src": cfg.samples_per_src,
                    "mean_power_fraction_by_interactions": f.mean(0).round(4).tolist(),
                    "power_beyond_depth1_median": float(np.median(beyond1)), "power_beyond_depth1_min": float(beyond1.min()),
-                   "power_beyond_depth1_max": float(beyond1.max()), "rows": rows}
+                   "power_beyond_depth1_max": float(beyond1.max()), "los": cls(los), "nlos": cls(~los), "rows": rows}
         out[label] = summary
         print(f"{label}: mean power share by interactions 0/1/2/3 = {summary['mean_power_fraction_by_interactions']}; "
               f"beyond depth 1: median {summary['power_beyond_depth1_median']:.1%} "
               f"(range {beyond1.min():.1%}..{beyond1.max():.1%}) over {len(rows)} positions; "
               f"paths per position {np.mean([r['paths'] for r in rows]):,.0f}")
+        for name, c in (("LoS", summary["los"]), ("NLoS", summary["nlos"])):
+            if c["n"]:
+                print(f"   {name} ({c['n']} positions): beyond depth 1 median {c['median']:.1%}, mean {c['mean']:.1%}, P90 {c['p90']:.1%}, max {c['max']:.1%}")
+            else:
+                print(f"   {name}: no positions")
     os.makedirs(os.path.join(REPO, "output/rrf"), exist_ok=True)
     json.dump(out, open(os.path.join(REPO, "output/rrf/multibounce_fraction.json"), "w"), indent=1)
 
