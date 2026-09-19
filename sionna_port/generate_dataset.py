@@ -484,6 +484,9 @@ def main():
                     help="uniform: ITU materials with one scattering coefficient; tutorial: the "
                          "notebook's per-material definitions with the conductivity formulas' "
                          "frequency unit fixed; tutorial-asis: exactly the notebook (near-PEC walls)")
+    ap.add_argument("--diagonal-loading", dest="diagonal_loading", type=float, default=0.0,
+                    help="MVDR: regularise the covariance by this fraction of tr(R)/M^2 (needed when delay taps < M^2, e.g. M = 64)")
+    ap.add_argument("--M", type=int, default=10, help="M x M UPA (the tutorial's 10; the paper headlines 64)")
     ap.add_argument("--num-positions", type=int, default=800)
     ap.add_argument("--max-depth", type=int, default=1)
     ap.add_argument("--diffraction", action="store_true")

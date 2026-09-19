@@ -212,6 +212,25 @@ has a tail:
 | one channel per quantity, azimuth as (φ+180)/360 | 1.8° / 11.0° / 19.0° | **0.7° / 7.7° / 11.6°** | **2.3 / 11.5 / 8.2 ns** |
 | the tutorial's angle × amplitude RGB | 26.9° / 85.6° / 48.6° | 29.6° / 90.5° / 56.6° | — |
 
+The floor under those numbers (`eval_baselines.py`, same views and
+pixels): copying the spectrum of the nearest *training* position (median
+0.23 m away, no model) decodes to 1.07° / 131° / 55° azimuth median / P90 /
+RMSE, 0.79° zenith median and 0.86 ns delay median; an inverse-distance
+blend of the two nearest gives 0.81° / 10.8° / 37°. So the field's median
+azimuth gain over a copy is 1.8×, its gain is in the tail (P90 5.9° against
+131°), and its delay channel is 3× *worse* than the copy in the median
+(2.4 against 0.9 ns, the geometric delay of a 23 cm move). Translated into
+beam selection (square θ₃dB codebook, true beam among the k cells nearest
+the decoded direction; unweighted | weighted by pixel power): with the
+M = 10 array of these datasets (θ₃dB 10.2°) the field reaches top-1 0.68 |
+0.70 and top-3 0.84 | 0.91 against the copy's 0.60 | 0.65 and 0.74 | 0.82;
+with the 64 × 64 array the paper headlines (1.59°) the σ = 1° field's
+strong-path top-1 (0.10) falls *below* the copy (0.23) and only the 0.33°
+kernel recovers a lead (top-1 0.19 | 0.19, top-5 0.44 | 0.61 against 0.26 |
+0.20). The field is a usable beam selector for the M = 10 array and not a
+top-1 selector for a 64 × 64 one; and the downstream task picks the kernel
+width (0.33°) that the power-weighted metric picked.
+
 Carrying the azimuth as cos and sin removes the seam at ±180° that the
 single channel had (the pinhole resampling interpolated across it, and the
 field had to fit a jump that is not physical). The controlled A/B — the
