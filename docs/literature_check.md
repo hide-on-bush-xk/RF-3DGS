@@ -119,3 +119,12 @@
   **没有**:每接收端位置的采样数、随机 seed、散射设置、每视角是否单独 solve、归一化方式、RF-3DGS 基线是重跑还是引用。
 - 结论:无法确认 RF-PGS 是否共享"逐视角 seed"这一违反;能确认的是他们用了截断阈值(与我们的 −150 dB 同类)和全景查询(没有四面针孔的"四面派生"问题)。
   能说的话:"发布的 RF-3DGS 管线按构造带有这一违反(教程逐视角随机采样散射路径);RF-PGS 的管线未公开,不能判断。"
+
+## 定向核查:RF-PGS 是否编码时延(2026-09-19,全文页逐字)
+
+- ToF 纯几何:"ToF can be accurately computed from the geometric distance, eliminating the need for normalized delay approximations used in RF-3DGS";
+  "the ray–surface intersection point is first estimated. Based on this, the distances to both the transmitter and receiver can be accurately computed, allowing precise calculation of the FSPL term"。
+- 监督:"Training relies solely on the practically available path loss spectra, while AoD is inferred from the retrieved full path geometry, and ToF is computed from distance."——**没有学习的时延通道,没有任何"解析 + 残差"分解**(分解只用于路损:FSPL × 交互增益 SH)。
+- 指标:**没有报任何 ToF/时延误差**(只有 PSNR/SSIM/LPIPS/波束成形容量)。
+- 位置由此明确:RF-PGS 的 ToF 是"全解析"(需要 Tx 位置 + 射线-表面求交);我们的是 alpha 合成的解析范围项 + 学习的散射时延残差,不需要 Tx 位置和求交,并且报时延误差(中位 0.95 ns,拷贝地板 0.86)。
+  "解析 + 残差用到时延上"在 RF-PGS / BiWGS / RxGS 里都没有。
