@@ -294,8 +294,12 @@ def generate(cfg: Config, shared=None):
     else:
         scene, solver, grid = shared
     if "tx" in scene.transmitters:
-        scene.remove("tx")
-    scene.add(Transmitter(name="tx", position=list(cfg.tx_loc)))
+        # move the existing transmitter (as the planner does) rather than
+        # remove / add: editing the scene graph invalidates the solver's
+        # cached structures and every later solve pays for it
+        scene.get("tx").position = [float(v) for v in cfg.tx_loc]
+    else:
+        scene.add(Transmitter(name="tx", position=list(cfg.tx_loc)))
 
     if cfg.poses_from:
         # exact poses of an existing dataset (e.g. the released one), grouped
