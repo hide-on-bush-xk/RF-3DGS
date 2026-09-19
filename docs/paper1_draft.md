@@ -296,7 +296,16 @@ The spacing axis is the measured nearest-training distance in both scenes: the c
 
 **Prediction 2 failed.** The crossovers are at about 0.47 m for azimuth (a tie at the densest level), 0.50 m for delay and below 0.47 m for zenith, that is, at a *larger* spacing than the lobby's 0.23–0.35 m, not a smaller one. Both curves moved. Lookup is better in the corridor at equal spacing (1.85° at 0.47 m against the lobby's 2.55° at 0.51 m): a corridor is a waveguide whose multipath structure hardly changes under translation along its axis, and the door openings that the prediction's mechanism relied on are a small part of the route. The field is worse in the corridor (1.84° against 0.62° azimuth, 2.23° against 0.96° zenith, 1.85 against 0.95 ns delay at the densest level); the candidates are the visual geometry's quality (Table 13: 582k Gaussians and 28.8 dB against 1.0M and 39.4 dB, which is why both stage-1 rows are reported) and the corridor's long-range paths, and they were not separated. What holds in both scenes is the form of the statement: beyond a scene-dependent spacing, about 0.3 m in the lobby and 0.5 m in the corridor, the field beats lookup on all three physical channels, and the spacing is set by the scene's spatial correlation length, the mechanism written before the run with the wrong sign.
 
-`[MISSING: Tables 5 and 2 replicated on the corridor (zone structure on room_S2, the two consistency magnitudes); the extrapolation claim (prediction 3) is not in the queue.]`
+**Table 15. Cross-view consistency on the corridor (transmitter at the corridor's middle; 452 held-out images), next to Table 2.**
+
+| violation | lobby | corridor |
+| --- | --- | --- |
+| per-image normalisation (MVDR, RGB target), PSNR after jet mapping | 18.15 → 11.97 (−6.2 dB) | 15.25 → 10.08 (−5.2 dB) |
+| per-view sampling of diffuse paths (path-level target), in-range power RMSE | 8.57 → 12.67 dB (+48 %) | 8.04 → 9.44 dB (+17 %) |
+
+**Prediction 4 held.** Both violations keep their sign; the normalisation cost is nearly the same size, the seeding cost is a third of the lobby's. The smaller seeding cost and the stronger lookup of Table 14 are one fact: in a corridor the diffuse subset changes less between neighbouring views (a waveguide with few, large surfaces), so a different sampling lattice changes fewer of the paths a pixel sees. The dB RMSE of the corridor's MVDR runs is not comparable with the lobby's (its 60 GHz spectra span 200 dB with many near-floor pixels), which is why the PSNR column is the one compared.
+
+`[MISSING: Table 5 replicated on the corridor (zone structure on room_S2; the nine room-transmitter datasets are being regenerated after a zero-path fix in the generator); the extrapolation claim (prediction 3) is not in the queue.]`
 
 ## 10. Limits
 
