@@ -63,7 +63,7 @@ def collect(rrf_dir):
     if os.path.exists(enc):
         with open(enc, encoding="utf-8") as fid:
             found["encoding"] = json.load(fid)
-    for key, name in (("transfer", "transfer_curve.json"), ("transfer_2k", "transfer_curve_2k.json")):
+    for key, name in (("transfer", "transfer_curve.json"), ("transfer_2k", "transfer_curve_2k.json"), ("transfer_s2", "transfer_curve_s2.json")):
         tc = os.path.join(rrf_dir, name)
         if os.path.exists(tc):
             with open(tc, encoding="utf-8") as fid:
@@ -240,15 +240,19 @@ def transfer_card(tr, width=560, height=260):
     parts.append("</svg>")
     budget = tr.get("transfer_budget", "10k")
     z = tr.get("zones")
-    zone_txt = (f" Same side of the lobby as Tx-B ({', '.join(z['east_sources'])}): mean {z['east_mean']:+.2f} dB, worst {z['east_min']:+.2f}; "
-                f"elsewhere: mean {z['other_mean']:+.2f} dB, best {z['other_max']:+.2f}." if z else "")
+    label_in = (z or {}).get("label_in", "Same side of the lobby as Tx-B")
+    label_out = (z or {}).get("label_out", "elsewhere")
+    zone_txt = (f" {label_in} ({', '.join(z['east_sources'])}): mean {z['east_mean']:+.2f} dB, worst {z['east_min']:+.2f}; "
+                f"{label_out}: mean {z['other_mean']:+.2f} dB, best {z['other_max']:+.2f}." if z and z.get("east_sources") else "")
     bs = (fit or {}).get("bootstrap")
     bs_txt = (f" Bootstrap 90 %: d_c {bs['d_c_p5']:.1f}&ndash;{bs['d_c_p95']:.1f} m ({bs['share_d_c_at_grid_max']:.0%} of resamples resolve no decay), "
               f"plateau {bs['c_p5']:+.2f}&ndash;{bs['c_p95']:+.2f} dB." if bs else "")
     cap = (f"{len(rows)} source transmitters, transfer budget {budget} steps.{zone_txt} Fit b(d) = b0 exp(&minus;d/d_c) + c: d_c = {fit['d_c_m']:.1f} m, "
            f"b0 = {fit['b0_db']:.2f} dB, plateau c = {fit.get('c_db', 0.0):+.2f} dB, R&sup2; {fit['r2']:.2f}.{bs_txt}"
-           if fit else f"{len(rows)} source transmitters, transfer budget {budget} steps; the fit needs 4")
-    return (f'<figure class="card"><h2>How far an adapted geometry carries ({budget}-step transfer)</h2>'
+           if fit else f"{len(rows)} source transmitters, transfer budget {budget} steps.{zone_txt} {tr.get('fit_note') or 'The fit needs 4 points.'}")
+    scene = tr.get("scene")
+    title = f"How far an adapted geometry carries ({budget}-step transfer{', ' + scene if scene else ''})"
+    return (f'<figure class="card"><h2>{title}</h2>'
             f'<p class="rrf-note">Geometry unfrozen on a source transmitter (10k steps), then frozen on Tx-B with colours reset '
             f'and refit for {budget} steps (the 2k budget keeps the sign and order of the 10k points; seed noise 0.03 dB). '
             f'The benefit over the visual geometry falls with the source\'s distance to Tx-B, but not only with it: '
@@ -407,7 +411,7 @@ def render(found):
             f'{curves(cold[:2] + warm[:2])}<figcaption>PSNR after jet mapping &middot; final on 640 views: '
             f'{final}</figcaption></figure>')
 
-    for key in ("transfer_2k", "transfer"):
+    for key in ("transfer_2k", "transfer", "transfer_s2"):
         tr = found.get(key)
         if tr and tr.get("rows"):
             cards.append(transfer_card(tr))

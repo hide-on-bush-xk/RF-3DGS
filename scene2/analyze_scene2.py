@@ -74,6 +74,8 @@ def zones():
     for _, g, _, _, b in rows:
         by.setdefault(g, []).append(b)
     print("  by group: " + "; ".join(f"{g}: mean {np.mean(v):+.2f} (n={len(v)})" for g, v in by.items()))
+    ov = overlap(rows)
+    fit_note = None
     if len(rows) >= 4:
         d = np.array([r[2] for r in rows]); b = np.array([r[4] for r in rows])
         best = None
@@ -83,8 +85,60 @@ def zones():
             if best is None or sse < best[0]:
                 best = (sse, dc, coef)
         ss = float(((b - b.mean()) ** 2).sum()) or 1.0
-        print(f"  exponential + plateau fit: d_c {best[1]:.1f} m, b0 {best[2][0]:.2f}, c {best[2][1]:+.2f} dB, R^2 {1 - best[0] / ss:.2f}; "
-              f"corr(benefit, distance) {np.corrcoef(d, b)[0, 1]:+.2f}")
+        fit_note = (f"exponential + plateau fit: d_c {best[1]:.1f} m, b0 {best[2][0]:.2f}, c {best[2][1]:+.2f} dB, R² {1 - best[0] / ss:.2f}; "
+                    f"corr(benefit, distance) {np.corrcoef(d, b)[0, 1]:+.2f}")
+        print("  " + fit_note)
+    # the dashboard's transfer card reads this (same shape as transfer_curve_2k.json)
+    facing = [r for r in rows if r[1] == "same room" or r[0] in ("room_N2", "room_N2b")]
+    other = [r for r in rows if r not in facing]
+    out = {"scene": "scene 2 (corridor), target room_S2", "transfer_budget": "2k", "tx_b": tgt.tolist(),
+           "cold": {"rmse_db_in_range": cold["rmse_db_in_range"]}, "own_unfrozen": {"rmse_db_in_range": own["rmse_db_in_range"] if own else None},
+           "rows": [{"source": n, "run": f"s2_t_roomS2_geom{n}_2k", "tx": tx[n], "distance_m": d, "rmse_in_range": r, "benefit_db": b, "group": g,
+                     "lit_iou": ov.get(n, (None, None))[0], "db_corr": ov.get(n, (None, None))[1]} for n, g, d, r, b in sorted(rows, key=lambda r: r[2])],
+           "fit": None, "fit_note": fit_note,
+           "zones": {"label_in": "same room or the facing room across the corridor", "label_out": "adjacent, diagonal, corridor, hall",
+                     "east_sources": [r[0] for r in facing], "east_benefit": [round(r[4], 3) for r in facing], "other_benefit": [round(r[4], 3) for r in other],
+                     "east_mean": float(np.mean([r[4] for r in facing])) if facing else None, "east_min": float(min(r[4] for r in facing)) if facing else None,
+                     "other_mean": float(np.mean([r[4] for r in other])) if other else None, "other_max": float(max(r[4] for r in other)) if other else None}}
+    json.dump(out, open(os.path.join(OUT, "transfer_curve_s2.json"), "w"), indent=1)
+
+
+def overlap(rows):
+    """Lit-surface overlap of each source with the target (room_S2) on the held-out views, as diag_overlap.py
+    does for the lobby: strong IoU = pixels within 30 dB of the view's maximum in both over either (empty views,
+    written at -300 dB, are skipped); lit IoU = pixels within 60 dB of the dataset's maximum, same ratio; and the
+    Pearson r of the two spectra on the union of lit pixels. Prediction 1 said the IoU between rooms is near zero."""
+    reg = os.path.join(REPO, "RF-3DGS_dataset/regenerated")
+    tgt_dir = os.path.join(reg, "s2_MVDR_txroom_S2_gpct")           # the trainer writes the split there; spectra_float is hard-linked
+    if not os.path.isdir(tgt_dir):
+        return {}
+    names = [l.strip() for l in open(os.path.join(tgt_dir, "test_index.txt")) if l.strip()]
+    tgt = np.stack([np.load(os.path.join(tgt_dir, "spectra_float", n + ".npy")) for n in names]).astype(np.float32)
+    t_empty = tgt.reshape(len(names), -1).max(1) <= -299
+    t_strong = tgt > (tgt.reshape(len(names), -1).max(1)[:, None, None] - 30.0)
+    t_lit = tgt > (tgt.max() - 60.0)
+    print(f"  overlap with room_S2 on {len(names)} held-out views ({int(t_empty.sum())} of them empty for the target):")
+    print(f"  {'source':>11} {'strong IoU':>10} {'lit IoU':>8} {'dB corr':>8} {'benefit':>8}")
+    ious = []
+    for name, g, d, r, b in sorted(rows, key=lambda r: r[2]):
+        src_dir = os.path.join(reg, f"s2_MVDR_tx{name}_gpct")
+        src = np.stack([np.load(os.path.join(src_dir, "spectra_float", n + ".npy")) for n in names]).astype(np.float32)
+        s_empty = src.reshape(len(names), -1).max(1) <= -299
+        keep = ~(t_empty | s_empty)
+        s_strong = src > (src.reshape(len(names), -1).max(1)[:, None, None] - 30.0)
+        s_lit = src > (src.max() - 60.0)
+        iou_s = float((s_strong & t_strong)[keep].sum() / max((s_strong | t_strong)[keep].sum(), 1)) if keep.any() else 0.0
+        iou_l = float((s_lit & t_lit).sum() / max((s_lit | t_lit).sum(), 1))
+        u = (s_lit | t_lit)
+        corr = float(np.corrcoef(src[u], tgt[u])[0, 1]) if u.sum() > 10 else float("nan")
+        ious.append((name, iou_s, iou_l, corr, b))
+        print(f"  {name:>11} {iou_s:10.3f} {iou_l:8.3f} {corr:8.3f} {b:+8.2f}")
+    if len(ious) >= 4:
+        b = np.array([x[4] for x in ious])
+        for j, lab in ((1, "strong IoU"), (2, "lit IoU"), (3, "dB corr")):
+            x = np.array([x[j] for x in ious])
+            print(f"  corr(benefit, {lab}) = {np.corrcoef(x, b)[0, 1]:+.2f} over {len(ious)} sources")
+    return {x[0]: (x[2], x[3]) for x in ious}
 
 
 def consistency():

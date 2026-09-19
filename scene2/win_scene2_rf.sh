@@ -61,7 +61,8 @@ for k, v in tx.items(): print(k, *v)
 EOF
 while read NAME X Y Z; do
   gen s2_MVDR_tx$NAME --spectrum MVDR --tx $X $Y $Z
-  [ -d $REG/s2_MVDR_tx${NAME}_gpct ] || { $PYS rrf_gsplat/renormalize.py $REG/s2_MVDR_tx$NAME $REG/s2_MVDR_tx${NAME}_gpct --norm global-pct --pct 1 99.99 < /dev/null 2>&1 | tail -1 >> $LOG; }
+  # "images non-empty", not "directory exists": a renormalise that fails (e.g. on a missing source) leaves an empty directory behind
+  [ -f $REG/s2_MVDR_tx${NAME}_gpct/images/00001.png ] || { rm -rf $REG/s2_MVDR_tx${NAME}_gpct; $PYS rrf_gsplat/renormalize.py $REG/s2_MVDR_tx$NAME $REG/s2_MVDR_tx${NAME}_gpct --norm global-pct --pct 1 99.99 < /dev/null 2>&1 | tail -1 >> $LOG; }
 done < $REPO/output/rrf/s2_tx.txt
 TGT=$REG/s2_MVDR_txroom_S2_gpct
 run s2_t_roomS2_cold_2k --source $TGT --mode db --iterations 2000 --eval-every 500 --save-renders 0 --seed 0
