@@ -32,11 +32,12 @@
 
 ## 3. RF-PGS(2025-08,arXiv 2508.16849):平面高斯 + "全结构化"辐射,同一个 NIST 大厅
 
-- 平面高斯 = 把最小尺度压成薄盘(2DGS 式),法线由旋转四元数和最小尺度轴给出;先用视觉数据重建几何,再用**很稀疏的 RF 测量**建场。
+- 平面高斯 = 把最小尺度压成薄盘(2DGS 式),法线由旋转四元数和最小尺度轴给出;摘要说先用视觉数据重建几何,再用**很稀疏的 RF 测量**建场
+  (初始化的具体机制在全文页没核到,UNVERIFIED)。
   "全结构化" = 每条多径分解成 FSPL(总路径长)× 表面交互增益(按出射方向的 SH);Tx 侧谱由几何上算出的路径长度直接聚合。
   新 Tx **仍要重训**(站点专属模型)。
 - 数据:Sionna,**2.4 GHz 和 60 GHz,~14 m × 15 m 室内大厅**(就是 RF-3DGS 的场景),训练集 10–700 样本,100 测试;另有 NIST 60 GHz 实测。
-  PSNR:RF-PGS 20.61 / RF-3DGS 14.22 / NeRF2 14.13;训练 3 min 53 s。
+  PSNR:RF-PGS 20.61 / RF-3DGS 14.22 / NeRF2 14.13(Table I,**多配置平均**,已逐字核对);训练 3 min 53 s(RF-3DGS 2 min 41 s)。
 - **对我们**:最近的直接竞品,同场景同仿真器。三点要注意:(1)他们的 RF-3DGS 基线 14.22 dB 比我们复现的 15.97/16.02 低——样本数和归一化都不同,
   数字不能横比,但我们的 db 冻结 18.75、解冻 21.5 是在 2560 张训练图上;写论文要按契约把数据规模列出来。
   (2)FSPL 因子 f(d) 就是他们的分解;Ke 的公式 = RF-PGS 的 f(d) + BiWGS 的双向 SH + RxGS 的 V。
@@ -64,7 +65,8 @@
 
 - **OctCGS**(2026-05,2605.22961):八叉树上下文高斯 + **显式多阶传播**建 CKM——多跳被当成必要项;我们 depth-1 的 2.4 GHz 多跳功率占比数字(队列里)回答"我们的孪生漏了多少"。
 - **XFreq-GS**(2026-05,2605.11432):跨频率重建——与我们"发布数据是 2.4 GHz、教程材料电导率单位错"那节相邻,可引。
-- **WiNeRT**(ICLR 2023):神经射线追踪代理,可微,Tx/Rx 布置是输入,下游做网络规划;定位误差中位 0.58 m。与我们的交互规划器是同一下游任务、不同路线(学代理 vs RT 在环)。
+- **WiNeRT**(ICLR 2023):神经射线追踪代理,可微,Tx/Rx 布置是输入,下游做网络规划;页面核到的数字是飞行时间误差 < 0.33 ns(此前写的 0.58 m 定位误差未核到,撤)。
+  与我们的交互规划器是同一下游任务、不同路线(学代理 vs RT 在环)。
 - **GS-IR / Relightable 3DGS**(CVPR 2024):3DGS 逆渲染:每高斯法线 + BRDF,split-sum 光照,烘焙遮挡做间接光。
   图形学模板告诉我们两件事:(1)入射方向条件化在图形学里靠**法线**——而我们的形状诊断说视觉几何以针为主(长轴躺在切平面里,没有法线),
   所以 BRDF 式模型要么上 2DGS/平面(RF-PGS 路线),要么用不需要法线的双向 SH(BiWGS 路线);(2)GS-IR 的法线要从深度导数正则出来,不能直接用高斯的短轴——与我们"最短轴 vs 法线"那条测不出方向性一致。
@@ -89,3 +91,23 @@
 - WiNeRT: <https://openreview.net/pdf?id=tPKKXeW33YU>;GS-IR: <https://arxiv.org/abs/2311.16473>
 - RadioSight: <https://arxiv.org/abs/2608.29504>;传播一致数字孪生: <https://arxiv.org/abs/2605.22361>
 - 学习型无线电地图综述/清单: <https://github.com/UNIC-Lab/Awesome-Radio-Map-Categorized>
+
+## 验证记录(2026-09-19,按 Ke 的协议:逐个打开 arxiv.org/abs 核对标题,再在全文页逐字核对数字;没有浏览器,用 WebFetch 抓页面)
+
+| arXiv ID | 打开 | 标题一致 | 关键数字 | 状态 |
+| --- | --- | --- | --- | --- |
+| 2510.26166 BiWGS | 是(2025-10-30,Zhou, Hu, Wu, Ren, Hu, Zhang, Zhang, Xu) | 是 | Table III 逐字:3.68 / 4.93 / 6.70 dB;"a training set containing measurements from 9 distinct Tx positions, and a test set containing measurements from a different Tx position";6 GHz,Sionna,最多 3 次散射 | **VERIFIED** |
+| 2508.16849 RF-PGS | 是(2025-08-23,Lihao Zhang, Zongtan Li, Haijian Sun) | 是 | Table I 逐字:RF-PGS 20.6108 / 0.6606 / 0.3945,3min 53s;RF-3DGS 14.2208 / 0.3680 / 0.4250,2min 41s;**该表是多配置平均,不是单一数据集**;Sionna,2.4 与 60 GHz,≈14 m × 15 m 室内大厅 | **VERIFIED**;"平面高斯由视觉数据初始化"这一句在全文页**没找到**,标 UNVERIFIED(只保留摘要里"先用视觉数据重建几何"的表述) |
+| 2605.24290 RxGS | 是(2026-05-22,Kang Yang, Mani Srivastava) | 是 | 逐字:未见接收端 MAE 4.92 dBm;逐接收端基线 "9.7 to 11.6 dBm, roughly ×3 worse";训练 "7× to 45×";推理 "up to 7.6×";几何/辐射分组与 Stage II 冻结几何原句在 | **VERIFIED** |
+| 2502.05708 GRaF | 是(2025-02-08,v3 2026-04-20,Kang Yang, Yuning Chen, Wan Du) | 是 | 摘要原句:"generalizes across scenes to synthesize spectra" | **VERIFIED**(数字未引用) |
+| 2605.07781 高斯上的可微 RT | 是(2026-05-08,Vaara, Huynh, Sangi, Bordallo López, Heikkilä) | 是 | 摘要原句在;无数字 | **VERIFIED** |
+| 2607.21099 GS-CG | 是(2026-07-23,Chen, Guo, Zhou, Xu, Zhang) | 是 | 摘要原句在;无数字 | **VERIFIED** |
+| 2605.22961 OctCGS | 是(2026-05-21,Zhang, Gong, Wang, Stirling-Gallacher, Caire) | 是 | — | VERIFIED(标题级) |
+| 2605.11432 XFreq-GS | 是(2026-05-12,Wang 等) | 是 | — | VERIFIED(标题级) |
+| 2502.01826 GSRF | 是(2025-02-03,Kang Yang 等) | 是 | — | VERIFIED(标题级) |
+| 2311.16473 GS-IR | 是(2023-11-26,Liang, Zhang, Feng, Shan, Jia) | 是 | — | VERIFIED(标题级) |
+| 2608.29504 RadioSight | 是(2026-08-30,Lihao Zhang, Kudyba, An, Haijian Sun) | 是 | — | VERIFIED(标题级) |
+| 2605.22361 WEDT | 是(2026-05-21,Ai 等,Shi Jin) | 是 | — | VERIFIED(标题级) |
+| WiNeRT(OpenReview tPKKXeW33YU) | OpenReview 被机器人验证页挡住;iclr.cc/virtual/2023/poster/10694 打开,标题与作者一致(Orekondy, Pratik, Kadambi, Ye, Soriaga, Behboodi,ICLR 2023) | 是 | 页面给的是 "<0.33ns error in time-of-flight predictions";我之前写的"定位误差中位 0.58 m / 1.21 m"来自搜索摘要,**页面上没核到** | 标题 VERIFIED;**0.58 m / 1.21 m 标 UNVERIFIED,改用 <0.33 ns** |
+
+补一条与本项目直接相关的事实:RF-PGS 和 RadioSight 的通讯作者 Haijian Sun 在 UGA——同校同题,论文定位要考虑这一点。
