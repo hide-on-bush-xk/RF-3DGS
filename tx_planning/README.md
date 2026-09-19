@@ -152,3 +152,19 @@ Aerial's UI components are Omniverse Kit extensions and cannot be reused
 outside Omniverse; what is borrowed is the interaction and the data model
 (static RU × mobile UE grid, CIR per pair). Dr.Jit's JIT flags are per thread,
 so the server is single-threaded on purpose; the retrain job only shells out.
+
+## Depth of the planning objective (2026-09-19)
+
+The coverage objective solves at `max_depth 1`. Measured per receiver with
+1M samples (`depth_bias_perrx.py`, 59 grid points, 60 GHz, −85 dB), depth 3
+adds a median +0.15 dB and at most +2.5 dB (corridor ends), raising coverage
+by 2–3 points at every candidate, and it does not change the ranking: the
+depth-1 optimum (8.2, −5.05, 2.0) is also the best at depth 3 (0.627 against
+0.610 for the optimum found on a depth-2 objective). The caveat that matters
+more is the many-receiver solve's sample budget: with all 59 receivers in
+one scene the coverage of one transmitter moves from 59.3 % (20k samples) to
+57.6 % (100k) to 44.1 % (400k), and a depth-3 solve at those budgets loses
+first-order power (P10 −28 dB) instead of adding bounces
+(`depth_check.py`, `depth_orders.py`). Report the objective's sample
+variance, or evaluate per receiver, before comparing candidates closer than
+a few points.
