@@ -36,10 +36,17 @@ def _final(run):
 
 
 def main():
-    cold, own = _final("t_txB_cold"), _final("t_txB_geom")
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tag", default="", help="transfer budget suffix of the runs, e.g. 2k (t_txB_geomX_frozen_2k, t_txB_cold_2k)")
+    cfg = ap.parse_args()
+    suf = f"_{cfg.tag}" if cfg.tag else ""
+    cold, own = _final("t_txB_cold" + suf), _final("t_txB_geom" + suf)
+    if own is None:
+        own = _final("t_txB_geom")                    # the 10k own-unfrozen reference, if the tagged one is absent
     rows = []
     for name, (run, ds) in SOURCES.items():
-        f = _final(run)
+        f = _final(run + suf)
         meta = os.path.join(REG, ds, "generation_meta.json")
         if f is None or not os.path.exists(meta):
             continue
@@ -48,7 +55,9 @@ def main():
                      "rmse_in_range": f["rmse_db_in_range"], "rmse_db": f["rmse_db"], "psnr": f["psnr_rgb"], "ssim": f["ssim_rgb"],
                      "benefit_db": (cold["rmse_db_in_range"] - f["rmse_db_in_range"]) if cold else None})
     rows.sort(key=lambda r: r["distance_m"])
-    out = {"tx_b": TX_B.tolist(), "cold": cold, "own_unfrozen": own, "rows": rows}
+    out = {"tx_b": TX_B.tolist(), "transfer_budget": cfg.tag or "10k", "cold": cold, "own_unfrozen": own, "rows": rows}
+    if cold is None or not rows:
+        print(f"no rows for tag '{cfg.tag}'"); return
     print(f"Tx-B references: visual geometry frozen {cold['rmse_db_in_range']:.2f} dB in range; own geometry unfrozen {own['rmse_db_in_range']:.2f} dB")
     print(f"{'src':>3} {'tx':>22} {'d to B':>7} {'in-range':>9} {'benefit':>8} {'PSNR':>6}")
     for r in rows:
@@ -79,7 +88,7 @@ def main():
               f"with offset: d_c = {best2[0]:.2f} m, b0 = {best2[1]:.2f}, c = {best2[2]:+.2f} dB, R^2 = {out['fit']['with_offset']['r2']:.2f}")
     else:
         print(f"{len(rows)} points so far; the fit needs 4")
-    json.dump(out, open(os.path.join(OUT, "transfer_curve.json"), "w"), indent=1)
+    json.dump(out, open(os.path.join(OUT, f"transfer_curve{suf}.json"), "w"), indent=1)
 
 
 if __name__ == "__main__":

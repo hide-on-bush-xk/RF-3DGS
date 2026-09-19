@@ -15,6 +15,7 @@ import json
 import math
 import os
 import time
+import dataclasses
 from dataclasses import dataclass, asdict
 from datetime import datetime
 
@@ -272,7 +273,11 @@ def channel_ranges(all_db: np.ndarray, kind: str, power_floor_db: float = -150.0
 # Dataset generation
 # --------------------------------------------------------------------------
 
-def generate(cfg: Config):
+def generate(cfg: Config, shared=None):
+    """One dataset. `shared` = (scene, solver, grid) built once by the caller
+    when several transmitters are generated in one process (--tx-list): the
+    scene load, the OptiX acceleration structure and the array grid are the
+    same for every transmitter, only the Tx object moves."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     rng = np.random.default_rng(cfg.seed)
 
@@ -281,12 +286,16 @@ def generate(cfg: Config):
         os.makedirs(os.path.join(cfg.out_dir, "spectra_float"), exist_ok=True)
     os.makedirs(os.path.join(cfg.out_dir, "sparse", "0"), exist_ok=True)
 
-    scene = build_scene(cfg)
+    if shared is None:
+        scene = build_scene(cfg)
+        solver = PathSolver()
+        grid = ArrayGrid.build(cfg.M, cfg.width, cfg.height, cfg.fov_deg,
+                               element_gain_fn=element_gain_fn, device=device)
+    else:
+        scene, solver, grid = shared
+    if "tx" in scene.transmitters:
+        scene.remove("tx")
     scene.add(Transmitter(name="tx", position=list(cfg.tx_loc)))
-    solver = PathSolver()
-
-    grid = ArrayGrid.build(cfg.M, cfg.width, cfg.height, cfg.fov_deg,
-                           element_gain_fn=element_gain_fn, device=device)
 
     if cfg.poses_from:
         # exact poses of an existing dataset (e.g. the released one), grouped
@@ -456,6 +465,8 @@ def main():
                          "and delay; AOD3: the tutorial's angle-times-amplitude RGB encoding")
     ap.add_argument("--tx", dest="tx_loc", type=float, nargs=3, default=(6.905, 0.0, 2 - 1.713),
                     help="transmitter position; the default is the NIST measurement Tx")
+    ap.add_argument("--tx-list", nargs="+", default=None, metavar="NAME:x,y,z",
+                    help="several transmitters in one process; each dataset goes to <out-dir><NAME>")
     ap.add_argument("--frequency", type=float, default=60e9,
                     help="carrier in Hz; the tutorial's dataset cells use 2.4e9")
     ap.add_argument("--power-floor-db", type=float, default=-150.0,
@@ -485,7 +496,26 @@ def main():
                     help="reuse one sampling lattice for every view, which "
                          "correlates the sampling residual across views")
     args = ap.parse_args()
-    generate(Config(**vars(args)))
+    tx_list = vars(args).pop("tx_list")
+    if not tx_list:
+        generate(Config(**vars(args)))
+        return
+    # several transmitters, one process: scene / OptiX / grid built once
+    base = Config(**vars(args))
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    t0 = time.time()
+    scene = build_scene(base)
+    solver = PathSolver()
+    grid = ArrayGrid.build(base.M, base.width, base.height, base.fov_deg,
+                           element_gain_fn=element_gain_fn, device=device)
+    print(f"scene + solver + grid built once in {time.time() - t0:.1f} s for {len(tx_list)} transmitters")
+    for entry in tx_list:
+        name, xyz = entry.split(":")
+        cfg = dataclasses.replace(base, tx_loc=tuple(float(v) for v in xyz.split(",")),
+                                  out_dir=base.out_dir + name)
+        t1 = time.time()
+        generate(cfg, shared=(scene, solver, grid))
+        print(f"[tx-list] {name} {cfg.tx_loc} -> {cfg.out_dir} in {time.time() - t1:.0f} s")
 
 
 if __name__ == "__main__":

@@ -443,6 +443,8 @@ def main():
     ap.add_argument("--db-range", type=float, nargs=2, default=None,
                     help="min max dB for the colormap; default from generation_meta.json")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--no-eval", action="store_true",
+                    help="skip the final test pass (adaptation runs whose only product is the geometry)")
     cfg = ap.parse_args()
     if cfg.densify == "mcmc":
         cfg.train_geometry = True
@@ -596,7 +598,10 @@ def main():
 
     os.makedirs(cfg.out, exist_ok=True)
     all_idx = list(range(len(test_names)))
-    if cfg.mode == "multi":
+    if cfg.no_eval:
+        # an adaptation run whose only product is its geometry: skip the test pass
+        final = None
+    elif cfg.mode == "multi":
         final = evaluate_multi(model, test, all_idx, ch_ranges, channel_names, mask_channel=cfg.mask_channel)
         if cfg.save_renders:
             evaluate_multi(model, test, all_idx[:cfg.save_renders], ch_ranges, channel_names,
@@ -614,6 +619,10 @@ def main():
               "total_seconds": time.time() - t_start, "history": history, "final": final}
     with open(os.path.join(cfg.out, "results.json"), "w") as fid:
         json.dump(result, fid, indent=1)
+    if final is None:
+        print(f"\nno final evaluation (--no-eval); {cfg.iterations} iterations in {train_seconds:.0f} s "
+              f"({cfg.iterations/train_seconds:.0f} it/s); {model.n_gaussians:,} Gaussians; wrote {cfg.out}")
+        return
     print(f"\nfinal on {len(test_names)} test views: PSNR(jet) {final['psnr_rgb']:.2f} dB, "
           f"SSIM {final['ssim_rgb']:.3f}, RMSE {final['rmse_db']:.2f} dB, MAE {final['mae_db']:.2f} dB; "
           f"{cfg.iterations} iterations in {train_seconds:.0f} s "

@@ -34,6 +34,8 @@ def main():
     for path in sorted(glob.glob(os.path.join(cfg.root, "*", "results.json"))):
         r = json.load(open(path))
         c, f = r["config"], r["final"]
+        if f is None:                                   # --no-eval adaptation run: geometry only, no scores
+            continue
         t_psnr, it_psnr = time_to(r["history"], "psnr_rgb", cfg.psnr_target)
         rows.append({
             "run": os.path.basename(os.path.dirname(path)),
