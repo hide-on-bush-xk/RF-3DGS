@@ -183,9 +183,12 @@ def transfer_card(tr, width=560, height=260):
         parts.append(f'<line x1="{pad_l}" x2="{width-pad_r}" y1="{py(v):.1f}" y2="{py(v):.1f}" stroke="var(--s{k})" stroke-width="1.5" stroke-dasharray="5 4"/>')
         parts.append(f'<text x="{width-pad_r}" y="{py(v)-4:.1f}" text-anchor="end" font-size="10" fill="var(--muted)">{lab} {v:.2f}</text>')
     fit = tr.get("fit")
+    if fit and fit.get("with_offset"):
+        fit = dict(fit["with_offset"])                      # the plateau model: b0 exp(-d/d_c) + c
     if fit:
+        c_off = fit.get("c_db", 0.0)
         xs = [xmax * i / 60 for i in range(61)]
-        pts = " ".join(f"{px(x):.1f},{py(cold - fit['b0_db'] * math.exp(-x / fit['d_c_m'])):.1f}" for x in xs)
+        pts = " ".join(f"{px(x):.1f},{py(min(max(cold - (fit['b0_db'] * math.exp(-x / fit['d_c_m']) + c_off), ymin), ymax)):.1f}" for x in xs)
         parts.append(f'<polyline points="{pts}" fill="none" stroke="var(--s1)" stroke-width="1.5" opacity="0.7"/>')
     for r in rows:
         parts.append(f'<circle cx="{px(r["distance_m"]):.1f}" cy="{py(r["rmse_in_range"]):.1f}" r="5" fill="var(--s1)" stroke="var(--bg)" stroke-width="2">'
@@ -196,8 +199,8 @@ def transfer_card(tr, width=560, height=260):
     parts.append(f'<text x="{width-pad_r}" y="{pad_t-3}" text-anchor="end" font-size="10" fill="var(--muted)">in-range RMSE, dB</text>')
     parts.append("</svg>")
     budget = tr.get("transfer_budget", "10k")
-    cap = (f"{len(rows)} source transmitters, transfer budget {budget} steps; fit b(d) = b0 exp(&minus;d/d_c): d_c = {fit['d_c_m']:.1f} m, "
-           f"b0 = {fit['b0_db']:.2f} dB, R&sup2; {fit['r2']:.2f}"
+    cap = (f"{len(rows)} source transmitters, transfer budget {budget} steps; fit b(d) = b0 exp(&minus;d/d_c) + c: d_c = {fit['d_c_m']:.1f} m, "
+           f"b0 = {fit['b0_db']:.2f} dB, plateau c = {fit.get('c_db', 0.0):+.2f} dB, R&sup2; {fit['r2']:.2f}"
            if fit else f"{len(rows)} source transmitters, transfer budget {budget} steps; the fit needs 4")
     return (f'<figure class="card"><h2>How far an adapted geometry carries ({budget}-step transfer)</h2>'
             f'<p class="rrf-note">Geometry unfrozen on a source transmitter (10k steps), then frozen on Tx-B with colours reset '
