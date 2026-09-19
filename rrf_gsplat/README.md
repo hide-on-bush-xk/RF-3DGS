@@ -235,13 +235,20 @@ Those floors expose the evaluation protocol rather than the model: a
 random 20 % hold-out leaves every test position 0.23 m from a training
 one, a density no channel sounder delivers. Two protocol changes fix that.
 **Density sweep** (training positions 800 / 160 / 80 / 40 / 20, same
-held-out views, copy baseline drawn from the same subset): the copy's
-azimuth median grows linearly with the spacing, 1.07° → 1.68° → 2.55° →
-3.72° → 4.68° over 0.23 → 0.84 m, while the field stays at 0.59° → 0.60° →
-0.62° → 0.69° → 0.78° with its P90 near 6° throughout (the copy's 131–152°);
-zenith crosses at about 0.3 m and delay at about 0.6 m spacing (40
-positions: 3.12 against 3.10 ns). Twenty positions, 80 images, still give
-0.78° median azimuth. **Leave-one-region** (`make_region_split.py`, the
+held-out views, copy baseline drawn from the same subset, the field with
+the delay decomposition below): the copy's azimuth median grows linearly
+with the spacing, 1.07° → 1.68° → 2.55° → 3.72° → 4.68° over 0.23 → 0.84 m,
+while the field stays at 0.62° → 0.63° → 0.66° → 0.75° → 0.84° with its P90
+near 6.5° throughout (the copy's 131–152°); zenith goes 0.79° → 2.91° for
+the copy against 0.96° → 1.24° for the field, delay 0.86 → 3.88 ns against
+0.95 → 1.43 ns. All three channels cross between 0.23 and 0.35 m spacing
+(azimuth already below 0.23 m, zenith and delay at about 0.25–0.27 m by
+linear interpolation): **beyond about 0.3 m of measurement spacing the
+field beats nearest-neighbour lookup on every physical channel**, and the
+lookup's error grows 4.4× over the sweep where the field's grows 1.3–1.5×.
+Twenty positions, 80 images, still give 0.84° median azimuth. The flatness
+is the frozen visual geometry carrying the spatial structure, so the
+crossover depends on that geometry's quality; a second scene tests it. **Leave-one-region** (`make_region_split.py`, the
 south-east corridor end held out, 123 positions, nearest training position
 1.43 m median and 2.75 m at most): the field extrapolates to 1.47° / 17.6°
 azimuth median / P90 against the copy's 7.38° / 93°, zenith 1.99° against
