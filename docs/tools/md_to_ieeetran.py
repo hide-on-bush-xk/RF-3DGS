@@ -157,6 +157,7 @@ def main():
     print(r"\thanks{Draft generated from the working repository; " + inline(note or "") + "}}")
     print(r"\maketitle")
     print(body)
+    print(r"\nocite{*}   % the draft names its references in prose; list every entry of refs.bib until \cite keys are placed")
     print(r"\bibliographystyle{IEEEtran}")
     print(r"\bibliography{refs}")
     print(r"\end{document}")
