@@ -51,6 +51,7 @@ def inline(text):
 def table(caption, header, rows):
     """table* spanning both columns; text-heavy columns wrap (tabularx X), short numeric ones stay natural width."""
     ncol = len(header)
+    caption = re.sub(r"^Table \d+\.\s*", "", caption)      # IEEEtran numbers the table itself
     widest = [max([len(header[k])] + [len(r[k]) if k < len(r) else 0 for r in rows]) for k in range(ncol)]
     spec = "".join(r">{\raggedright\arraybackslash}X" if w > 16 else "c" for w in widest)
     spec = spec if "X" in spec else "l" + "c" * (ncol - 1)
