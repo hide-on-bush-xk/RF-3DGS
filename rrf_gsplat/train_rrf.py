@@ -189,6 +189,7 @@ class RRF(torch.nn.Module):
         xyz, scaling, rotation, opacity = (t.detach().to(device) for t in (xyz, scaling, rotation, opacity))
         self.mode, self.channels, self.sh_degree = mode, channels, sh_degree
         self.delay_channel, self.delay_span_ns, self.delay_depth_mode = None, None, "D"   # --delay-depth: delay = learned residual + rendered depth / c
+        self.delay_range, self._range_factor = "z", None                                  # --delay-range euclid: depth * sec(theta_pixel) = range along the ray
         n, k = xyz.shape[0], (sh_degree + 1) ** 2
         # RF-3DGS zeroes every SH coefficient before RF training; the same here,
         # for any channel count. DC and the rest are separate parameters so
@@ -279,6 +280,16 @@ class RRF(torch.nn.Module):
             # depth gsplat renders natively (sum_i w_i d_i, metres); the learned channel
             # keeps only the view-independent part. In the channel's normalised units.
             depth_m = img[self.channels]
+            if self.delay_range == "euclid":
+                # gsplat's depth is the camera z; the path length is z / cos(theta) along the pixel's ray
+                # (1.41 at the edge and 1.56 at the corner of a 90-degree face). Measured on the lobby: the
+                # gap (range - z) / c is 2.2 ns mean, 4.6 ns P90 (depth_gt.py), a known per-pixel factor.
+                key = (float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2]), width, height)
+                if self._range_factor is None or self._range_factor[0] != key:
+                    u = (torch.arange(width, device=device, dtype=torch.float32) + 0.5 - key[2]) / key[0]
+                    v = (torch.arange(height, device=device, dtype=torch.float32) + 0.5 - key[3]) / key[1]
+                    self._range_factor = (key, torch.sqrt(1.0 + u[None, :] ** 2 + v[:, None] ** 2))
+                depth_m = depth_m * self._range_factor[1]
             img = img[:self.channels].clone()
             img[self.delay_channel] = img[self.delay_channel] + depth_m / (0.299792458 * self.delay_span_ns)
         if self.mode == "power":
@@ -447,6 +458,8 @@ def main():
                     help="how --max-train-views picks positions: evenly along the training list (route) or farthest-point sampling in space (fps)")
     ap.add_argument("--delay-depth-mode", choices=["D", "ED"], default="D",
                     help="--delay-depth range term: accumulated depth sum w d (D) or expected depth sum w d / alpha (ED)")
+    ap.add_argument("--delay-range", choices=["z", "euclid"], default="z",
+                    help="--delay-depth range term as the camera z (z, as the first runs) or the Euclidean range z * sec(theta_pixel) (euclid)")
     ap.add_argument("--init-from", default=None, help="rrf_state.pt of another run (warm start)")
     ap.add_argument("--init-geometry-only", action="store_true",
                     help="with --init-from: take means/scales/quats/opacities from that run but "
@@ -560,6 +573,7 @@ def main():
         model.delay_channel = channel_names.index("delay_ns")
         model.delay_span_ns = float(ch_ranges[model.delay_channel, 1] - ch_ranges[model.delay_channel, 0])
         model.delay_depth_mode = cfg.delay_depth_mode
+        model.delay_range = cfg.delay_range
         print(f"delay channel {model.delay_channel}: rendered depth / c added, span {model.delay_span_ns:.1f} ns")
 
     def target(i):
