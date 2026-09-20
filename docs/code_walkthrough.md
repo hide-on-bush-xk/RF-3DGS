@@ -163,3 +163,82 @@ Tx 移动的那条:`generate_dataset.py --tx 8.2 -5.4 2.0 --num-positions 160` �
 | 几何是否可学、致密化 | `--train-geometry` / `--densify mcmc`,`lrs` 字典 |
 | 规划目标(SINR、吞吐…) | `optimize_tx.py` 的 `objective()`;梯度不用改 |
 | 材料模型 | `tutorial_materials.TUTORIAL` 表或 `scene_common.load_radio_scene` |
+
+---
+
+## 更新(2026-09-20):09-18 之后新增的模块与约定
+
+全景图多了一条流水线和一层评估工具;冻结点 `d359dc9`(之后只改措辞)。
+
+```text
+[E] 场景 2  scene2/make_corridor.py ──▶ corridor/{corridor_sionna.xml, corridor_visual.xml, meshes, textures, rx_route.txt, tx_positions.json, layout.json}
+                 │                                      │
+                 ▼ scene2/render_visual.py (Mitsuba)    ▼ [A] generate_dataset.py --scene-xml corridor_sionna.xml --rx-loc-file rx_route.txt
+      visual_dataset/ (Blender 布局, 不入库, manifest 入库)          s2_MULTI_corrM / s2_MVDR_tx<name>(+ _gpct)
+                 ▼ 原版 train.py --eval 30k                                   │
+      visual_trained/chkpnt30000.pth (582,363 高斯; 盘外备份)  ──────────────▶ [B] train_rrf.py --checkpoint … (队列 scene2/win_scene2_*.sh)
+                                                                              ▼
+[F] 评估层  eval_baselines.py(常数 / 最近邻 / 两近邻 / 场;top-k 波束;--layout 按空间;渲染不全拒绝打分)
+            eval_encoding.py(编码对比,--support / --power-weighted)  delay_signed.py  delay_oracle.py
+            depth_gs.py(WSL,期望/累积深度)+ depth_gt.py(Sionna mesh 首次命中)  diag_delay_paths.py  diag_overlap.py  diag_delta_pca.py  diag_neff.py
+            transfer_curve.py(--tag 2k,自助法)  make_region_split.py  scene2/analyze_scene2.py(密度按 regime、区域结构 + 点亮表面 IoU、一致性)
+            rrf_panels.py 新卡片:双场景密度交叉、场景 2 转移曲线
+```
+
+### A′ 生成端的变化(`sionna_port/generate_dataset.py`)
+
+| 项 | 现在 | 为什么 |
+| --- | --- | --- |
+| MULTI 通道 | **5 通道**:功率 dB、cos(AoD 方位)、sin(AoD 方位)、AoD 天顶、时延;`channel_ranges(all_db, kind, power_floor_db)` 只在 hit 像素(功率 > 核底)上取百分位 | 单通道方位在 ±180° 有接缝,自身中位误差 3.2× |
+| 采样 seed | **按位置**(四个 yaw 共用一次 solve 的路径集合);`--seed-per-view` 恢复教程的按视角 seed | 按视角 seed 让四个面看到四套漫散射路径:路径级目标功率 RMSE +48%,波束谱不敏感 |
+| 核截断 | `power_floor_db = −150`,核尾巴低于它的像素记为无路径 | 核尾巴污染 spec_min 与 hit 掩码 |
+| 零路径位姿 | 波束谱分支写常数 `EMPTY_VIEW_DB = −300`,`generation_meta.empty_views` 计数 | 场景 2 房间 Tx 在 depth 1 下 46–48% 的位姿无路径,之前进程直接崩 |
+| `--tx-list NAME:x,y,z` | 一个进程内共享场景 / 求解器 / 角网格换 Tx | 省每进程 16 s 的启动,吞吐不变(干净卡上 A/B:23.2 vs 22.4 views/s) |
+| 位置抖动 | 教程的 ±0.5 m(x, y)、−1.0 … +0.3 m(z)保留 | 所以"间距轴"一律是实测的最近训练距离,不是路线的名义步长 |
+
+**MULTI 是什么、不是什么**:每像素是落入该像素的路径的**一阶矩**(功率和、功率加权圆均值方位、均值天顶、均值时延),两条等功率路径给同一标签;
+不是多峰 AoD、PDP、相干叠加或相位,不是 CSI/CIR。功率算子 `_path_arrays` 是 (Σ_m |a_m|)²,只在各阵元幅度相同(合成阵列、同元方向图)时等于单阵元功率乘常数。
+
+### B′ 训练端的变化(`rrf_gsplat/train_rrf.py`)
+
+| 标志 | 作用 | 用在哪 |
+| --- | --- | --- |
+| `--delay-depth` | 时延通道 = 学习残差 + 渲染深度 / c(`render_mode="RGB+D"/"RGB+ED"`,在通道归一化单位上相加) | 时延中位 2.42 → 0.95(D)→ 0.88(ED)ns |
+| `--delay-depth-mode {D,ED}` | 累积深度 Σw·d 或期望深度 Σw·d/α;ED 是方法默认 | 带符号偏差 −1.10 → −0.64 ns |
+| `--delay-range {z,euclid}` | 深度 × sec θ_pixel(欧氏距离而非相机 z);euclid 是方法默认 | 中位 0.88 → 0.55,P90 5.38 → 4.48,RMSE 5.26 → 4.97(判据 < 4.5 未过) |
+| `--max-train-views N --subset-mode {route,fps}` | 训练位置子集:沿训练列表等间隔 / 空间最远点采样 | 密度扫描;两种规则交叉点相同 |
+| `--geometry-subset {all,needles,discs,random} --geometry-fraction --geometry-seed` | 只解冻某类 / 随机比例的高斯(梯度按掩码清零) | 随机 1% 拿到 73% 的解冻增益 |
+| `--train-geometry` | 解冻 means/scales/quats(lr 1.6e-5×scale / 5e-3 / 1e-3) | −27% RMSE;均值只动 6 mm,增益在尺度与旋转 |
+| `--init-from state.pt [--init-geometry-only]` | 热启动 / 只取几何(颜色清零) | 转移曲线、区域结构 |
+| `--no-eval` | 适配 run 不做测试通道 | 转移曲线的源适配 |
+| `--iterations 0 --init-from` | 零步热启动 = 只重渲、重评估 | 把 300 张渲染补到全部 452 张 |
+| `--save-renders` | **默认 −1 = 全部留出图**;`eval_baselines.py` 遇到渲染不全**拒绝打分**(`--allow-partial` 并记 `partial: true` 例外) | 第四次协议错误后加的护栏 |
+| `--seed` | 数据顺序与初始化的 seed | 噪声底:转移收益 0.03 dB(大堂)/ 0.31 dB(走廊);解码中位 0.002–0.026°、0.006–0.011 ns |
+
+落盘的 `renders/*.npy` 是**物理单位**(时延 ns,角度为 cos/sin 与归一化天顶),`eval_baselines.decode()` 直接读——`delay_oracle.py` 第一版把它当归一化单位,三个 run 全零变化,已修。
+
+### F 评估层(哪个脚本回答哪个问题)
+
+| 问题 | 脚本 | 输出 |
+| --- | --- | --- |
+| 场比朴素基线好多少(地板)、波束选择 top-k | `eval_baselines.py --multi run --truth ds [--max-train-views N] [--layout layout.json]` | `baselines_<run>.json`:constant / nearest / interp2 / rrf 的中位 / P90 / RMSE / 功率加权;`by_space` 按走廊 / 房间 / 厅 |
+| 编码之间的解码误差、σ 扫描 | `eval_encoding.py [--support] [--power-weighted]` | 同支撑集 / 功率加权的中位 / P90 / RMSE |
+| 时延的带符号误差 | `delay_signed.py` | 均值 / 中位 / 功率加权均值 / \|e\|>5 ns 占比与其中负的比例 |
+| 几何对 mesh 有多准 | `depth_gs.py`(WSL,ED 与 D 深度)→ `depth_gt.py`(Sionna `scene.mi_scene.ray_intersect`,相机 z) | 深度 RMSE / 中位 / 带符号均值;范围项缺口 (range − z)/c |
+| 测试时换真值深度会怎样 | `delay_oracle.py` | 三个 run 都变差,偏移 ≈ 几何平均偏差:残差已在训练时补偿几何,测试时替换算两遍 |
+| 尾巴是不是多径 | `diag_delay_paths.py --runs …` | 按每像素路径数分层的时延误差与平方误差占比 |
+| 转移收益与距离 / 点亮表面重叠 | `transfer_curve.py --tag 2k`、`diag_overlap.py`、`scene2/analyze_scene2.py` | 曲线 JSON(仪表盘卡片)、IoU 与相关 |
+| 整段区域留出 | `make_region_split.py --xmin … --ymax …` | 硬链接的姊妹数据集 + 新的 train/test 索引 |
+
+### E 场景 2 的约定
+
+- 路线文件按空间交错写(任何前缀都铺满平面),名义 0.2 m 步长;生成器抖动后最密档最近训练距离 0.46 m。
+- Mitsuba 相机帧 x 左、y 上、z 前:Blender 位姿翻 x、z 列(不是 y、z);两个语义判据定手性(灯在上半、走廊口在相机左侧)。
+- 渲染集不入库(manifest + 固定 seed),checkpoint 盘外备份(`D:\RF-3DGS_backup`、OneDrive)。
+- 队列 `scene2/win_scene2_rf.sh` 的 gpct 判断用 "images 非空",不用 "目录存在"。
+
+### 队列与门(所有 `win_round*.sh` / `scene2/win_scene2_*.sh`)
+
+- 门:没有游戏进程 且 GPU < 15% 持续 2 min(历史上 19:15–20:19 与 03:02–04:10 两段游戏占卡,期间所有计时作废)。
+- `run()` 按 `results.json` 跳过;`gen()` 按 `generation_meta.json` 跳过;bash 边跑边读脚本,**运行中的脚本不能改**。
+- 计时契约:只报独占卡上的中位数;共享卡上的 run 只取质量数。

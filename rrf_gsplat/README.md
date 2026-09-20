@@ -71,6 +71,24 @@ python sionna_port/dashboard.py output/ablation.json --out output/dashboard.html
 
 ## Results (2026-09-18, RTX 3060; full table in `output/rrf/summary.json`, narrative in `docs/stage2_notes.md`)
 
+**Where things stand (2026-09-20, measurements frozen at `d359dc9`).** The
+paper text is `docs/paper1_draft.md` (v0.6); the round-by-round record is
+`docs/stage2_notes.md`; a one-table index of every result after 09-18 is
+`docs/ours_vs_rf3dgs.md` section 8. Since the paragraphs below were written:
+the delay range term is the Euclidean range (`--delay-range euclid`, the
+method's default: median 0.88 to 0.55 ns, P90 5.38 to 4.48, RMSE 5.26 to
+4.97); the reconstructed geometry was measured against the scene mesh
+(`depth_gs.py` + `depth_gt.py`: lobby 0.117 m median, corridor 0.365 m, both
+in front of the surface, which is the delay channel's negative bias); a
+second scene (`scene2/`) separated transmitter distance from lit-surface
+overlap (the room next door costs 11 dB, the facing room gains 2.5), split
+the density crossover by propagation regime, and collapsed the lookup
+baseline in a held-out room; seed noise floors were measured for the
+transfer benefit (0.03 dB lobby, 0.31 dB corridor) and for the decoded
+medians (0.002 to 0.026 deg, 0.006 to 0.011 ns). Two guards were added after
+a protocol error: `--save-renders` defaults to every held-out view and
+`eval_baselines.py` refuses a partial render set.
+
 **The port reproduces RF-3DGS.** On the released MVDR data, `rgb` reaches
 15.97 dB / 0.727 SSIM on the 640 held-out views (published checkpoint: 16.02 /
 0.731), identically through the torch SH path and gsplat's CUDA SH.
