@@ -8,3 +8,8 @@ output/
 */simple-knn
 *.zip
 sionna_tutorial/
+
+# rendered visual datasets and 3DGS checkpoints are derived data: regenerate from scene2/corridor + render_visual.py (manifest with checksums is tracked)
+scene2/visual_dataset/
+scene2/visual_dataset_*/
+scene2/visual_trained*/
