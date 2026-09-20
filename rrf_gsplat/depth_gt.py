@@ -39,6 +39,7 @@ def main():
     n, h, w = depth.shape
     errs, gaps, gts, gss = [], [], [], []
     per_view = []
+    z_gt_all = np.full((n, h, w), np.nan, dtype=np.float32)
     for i in range(n):
         K = ks[i]; view = vms[i].astype(np.float64)
         u, v = np.meshgrid(np.arange(w) + 0.5, np.arange(h) + 0.5)
@@ -51,6 +52,7 @@ def main():
         t = np.array(si.t).reshape(h, w)
         hit = np.isfinite(t) & (t < 1e3)
         z_gt = np.where(hit, t * d_cam[..., 2], np.nan)
+        z_gt_all[i] = z_gt
         m = hit & (alpha[i] > 0.5)
         e = depth[i][m] - z_gt[m]
         gap = z_gt[m] * (1.0 / d_cam[..., 2][m] - 1.0) / C                   # (range - z) / c, ns
@@ -64,6 +66,7 @@ def main():
            "range_term_gap_ns": {"mean": float(gap.mean()), "median": float(np.median(gap)), "p90": float(np.percentile(gap, 90)), "max": float(gap.max())},
            "per_view": per_view}
     json.dump(res, open(os.path.join(cfg.out, f"depth_vs_mesh_{cfg.tag}.json"), "w"), indent=1)
+    np.savez_compressed(os.path.join(cfg.out, f"depth_gt_{cfg.tag}.npz"), names=z["names"], z_gt=z_gt_all)   # camera z of the mesh, NaN where no hit
     d = res["depth_error"]; g = res["range_term_gap_ns"]
     print(f"{cfg.tag}: {n} views, {e.size:,} pixels ({res['share_pixels_used']:.1%}), mesh depth median {res['gt_depth_median_m']:.2f} m")
     print(f"  Gaussian expected depth - mesh: RMSE {d['rmse_m']:.3f} m ({d['rmse_ns']:.2f} ns), median |e| {d['median_abs_m']:.3f} m ({d['median_abs_ns']:.2f} ns), "

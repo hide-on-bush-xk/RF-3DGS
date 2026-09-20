@@ -465,7 +465,9 @@ def main():
                     help="with --init-from: take means/scales/quats/opacities from that run but "
                          "start the colours from zero (does an RF-adapted geometry transfer to "
                          "another transmitter?)")
-    ap.add_argument("--save-renders", type=int, default=16, help="test renders to write")
+    ap.add_argument("--save-renders", type=int, default=-1,
+                    help="test renders to write; -1 (default) = every held-out view, so the decoded metrics (eval_baselines.py) "
+                         "always cover the full test set. A run with fewer saved renders cannot support a full-test-set claim.")
     ap.add_argument("--db-range", type=float, nargs=2, default=None,
                     help="min max dB for the colormap; default from generation_meta.json")
     ap.add_argument("--seed", type=int, default=0)
@@ -649,12 +651,12 @@ def main():
     elif cfg.mode == "multi":
         final = evaluate_multi(model, test, all_idx, ch_ranges, channel_names, mask_channel=cfg.mask_channel)
         if cfg.save_renders:
-            evaluate_multi(model, test, all_idx[:cfg.save_renders], ch_ranges, channel_names,
+            evaluate_multi(model, test, (all_idx if cfg.save_renders < 0 else all_idx[:cfg.save_renders]), ch_ranges, channel_names,
                            save_dir=os.path.join(cfg.out, "renders"), mask_channel=cfg.mask_channel)
     else:
         final = evaluate(model, test, all_idx, span, vmin)
         if cfg.save_renders:
-            evaluate(model, test, all_idx[:cfg.save_renders], span, vmin,
+            evaluate(model, test, (all_idx if cfg.save_renders < 0 else all_idx[:cfg.save_renders]), span, vmin,
                      save_dir=os.path.join(cfg.out, "renders"))
     torch.save(model.state(), os.path.join(cfg.out, "rrf_state.pt"))
     result = {"config": vars(cfg), "db_range": [vmin, vmax], "n_train": n_train,

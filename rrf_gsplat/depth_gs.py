@@ -31,9 +31,13 @@ def main():
     model = RRF(cfg.checkpoint, "db", 1, 0, device)
     views = read_colmap_text(os.path.join(cfg.dataset, "sparse", "0"))
     names = read_index(os.path.join(cfg.dataset, "test_index.txt"))
-    if cfg.max_views:
-        names = names[:: max(1, len(names) // cfg.max_views)][: cfg.max_views]
-    depths, alphas, vms, ks = [], [], [], []
+    if cfg.max_views and cfg.max_views < len(names):
+        # stratified, not a stride: the index lists a position's four yaws consecutively, so pick positions evenly
+        # along the route and keep all four faces of each (the smoke rule: never [::k] over views)
+        per = 4; n_pos = len(names) // per; keep = max(1, cfg.max_views // per)
+        pos = np.linspace(0, n_pos - 1, keep).round().astype(int)
+        names = [names[p * per + k] for p in pos for k in range(per)]
+    depths, depths_d, alphas, vms, ks = [], [], [], [], []
     colours = torch.zeros(model.means.shape[0], 1, device=device)
     with torch.no_grad():
         for n in names:
@@ -41,11 +45,15 @@ def main():
             vm = torch.as_tensor(view, device=device); Kt = torch.as_tensor(K, device=device)
             img, alpha, _ = rasterization(model.means, model.quats, model.scales, model.opacities, colours, vm[None], Kt[None], w, h,
                                           sh_degree=None, backgrounds=torch.zeros(1, 1, device=device), render_mode="ED")
-            depths.append(img[0, ..., 0].cpu().numpy().astype(np.float32)); alphas.append(alpha[0, ..., 0].cpu().numpy().astype(np.float32))
+            img_d, _, _ = rasterization(model.means, model.quats, model.scales, model.opacities, colours, vm[None], Kt[None], w, h,
+                                        sh_degree=None, backgrounds=torch.zeros(1, 1, device=device), render_mode="D")
+            depths.append(img[0, ..., 0].cpu().numpy().astype(np.float32)); depths_d.append(img_d[0, ..., 0].cpu().numpy().astype(np.float32))
+            alphas.append(alpha[0, ..., 0].cpu().numpy().astype(np.float32))
             vms.append(view); ks.append(K)
     os.makedirs(cfg.out, exist_ok=True)
     p = os.path.join(cfg.out, f"depth_gs_{cfg.tag}.npz")
-    np.savez_compressed(p, names=np.array(names), depth=np.stack(depths), alpha=np.stack(alphas), viewmat=np.stack(vms), K=np.stack(ks))
+    # depth = expected depth (ED, sum w z / alpha); depth_d = accumulated depth (D, sum w z), the density runs' range term
+    np.savez_compressed(p, names=np.array(names), depth=np.stack(depths), depth_d=np.stack(depths_d), alpha=np.stack(alphas), viewmat=np.stack(vms), K=np.stack(ks))
     d = np.stack(depths); a = np.stack(alphas)
     print(f"{len(names)} views, {model.means.shape[0]:,} Gaussians; depth median {np.median(d[a > 0.5]):.2f} m, alpha > 0.5 on {(a > 0.5).mean():.1%} of pixels -> {p}")
 

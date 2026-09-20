@@ -89,6 +89,7 @@ def main():
     ap.add_argument("--multi", required=True); ap.add_argument("--truth", required=True)
     ap.add_argument("--out", default=None)
     ap.add_argument("--subset-mode", choices=["route", "fps"], default="route")
+    ap.add_argument("--allow-partial", action="store_true", help="score a run whose saved renders cover only part of the held-out set (recorded in the JSON)")
     ap.add_argument("--layout", default=None, help="scene layout.json (scene 2): also report every method per space class "
                                                    "(corridor / room / hall) of the held-out receiver, on the same pixels")
     ap.add_argument("--max-train-views", type=int, default=None,
@@ -110,8 +111,14 @@ def main():
         else:
             pos_idx = np.linspace(0, n_pos - 1, keep).round().astype(int)
         train = [train[p * per_pos + k] for p in pos_idx for k in range(per_pos)]
-    test = [l.strip() for l in open(os.path.join(cfg.truth, "test_index.txt")) if l.strip()]
-    test = [n for n in test if os.path.exists(os.path.join(cfg.multi, "renders", n + ".npy"))]
+    test_all = [l.strip() for l in open(os.path.join(cfg.truth, "test_index.txt")) if l.strip()]
+    test = [n for n in test_all if os.path.exists(os.path.join(cfg.multi, "renders", n + ".npy"))]
+    if len(test) < len(test_all):
+        # a partial render set is a partial test set (and, with an interleaved route file, a biased one); refuse unless told to
+        msg = f"{len(test)} of {len(test_all)} held-out views have saved renders in {cfg.multi}; re-render with --save-renders -1"
+        if not cfg.allow_partial:
+            raise SystemExit("refusing a partial test set: " + msg + " (or pass --allow-partial to score the subset, labelled as such)")
+        print("WARNING, partial test set: " + msg)
     # constant predictor: the training pixels' circular-mean azimuth, mean zenith, mean delay
     cs = np.zeros(2); zs = ds = cnt = 0.0
     for n in train:
@@ -160,7 +167,7 @@ def main():
                 for k in (1, 3, 5):
                     hits[m][a][k].append(h[k])
     w = np.concatenate(weights); w = w / w.sum()
-    out = {"views": len(test), "pixels": n_pix, "nearest_train_distance_m": {"median": float(np.median(nn_dist)), "p90": float(np.percentile(nn_dist, 90)), "max": float(np.max(nn_dist))},
+    out = {"views": len(test), "views_in_test_index": len(test_all), "partial": len(test) < len(test_all), "pixels": n_pix, "nearest_train_distance_m": {"median": float(np.median(nn_dist)), "p90": float(np.percentile(nn_dist, 90)), "max": float(np.max(nn_dist))},
            "arrays_theta3db_deg": ARRAYS, "errors": {}, "topk": {}}
     print(f"{len(test)} held-out views, {n_pix:,} hit pixels; nearest training position: median {out['nearest_train_distance_m']['median']:.2f} m, "
           f"P90 {out['nearest_train_distance_m']['p90']:.2f} m, max {out['nearest_train_distance_m']['max']:.2f} m")

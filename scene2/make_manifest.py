@@ -19,7 +19,8 @@ import subprocess
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", required=True); ap.add_argument("--out", required=True)
-    ap.add_argument("--command", required=True, help="the exact render command")
+    ap.add_argument("--command", default=None, help="the exact render command (writing a manifest)")
+    ap.add_argument("--check", action="store_true", help="verify the dataset against the manifest at --out instead of writing it")
     cfg = ap.parse_args()
     files = {}
     for root, _, names in os.walk(cfg.dataset):
@@ -30,6 +31,16 @@ def main():
                 for chunk in iter(lambda: fid.read(1 << 20), b""):
                     h.update(chunk)
             files[os.path.relpath(p, cfg.dataset).replace(os.sep, "/")] = {"sha256": h.hexdigest(), "bytes": os.path.getsize(p)}
+    if cfg.check:
+        ref = json.load(open(cfg.out))["entries"]
+        missing = sorted(set(ref) - set(files)); extra = sorted(set(files) - set(ref))
+        bad = sorted(k for k in set(ref) & set(files) if ref[k]["sha256"] != files[k]["sha256"])
+        print(f"{len(ref)} entries in the manifest, {len(files)} files on disk: {len(bad)} mismatched, {len(missing)} missing, {len(extra)} not in the manifest")
+        for k in (bad + missing)[:10]:
+            print("  ", k, "MISMATCH" if k in bad else "MISSING")
+        raise SystemExit(1 if (bad or missing) else 0)
+    if not cfg.command:
+        raise SystemExit("--command is required when writing a manifest")
     try:
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     except Exception:
