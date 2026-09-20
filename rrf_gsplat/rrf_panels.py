@@ -35,8 +35,8 @@ DENSITY_RUNS = {
     # (run name, training positions); the spacing axis is the measured nearest-training distance from the baselines file
     "scene 1 (lobby)": [("m_multi_24_tut_cs_depth", 640), ("m_multi_24_tut_cs_depth_v640", 160), ("m_multi_24_tut_cs_depth_v320", 80),
                         ("m_multi_24_tut_cs_depth_v160", 40), ("m_multi_24_tut_cs_depth_v80", 20)],
-    "scene 2 (corridor)": [("s2_multi_corrM_depth", 451), ("s2_multi_corrM_depth_v900", 225), ("s2_multi_corrM_depth_v452", 113),
-                           ("s2_multi_corrM_depth_v224", 56), ("s2_multi_corrM_depth_v112", 28)],
+    "scene 2 (corridor)": [("s2_multi_corrM_depth_full", 451), ("s2_multi_corrM_depth_v900_full", 225), ("s2_multi_corrM_depth_v452_full", 113),
+                           ("s2_multi_corrM_depth_v224_full", 56), ("s2_multi_corrM_depth_v112_full", 28)]     # *_full: all 452 held-out views scored,
 }
 
 

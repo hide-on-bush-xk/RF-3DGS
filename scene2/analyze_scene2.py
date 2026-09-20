@@ -35,8 +35,8 @@ def density():
     rows = [("scene 1 (lobby)", "baselines_%s.json", [("m_multi_24_tut_cs_depth", 800), ("m_multi_24_tut_cs_depth_v640", 160), ("m_multi_24_tut_cs_depth_v320", 80),
                                                         ("m_multi_24_tut_cs_depth_v160", 40), ("m_multi_24_tut_cs_depth_v80", 20)]),
             # 564 route positions at 0.2 m, 20 % held out: 451 training positions, then 225 / 113 / 56 / 28 (views = 4 x positions)
-            ("scene 2 (corridor)", "baselines_%s.json", [("s2_multi_corrM_depth", 451), ("s2_multi_corrM_depth_v900", 225), ("s2_multi_corrM_depth_v452", 113),
-                                                          ("s2_multi_corrM_depth_v224", 56), ("s2_multi_corrM_depth_v112", 28)])]
+            ("scene 2 (corridor)", "baselines_%s.json", [("s2_multi_corrM_depth_full", 451), ("s2_multi_corrM_depth_v900_full", 225), ("s2_multi_corrM_depth_v452_full", 113),
+                                                          ("s2_multi_corrM_depth_v224_full", 56), ("s2_multi_corrM_depth_v112_full", 28)])]
     for scene, pat, runs in rows:
         print(f"  {scene}")
         print(f"  {'positions':>9} {'spacing':>8} {'az copy/field':>16} {'zen copy/field':>16} {'delay copy/field':>18}")
@@ -46,6 +46,45 @@ def density():
                 print(f"  {npos:>9}  (missing {run})"); continue
             c, f = b["errors"]["nearest"], b["errors"]["rrf"]; sp = b["nearest_train_distance_m"]["median"]
             print(f"  {npos:>9} {sp:8.2f} {c['az']['median']:7.2f}/{f['az']['median']:<7.2f} {c['zen']['median']:7.2f}/{f['zen']['median']:<7.2f} {c['delay']['median']:8.2f}/{f['delay']['median']:<8.2f}")
+
+
+def density_by_space():
+    """Scene 2 density sweep scored on all 452 held-out views (the *_full re-renders), overall and per space class of the
+    held-out receiver, with the copy/field crossover per class (linear interpolation of copy - field on the measured spacing)."""
+    runs = [("s2_multi_corrM_depth_full", 451), ("s2_multi_corrM_depth_v900_full", 225), ("s2_multi_corrM_depth_v452_full", 113),
+            ("s2_multi_corrM_depth_v224_full", 56), ("s2_multi_corrM_depth_v112_full", 28)]
+    rows = [(n, load(f"baselines_{r}.json")) for r, n in runs]
+    rows = [(n, b) for n, b in rows if b]
+    if not rows:
+        print("\nA'. (no full-set baselines yet)"); return
+    classes = ["all"] + sorted({c for _, b in rows for c in b.get("by_space", {})})
+    print(f"\nA'. scene 2 density on all {rows[0][1]['views']} held-out views, per space class (median copy / field; spacing = nearest training position, median)")
+    out = {}
+    for c in classes:
+        print(f"  [{c}]")
+        print(f"  {'positions':>9} {'views':>5} {'spacing':>8} {'az copy/field':>16} {'zen copy/field':>16} {'delay copy/field':>18}")
+        pts = []
+        for n, b in rows:
+            g = b if c == "all" else b["by_space"].get(c)
+            if not g:
+                continue
+            e = g["errors"]; sp = g["nearest_train_distance_m"]["median"]
+            pts.append({"positions": n, "views": g["views"], "spacing": sp, "copy": {q: e["nearest"][q]["median"] for q in ("az", "zen", "delay")},
+                        "field": {q: e["rrf"][q]["median"] for q in ("az", "zen", "delay")}})
+            print(f"  {n:>9} {g['views']:>5} {sp:8.2f} {e['nearest']['az']['median']:7.2f}/{e['rrf']['az']['median']:<7.2f} "
+                  f"{e['nearest']['zen']['median']:7.2f}/{e['rrf']['zen']['median']:<7.2f} {e['nearest']['delay']['median']:8.2f}/{e['rrf']['delay']['median']:<8.2f}")
+        pts.sort(key=lambda p: p["spacing"])
+        def cross(q):
+            d = [(p["spacing"], p["copy"][q] - p["field"][q]) for p in pts]
+            if d[0][1] > 0:
+                return f"below {d[0][0]:.2f} m"
+            for (x0, y0), (x1, y1) in zip(d[:-1], d[1:]):
+                if y0 <= 0 < y1:
+                    return f"{x0 + (x1 - x0) * (-y0) / (y1 - y0):.2f} m"
+            return f"beyond {d[-1][0]:.2f} m"
+        print(f"  crossover: azimuth {cross('az')}, zenith {cross('zen')}, delay {cross('delay')}")
+        out[c] = {"points": pts, "crossover": {q: cross(q) for q in ("az", "zen", "delay")}}
+    json.dump(out, open(os.path.join(OUT, "density_by_space_s2.json"), "w"), indent=1)
 
 
 def zones():
@@ -156,4 +195,4 @@ def consistency():
 
 
 if __name__ == "__main__":
-    density(); zones(); consistency()
+    density(); density_by_space(); zones(); consistency()
