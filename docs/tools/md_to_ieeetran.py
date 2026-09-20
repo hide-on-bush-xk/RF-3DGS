@@ -49,14 +49,20 @@ def inline(text):
 
 
 def table(caption, header, rows):
+    """table* spanning both columns; text-heavy columns wrap (tabularx X), short numeric ones stay natural width."""
     ncol = len(header)
-    align = "l" + "c" * (ncol - 1)
-    out = [r"\begin{table*}[!t]", r"\caption{%s}" % inline(caption), r"\centering\footnotesize", r"\begin{tabular}{%s}" % align, r"\toprule",
+    widest = [max([len(header[k])] + [len(r[k]) if k < len(r) else 0 for r in rows]) for k in range(ncol)]
+    spec = "".join(r">{\raggedright\arraybackslash}X" if w > 16 else "c" for w in widest)
+    spec = spec if "X" in spec else "l" + "c" * (ncol - 1)
+    size = r"\scriptsize" if ncol >= 6 or sum(widest) > 150 else r"\footnotesize"
+    env = "tabularx" if "X" in spec else "tabular"
+    begin = r"\begin{tabularx}{\textwidth}{%s}" % spec if env == "tabularx" else r"\begin{tabular}{%s}" % spec
+    out = [r"\begin{table*}[!t]", r"\caption{%s}" % inline(caption), r"\centering" + size, begin, r"\toprule",
            " & ".join(inline(c) for c in header) + r" \\", r"\midrule"]
     for r in rows:
         r = r + [""] * (ncol - len(r))
         out.append(" & ".join(inline(c) for c in r[:ncol]) + r" \\")
-    out += [r"\bottomrule", r"\end{tabular}", r"\end{table*}", ""]
+    out += [r"\bottomrule", r"\end{%s}" % env, r"\end{table*}", ""]
     return out
 
 
@@ -139,6 +145,7 @@ PREAMBLE = r"""\documentclass[journal,twocolumn]{IEEEtran}
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{array}
+\usepackage{tabularx}
 \usepackage{textcomp}
 \usepackage{xcolor}
 \usepackage{url}
