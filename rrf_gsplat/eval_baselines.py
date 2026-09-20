@@ -89,6 +89,8 @@ def main():
     ap.add_argument("--multi", required=True); ap.add_argument("--truth", required=True)
     ap.add_argument("--out", default=None)
     ap.add_argument("--subset-mode", choices=["route", "fps"], default="route")
+    ap.add_argument("--layout", default=None, help="scene layout.json (scene 2): also report every method per space class "
+                                                   "(corridor / room / hall) of the held-out receiver, on the same pixels")
     ap.add_argument("--max-train-views", type=int, default=None,
                     help="use the same training subset as train_rrf --max-train-views (whole positions, the trainer's rule)")
     cfg = ap.parse_args()
@@ -132,14 +134,14 @@ def main():
     methods = ("constant", "nearest", "interp2", "rrf")
     err = {m: {"az": [], "zen": [], "delay": []} for m in methods}
     hits = {m: {a: {k: [] for k in (1, 3, 5)} for a in ARRAYS} for m in methods}
-    weights, nn_dist, n_pix = [], [], 0
+    weights, nn_dist, n_pix, view_rx = [], [], 0, []
     for n in test:
         truth = load(n); rx, y = poses[n]
         mask = (truth[0] - lo0) / (hi0 - lo0) > 0.02
         if not mask.any():
             continue
         d = np.linalg.norm(tpos[y] - rx, axis=1); order = np.argsort(d)[:2]
-        nn_dist.append(float(d[order[0]]))
+        nn_dist.append(float(d[order[0]])); view_rx.append(np.asarray(rx, float))
         near = load(tnames[y][order[0]]); second = load(tnames[y][order[1]])
         w1, w2 = 1.0 / max(d[order[0]], 1e-6), 1.0 / max(d[order[1]], 1e-6)
         interp = (w1 * near + w2 * second) / (w1 + w2)
@@ -182,6 +184,35 @@ def main():
                 h = np.concatenate(hits[m][a][k]); r[f"top{k}"] = float(h.mean()); r[f"top{k}_pw"] = float((w * h).sum())
             out["topk"][a][m] = r
             print(f"    {m:8s} top-1 {r['top1']:.3f} | {r['top1_pw']:.3f}   top-3 {r['top3']:.3f} | {r['top3_pw']:.3f}   top-5 {r['top5']:.3f} | {r['top5_pw']:.3f}")
+    if cfg.layout:
+        # the same errors split by the space class of the held-out receiver (corridor / room / hall), so a
+        # crossover can be read per propagation regime; a jittered position outside every box goes to the nearest one
+        spaces = json.load(open(cfg.layout))["spaces"]
+        def space_of(rx):
+            for s in spaces:
+                if s["x0"] - 0.3 <= rx[0] <= s["x1"] + 0.3 and s["y0"] - 0.3 <= rx[1] <= s["y1"] + 0.3:
+                    return s["name"]
+            c = [((rx[0] - (s["x0"] + s["x1"]) / 2) ** 2 + (rx[1] - (s["y0"] + s["y1"]) / 2) ** 2, s["name"]) for s in spaces]
+            return min(c)[1]
+        cls = ["room" if space_of(rx).startswith("room") else space_of(rx) for rx in view_rx]
+        out["by_space"] = {}
+        print("\nby space class of the held-out receiver (median / P90 / RMSE):")
+        for c in sorted(set(cls)):
+            idx = [i for i, k in enumerate(cls) if k == c]
+            wc = np.concatenate([weights[i] for i in idx]); wc = wc / wc.sum()
+            grp = {"views": len(idx), "nearest_train_distance_m": {"median": float(np.median([nn_dist[i] for i in idx])),
+                                                                   "p90": float(np.percentile([nn_dist[i] for i in idx], 90))}, "errors": {}}
+            for m in methods:
+                grp["errors"][m] = {}
+                for q in ("az", "zen", "delay"):
+                    e = np.concatenate([err[m][q][i] for i in idx]); order = np.argsort(e); cw = np.cumsum(wc[order])
+                    grp["errors"][m][q] = {"median": float(np.median(e)), "p90": float(np.percentile(e, 90)), "rmse": float(np.sqrt((e ** 2).mean())),
+                                           "median_pw": float(e[order][np.searchsorted(cw, 0.5)])}
+            out["by_space"][c] = grp
+            f = lambda m, q: f"{grp['errors'][m][q]['median']:.2f}/{grp['errors'][m][q]['p90']:.1f}"
+            print(f"  {c:9s} {len(idx):4d} views, nearest {grp['nearest_train_distance_m']['median']:.2f} m: "
+                  f"az copy {f('nearest', 'az')} field {f('rrf', 'az')} | zen copy {f('nearest', 'zen')} field {f('rrf', 'zen')} | "
+                  f"delay copy {f('nearest', 'delay')} field {f('rrf', 'delay')}")
     json.dump(out, open(cfg.out or os.path.join(cfg.multi, "baselines.json"), "w"), indent=1)
 
 
