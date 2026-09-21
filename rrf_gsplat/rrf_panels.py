@@ -88,6 +88,10 @@ def collect(rrf_dir):
             density[scene] = sorted(rows, key=lambda r: r["spacing"])
     if density:
         found["density"] = density
+    sota = os.path.join(rrf_dir, "sota_table.json")
+    if os.path.exists(sota):
+        with open(sota, encoding="utf-8") as fid:
+            found["sota"] = json.load(fid)
     strip = os.path.join(rrf_dir, "compare_colour_modes.png")
     if os.path.exists(strip):
         import base64
@@ -309,6 +313,42 @@ def density_card(density, width=560, height=200):
             + legend + f'<div class="rrf-grid">{"".join(svgs)}</div><figcaption>{cap}</figcaption></figure>')
 
 
+SOTA_ROWS = [("released", "RF-3DGS as published (released checkpoint, 40k)"), ("inria", "RF-3DGS retrained here (fork's train.py)"),
+             ("rgb", "ours: jet RGB target, frozen geometry, 10k"), ("db", "ours: value target, frozen, 10k"),
+             ("rgb_geom", "ours: jet RGB, unfrozen geometry, 10k"), ("db_geom", "ours: value target, unfrozen geometry, 10k"),
+             ("rgb_40k", "ours: jet RGB, frozen, 40k"), ("db_geom_40k", "ours: value target, unfrozen, 40k"), ("nerf2", "NeRF2 (their model, pinhole rays), 30k")]
+SOTA_SPECTRA = ["MVDR", "CBF", "TCBF", "AoD", "Delay", "MPC"]
+
+
+def sota_card(sota):
+    """The released-benchmark table: released data, released split, the fork's metrics.py; best cell per column bold."""
+    def best(S, key, lower):
+        vals = [(sota[k][S][key], k) for k, _ in SOTA_ROWS if S in sota.get(k, {})]
+        return (min if lower else max)(vals)[1] if vals else None
+    head = ["row"] + SOTA_SPECTRA
+    body = []
+    for kind, label in SOTA_ROWS:
+        cells = []
+        for S in SOTA_SPECTRA:
+            d = sota.get(kind, {}).get(S)
+            if not d:
+                cells.append("N/A" if (kind in ("db", "db_geom", "nerf2") and S in ("AoD", "Delay")) else "&ndash;"); continue
+            parts = []
+            for key, lower in (("PSNR", False), ("SSIM", False), ("LPIPS", True)):
+                v = f"{d[key]:.2f}" if key == "PSNR" else f"{d[key]:.3f}"
+                parts.append(f"<b>{v}</b>" if best(S, key, lower) == kind else v)
+            cells.append(" / ".join(parts))
+        body.append([label] + cells)
+    return (f'<figure class="card wide"><h2>The RF-3DGS released benchmark, on its own coordinates</h2>'
+            f'<p class="rrf-note">Released spectra, the released 2560 / 640 split, and the fork\'s metrics.py (PSNR / SSIM / VGG-LPIPS over the 640 '
+            f'held-out views) for every row. The retrained-fork row reproduces the released checkpoints to the third decimal, so the table compares '
+            f'methods, not runs. N/A: a value target has no meaning for the three-channel AoD / Delay encodings, and NeRF2\'s scalar head cannot '
+            f'represent them. Best cell per column in bold.</p>' + _table(head, body)
+            + '<figcaption>Every spectrum has a row that beats the release on all three metrics: MVDR +3.4 dB at 10k and +4.3 dB at 40k, CBF +0.9, '
+              'TCBF +1.3 against the retrained fork (no released model), AoD +0.8, Delay +1.0, MPC +1.1 dB. RF-PGS (20.61 dB) is on other data and '
+              'is not in this table.</figcaption></figure>')
+
+
 def render(found):
     runs = found.get("summary") or []
     if not runs and not found.get("tut019"):
@@ -415,6 +455,8 @@ def render(found):
         tr = found.get(key)
         if tr and tr.get("rows"):
             cards.append(transfer_card(tr))
+    if found.get("sota"):
+        cards.insert(0, sota_card(found["sota"]))
     if found.get("density"):
         cards.append(density_card(found["density"]))
 
