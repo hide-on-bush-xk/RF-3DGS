@@ -13,3 +13,6 @@ sionna_tutorial/
 scene2/visual_dataset/
 scene2/visual_dataset_*/
 scene2/visual_trained*/
+
+# competitor code for the SOTA comparison (their repositories, not ours)
+third_party/

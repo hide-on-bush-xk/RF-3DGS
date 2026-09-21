@@ -1705,3 +1705,27 @@ Delay 图:R = 10log10(Σ amp·delay_norm) + 150,G = B = 10log10(Σ amp) + 150,de
 - 中位数不可比:发布编码把 dB 存成 uint8,1 dB 一格,R−B 只有 14 个可能值,模型"完全命中格子"的像素超过一半 → 中位 0。**尾巴可比**:P90 37° / 74°、RMSE 32° / 49°,是我们场的 3–13 倍。
 - 坐标共享但数据不完全相同(发布数据 2.4 GHz、教程材料、按视角采样;我们 2.4 GHz 教程材料修正版、按位置采样)。要真正同坐标,round 22 用 `--poses-from` 在发布位姿上生成 MULTI(E4 设置)再训。
 - 计时说明:round 21 的门在我的 `render.py` 作业收尾时放行,`inria_MVDR` 的 wall-clock 非独占,**作废**,队列末尾重测;质量数不受影响。
+
+### A2. round 21 的一个无效行(先记后跑完)
+
+发布的 AoD 与 Delay 图是**三通道编码**(R/G/B 各是一个物理量的 dB),不是 jet 伪彩;`--mode db` 对它们做 jet 逆映射得到的"值"没有意义。round 21 的 `sota_AoD_db*`、`sota_Delay_db*` 四行**作废不入表**(队列不能在运行中改脚本,让它跑完丢弃)。
+这两种谱只有 rgb 行(A1/A2/A4);对它们"值域"的正确做法是我们的多通道目标(Track D)。MPC 是 jet + alpha 的四通道 PNG,`convert("RGB")` 后逆映射有效。
+
+### B0. NeRF² 适配器(`rrf_gsplat/nerf2_pinhole.py`,Track B)
+
+- 他们的网络与谱渲染器原样用(`third_party/NeRF2`,MIT);改的只有数据:射线 = 每个接收端位姿的针孔像素射线,Tx 输入 = 固定常数,标签 = 发布 PNG 的 jet 逆映射值 ∈ [0,1]。
+  超参按他们的 `rfid-spectrum.yml`(D 8、W 256、multires 10、64 采样、lr 8e-4、wd 5e-5、batch 8192、余弦 T_max 10000),只把 near/far 从 0/5 m 改成房间的 0.05/20 m。
+- 只对标量谱(CBF、TCBF、MVDR、MPC);AoD/Delay 三通道编码他们的标量头表示不了。
+- WRF-GS(+):固定网关 + 自定义光栅器,要改 Scene/相机才能吃逐视角位姿——排在 NeRF² 之后。
+- 跑之前写的 smoke 判据:(1)`--overfit-one` 300 步,同一张图 PSNR(jet) > 20(射线与像素对应正确);(2)4 张留出图评估 + `inria_metrics.py --allow-partial` 跑通;(3)loss 单调下降。
+
+### B1. NeRF² 适配器 smoke(卡与 round 21 共享,只看质量)
+
+| 判据 | 结果 |
+| --- | --- |
+| (1)`--overfit-one` 300 步,同一张图 PSNR(jet) > 20 | **26.17 dB**,通过(射线 = 像素对应正确) |
+| (2)4 张留出图 + `inria_metrics.py` | metrics.py 15.8412 / 0.7453 / 0.4384;适配器内部 PSNR 15.84,通过 |
+| (3)loss 单调下降 | 0.0144 → 0.0088 → 0.0066,通过 |
+
+- 速度:共享卡上 1.5–1.9 it/s(batch 8192 射线 × 64 采样);30k 步 ≈ 4 h / 谱,四种标量谱是一个过夜队列(round 22,排在 round 21 之后)。按他们的默认 30k 步跑 MVDR;其余按同一步数,独占卡上重测速度。
+- 加了 `einops` 到 WSL `rf-gsplat` 环境(他们的 model.py 依赖)。
