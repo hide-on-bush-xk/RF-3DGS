@@ -22,7 +22,7 @@ gpu_busy() {
   tasklist 2>/dev/null | grep -qi "Against the Storm" && return 0
   u=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | tr -d ' \r'); [ "${u:-100}" -ge 15 ]
 }
-until grep -aq "== all done" output/rrf/win_round21.log 2>/dev/null; do sleep 30; done
+until grep -aq "== all done" output/rrf/win_round21b.log 2>/dev/null; do sleep 30; done
 quiet=0; while [ $quiet -lt 24 ]; do if gpu_busy; then quiet=0; else quiet=$((quiet+1)); fi; sleep 5; done
 stamp "start (gpu $(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader | tr -d '\r'))"
 

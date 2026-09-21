@@ -125,6 +125,7 @@ def load_views(source, names, views, device, want_float):
     from PIL import Image
     rgb, flt, viewmats, Ks = [], [], [], []
     have_float = want_float and os.path.isdir(os.path.join(source, "spectra_float"))
+    width = height = None
     for n in names:
         img = np.array(Image.open(os.path.join(source, "images", n + ".png")).convert("RGB"))
         rgb.append(torch.from_numpy(img).permute(2, 0, 1))
@@ -132,10 +133,18 @@ def load_views(source, names, views, device, want_float):
             flt.append(torch.from_numpy(np.load(os.path.join(source, "spectra_float", n + ".npy"))
                                         .astype(np.float16)))
         view, K, w, h = views[n + ".png"]
-        viewmats.append(torch.from_numpy(view)); Ks.append(torch.from_numpy(K))
+        ih, iw = img.shape[:2]
+        if (iw, ih) != (w, h):
+            # the released AoD / Delay pictures are 231 x 154 under a 300 x 200 camera: like INRIA's loader
+            # (resolution -1), the image defines the render size and the intrinsics scale with it
+            K = K.copy(); K[0, :] *= iw / w; K[1, :] *= ih / h; w, h = iw, ih
+        if width is None:
+            width, height = w, h
+        elif (w, h) != (width, height):
+            raise ValueError(f"{n}: image size {w}x{h} differs from the first view's {width}x{height}")
+        viewmats.append(torch.from_numpy(view)); Ks.append(torch.from_numpy(np.ascontiguousarray(K)))
     out = {"rgb": torch.stack(rgb).to(device), "viewmats": torch.stack(viewmats).to(device),
-           "Ks": torch.stack(Ks).to(device), "names": names,
-           "width": views[names[0] + ".png"][2], "height": views[names[0] + ".png"][3]}
+           "Ks": torch.stack(Ks).to(device), "names": names, "width": width, "height": height}
     if have_float:
         out["float"] = torch.stack(flt).to(device)
     return out
