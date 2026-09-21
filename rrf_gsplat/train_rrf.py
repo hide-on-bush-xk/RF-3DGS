@@ -523,6 +523,12 @@ def main():
     t0 = time.time()
     train = load_views(cfg.source, train_names, views, device, want_float=True)
     test = load_views(cfg.source, test_names, views, device, want_float=True)
+    if cfg.mode in ("db", "power") and "float" not in train:
+        # the released RF-3DGS data ship only the jet PNGs: invert the colormap (nearest LUT entry) and train on
+        # that value in [0, 1]. The dB range is unknown, so every dB number of this run is in colour-range units.
+        print("no spectra_float/: the value target is the jet-inverted PNG, in normalised units")
+        for d in (train, test):
+            d["float"] = torch.stack([jet_inverse(d["rgb"][i].float() / 255.0) for i in range(len(d["names"]))]).half()
     print(f"loaded {len(train_names)} train / {len(test_names)} test views in {time.time()-t0:.0f} s; "
           f"float truth: {'yes' if 'float' in test else 'no'}; range {vmin:.1f}..{vmax:.1f} dB")
 

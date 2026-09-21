@@ -128,3 +128,14 @@
 - 指标:**没有报任何 ToF/时延误差**(只有 PSNR/SSIM/LPIPS/波束成形容量)。
 - 位置由此明确:RF-PGS 的 ToF 是"全解析"(需要 Tx 位置 + 射线-表面求交);我们的是 alpha 合成的解析范围项 + 学习的散射时延残差,不需要 Tx 位置和求交,并且报时延误差(中位 0.95 ns,拷贝地板 0.86)。
   "解析 + 残差用到时延上"在 RF-PGS / BiWGS / RxGS 里都没有。
+
+## 验证记录续(2026-09-21,SOTA 对标前的补核;WebFetch 打开 abs 页面 / GitHub 页面)
+
+| 条目 | 打开 | 核到的内容 | 状态 |
+| --- | --- | --- | --- |
+| 2412.04832 WRF-GS | 是:"Neural Representation for Wireless Radiation Field Reconstruction: A 3D Gaussian Splatting Approach",Wen, Tong, Hu, Lin, Zhang;v1 2024-12-06,v4 2025-03-24;INFOCOM 2025 | 摘要 KPI:RSSI 与 CSI 预测,"surpassing existing methods by more than 0.7 dB and 3.36 dB";空间谱合成优于 RT 与其它深度方法;摘要不提 PSNR/SSIM/LPIPS;**代码公开**:github.com/wenchaozheng/WRF-GS,增强版 WRF-GS+ 在 github.com/wenchaozheng/WRF-GSplus | **VERIFIED**(此前标 UNVERIFIED 的 ID 现已核) |
+| 2305.06118 NeRF² | 是:"NeRF2: Neural Radio-Frequency Radiance Fields",Zhao, An, Pan, Yang;MobiCom 2023 Best Paper Runner-Up | 从 Tx 位置预测任意位置的信号(谱 / RSSI / CSI);turbo-learning;**代码 MIT 公开**:github.com/XPengZhao/NeRF2,数据集(RFID 谱、BLE RSSI、MIMO CSI)与预训练模型经 OneDrive 分发 | **VERIFIED** |
+| 2502.01826 GSRF | 是:"GSRF: Complex-Valued 3D Gaussian Splatting for Efficient Radio-Frequency Data Synthesis",Yang, Dong, Ji, Du, Srivastava;v3 2025-11-06 | 复值高斯、正交投影、复值射线追踪;RSSI 合成;摘要无数字、无代码链接 | VERIFIED(摘要级) |
+
+- 这三家(NeRF²、WRF-GS/+、GSRF)与 RxGS、BiWGS 共用 **NeRF² 的公开基准**(RFID 空间谱、BLE RSSI、MIMO CSI):固定网关 + 移动发射端,没有视觉几何。RF-3DGS 的基准是反过来的(固定 Tx + 移动接收端 + 视觉重建的几何)。两条基准之间没有人交叉跑过。
+- RF-PGS(2508.16849):代码 "upon acceptance",数据未公开——在它的坐标上无法对比,只能引用。
