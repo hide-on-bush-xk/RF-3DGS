@@ -196,7 +196,38 @@ def paths_to_response(paths, time_interval_ns: float = 1.0,
     return merge_paths_to_time_grid(a, tau_ns, time_grid)
 
 
-def cbf_spectrum(response: torch.Tensor, grid: ArrayGrid):
+def _beamform(response, weights, variant, chunk=64):
+    """Shared core of CBF and TCBF. Returns the amplitude [H, W].
+
+    variant="asis"   |sum_l a^H x_l|      -- the published implementation: the
+                     delay taps are summed COHERENTLY before beamforming, i.e.
+                     a narrowband receiver looking at the tap-summed channel.
+                     Taps at different phases cancel.
+    variant="fixed"  sqrt(sum_l |a^H x_l|^2) = sqrt(a^H R a), the Bartlett
+                     spectrum with the taps treated as snapshots, matching what
+                     mvdr_spectrum already does with the same data.
+
+    The two agree exactly for a single populated tap, which is why the analytic
+    single-path control holds in both. They diverge as soon as energy lands in
+    more than one tap: two equal paths one tap apart give 0 or 2 M^2 under
+    "asis" depending only on their relative phase, and sqrt(2) M^2 under "fixed".
+
+    The per-tap form is accumulated in chunks: the full [L, H, W] intermediate
+    would be ~680 MB at L = 1400 and 300x200.
+    """
+    if variant == "asis":
+        return torch.einsum("ml,mhw->hw", response.conj(), weights).abs()
+    if variant != "fixed":
+        raise ValueError(f"variant must be 'asis' or 'fixed', not {variant!r}")
+    acc = None
+    for s in range(0, response.shape[1], chunk):
+        per_tap = torch.einsum("ml,mhw->lhw", response[:, s:s + chunk].conj(), weights)
+        p = (per_tap.real ** 2 + per_tap.imag ** 2).sum(0)
+        acc = p if acc is None else acc + p
+    return acc.sqrt()
+
+
+def cbf_spectrum(response: torch.Tensor, grid: ArrayGrid, variant: str = "asis"):
     """Conventional (Bartlett) beamforming spectrum.
 
     response [M**2, L] from `paths_to_response`
@@ -205,21 +236,39 @@ def cbf_spectrum(response: torch.Tensor, grid: ArrayGrid):
     A matched filter: correlate the measured response against the steering
     vector for every direction. Cheap and robust, but its sidelobes are fixed by
     the aperture, which is what TCBF tapers and MVDR adapts away.
+
+    `variant` selects the delay-tap convention; see _beamform. The default
+    reproduces the released implementation exactly.
+
+    Neither variant normalises by the aperture: a single unit path peaks at
+    M**2 rather than 1, a constant +20 log10(M**2) dB offset over the whole
+    image. It cancels under the dataset's global normalisation, but it means
+    the dB values are not absolute path loss.
     """
-    # Sums over elements m and delay taps l at once; no covariance needed.
-    amp = torch.einsum("ml,mhw->hw", response.conj(), grid.steering).abs()
+    amp = _beamform(response, grid.steering, variant)
     # 20 log10 because amp is an amplitude; clamp_min avoids log(0).
     return amp, 20.0 * torch.log10(amp.clamp_min(torch.finfo(amp.dtype).tiny))
 
 
 def mvdr_spectrum(response: torch.Tensor, grid: ArrayGrid,
-                  diagonal_loading: float = 0.0):
+                  diagonal_loading: float = 0.0, variant: str = "asis"):
     """MVDR (Capon) spectrum.
 
     The covariance needs at least M**2 independent delay taps to be invertible;
     the tutorial says as much in a comment and then does not check it. Here a
     rank-deficient covariance raises, and `diagonal_loading` (as a fraction of
     tr(R)/M**2) is the knob for regularising it instead.
+
+    variant="asis"   R = X X^H, the published implementation: the sample
+                     covariance is NOT divided by the number of snapshots.
+    variant="fixed"  R = X X^H / L, the sample covariance as defined.
+
+    This is not a constant offset. P = 1/(a^H R^-1 a), so omitting the 1/L
+    multiplies every value by L -- and L is the view's own delay spread divided
+    by time_interval_ns, which varies from receiver to receiver. Measured on
+    3dgs_MULTI_24ghz_tut (200 views): L runs 250..1420 taps, i.e. at least
+    7.5 dB of view-to-view offset in a dataset that is then normalised with one
+    global range. "fixed" removes that drift.
     """
     m2, taps = response.shape
     if diagonal_loading <= 0 and taps < m2:
@@ -230,8 +279,12 @@ def mvdr_spectrum(response: torch.Tensor, grid: ArrayGrid,
             f"Shorten time_interval_ns or set diagonal_loading."
         )
 
+    if variant not in ("asis", "fixed"):
+        raise ValueError(f"variant must be 'asis' or 'fixed', not {variant!r}")
     # Sample covariance over delay taps, treating each tap as a snapshot.
     R = response @ response.conj().transpose(0, 1)
+    if variant == "fixed":
+        R = R / taps                      # the 1/L the definition carries
     if diagonal_loading > 0:
         # Scaled by the mean diagonal, so the same fraction means the same
         # thing whatever the absolute power level is.
@@ -322,6 +375,13 @@ def _path_arrays(paths, device=None):
     a = a[0, :, 0, 0, :, 0]                       # [ant, path]
     # Amplitudes summed incoherently over elements: these spectra are about
     # where power arrives from, not about array phase.
+    #
+    # Note this is sum_m |a_m|, an amplitude sum, where the array's total power
+    # would be sqrt(sum_m |a_m|^2). With a synthetic array every element sees
+    # the same |a| for a given direction, so the two differ by exactly a factor
+    # M (20 dB at M = 10) for every path alike -- a constant offset that cancels
+    # under the dataset's global normalisation. That is why it gets no variant
+    # switch, unlike the genuinely structural deviations elsewhere in this file.
     amp = a.abs().sum(dim=0) if a.dim() == 2 else a.abs()
     tau = tau.reshape(-1)
 
@@ -341,10 +401,34 @@ def _path_arrays(paths, device=None):
     return out
 
 
-def mpc_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0):
-    """Per-path amplitude splatted at its angle of arrival, in dB."""
+def _splat_weight(amp, variant):
+    """The per-path weight the projection family splats.
+
+    variant="asis"   amp, the published implementation: an AMPLITUDE is splatted
+                     and the result is then read as 10 log10(.), which is the
+                     dB of a power. The two do not agree dimensionally.
+    variant="fixed"  amp**2, so 10 log10 of the splat is a power in dB, and the
+                     ratio channels of the AoD / Delay encodings become
+                     power-weighted means -- the same convention
+                     multichannel_from_arrays already uses.
+    """
+    if variant == "asis":
+        return amp
+    if variant == "fixed":
+        return amp * amp
+    raise ValueError(f"variant must be 'asis' or 'fixed', not {variant!r}")
+
+
+def mpc_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0,
+                          variant: str = "asis"):
+    """Per-path amplitude splatted at its angle of arrival, in dB.
+
+    With variant="fixed" this becomes pixel-for-pixel the power channel of
+    multichannel_spectrum_equirect; with the default it does not, which is the
+    inconsistency between the two encodings in this file.
+    """
     amp, _, theta_r, phi_r, _, _ = _path_arrays(paths)
-    img = equirect_splat(theta_r, phi_r, amp, scale, sigma)[0]
+    img = equirect_splat(theta_r, phi_r, _splat_weight(amp, variant), scale, sigma)[0]
     nonzero = img > 0
     out = torch.full_like(img, float("nan"))
     out[nonzero] = 10 * torch.log10(img[nonzero])
@@ -353,33 +437,45 @@ def mpc_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0):
     return torch.nan_to_num(out, nan=float(floor))
 
 
-def delay_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0):
+def delay_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0,
+                            variant: str = "asis"):
     """Amplitude in green and blue, normalised delay in red, as the tutorial has it.
 
     Note the red channel is delay TIMES amplitude, so it confounds the two: a
     faint late path and a strong early one can produce the same red. The
     multichannel encoding below exists to avoid exactly this.
+
+    `variant` changes the weight the delay is averaged with: the decode is the
+    ratio R/B, so "asis" yields an amplitude-weighted mean delay and "fixed" a
+    power-weighted one. Only the latter matches the delay_ns channel of the
+    multichannel encoding.
     """
     amp, tau, theta_r, phi_r, _, _ = _path_arrays(paths)
+    w = _splat_weight(amp, variant)
     lo, hi = tau.min(), tau.max()
-    r_weight = amp * ((tau - lo) / (hi - lo).clamp_min(1e-30))
-    stacked = torch.stack([r_weight, amp, amp])
+    r_weight = w * ((tau - lo) / (hi - lo).clamp_min(1e-30))
+    stacked = torch.stack([r_weight, w, w])
     img = equirect_splat(theta_r, phi_r, stacked, scale, sigma)
     return _log_rgb(img)
 
 
-def aod_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0):
+def aod_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0,
+                          variant: str = "asis"):
     """Departure zenith in red, departure azimuth in green, amplitude in blue.
 
     Splatted at the angle of ARRIVAL while coloured by the angle of DEPARTURE,
     which is what makes this a picture of where energy went as well as where it
     came back from. Same amplitude-times-angle confound as Delay above.
+
+    `variant` as in delay_spectrum_equirect: it decides whether the decoded
+    departure angles are amplitude-weighted or power-weighted means.
     """
     amp, _, theta_r, phi_r, theta_t, phi_t = _path_arrays(paths)
-    r_weight = amp * (torch.rad2deg(theta_t) / 180.0).clamp(0, 1)
+    w = _splat_weight(amp, variant)
+    r_weight = w * (torch.rad2deg(theta_t) / 180.0).clamp(0, 1)
     # 1 - (...) so the azimuth runs the same way as the image's x axis.
-    g_weight = amp * (1.0 - (torch.rad2deg(phi_t) + 180.0) / 360.0).clamp(0, 1)
-    stacked = torch.stack([r_weight, g_weight, amp])
+    g_weight = w * (1.0 - (torch.rad2deg(phi_t) + 180.0) / 360.0).clamp(0, 1)
+    stacked = torch.stack([r_weight, g_weight, w])
     img = equirect_splat(theta_r, phi_r, stacked, scale, sigma)
     return _log_rgb(img)
 
@@ -511,11 +607,14 @@ def tapering_matrix(M: int, tapering_level: float = 1.0, device=None):
 
 
 def tcbf_spectrum(response: torch.Tensor, grid: "ArrayGrid",
-                  tapering_level: float = 1.0):
-    """CBF with a Hann-tapered weight vector: lower sidelobes, wider main lobe."""
+                  tapering_level: float = 1.0, variant: str = "asis"):
+    """CBF with a Hann-tapered weight vector: lower sidelobes, wider main lobe.
+
+    `variant` is CBF's; the taper is orthogonal to it.
+    """
     taper = tapering_matrix(grid.M, tapering_level,
                             device=grid.steering.device).to(grid.steering.dtype)
     # Identical to cbf_spectrum except for this per-element weighting.
     weights = grid.steering * taper.reshape(-1, 1, 1)
-    amp = torch.einsum("ml,mhw->hw", response.conj(), weights).abs()
+    amp = _beamform(response, weights, variant)
     return amp, 20.0 * torch.log10(amp.clamp_min(torch.finfo(amp.dtype).tiny))
