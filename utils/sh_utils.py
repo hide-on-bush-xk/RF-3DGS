@@ -21,18 +21,28 @@
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
 
+# Real spherical harmonics, hard-coded up to degree 4.
+#
+# In 3DGS each Gaussian carries a set of SH coefficients per channel; evaluating
+# them along the viewing direction is what makes a Gaussian's appearance
+# view-dependent. In RF-3DGS the three "colour" channels carry the encoded radio
+# spatial spectrum rather than RGB, but the machinery below is unchanged.
+#
+# Degree d needs (d + 1)^2 coefficients per channel: 1, 4, 9, 16, 25.
+
 import torch
 
-C0 = 0.28209479177387814
-C1 = 0.4886025119029199
-C2 = [
+# Normalisation constants of the real SH basis, grouped by band.
+C0 = 0.28209479177387814      # band 0 (the constant / DC term), = 1 / (2 * sqrt(pi))
+C1 = 0.4886025119029199       # band 1, shared by all three linear terms
+C2 = [                        # band 2, five terms
     1.0925484305920792,
     -1.0925484305920792,
     0.31539156525252005,
     -1.0925484305920792,
     0.5462742152960396
 ]
-C3 = [
+C3 = [                        # band 3, seven terms
     -0.5900435899266435,
     2.890611442640554,
     -0.4570457994644658,
@@ -41,7 +51,7 @@ C3 = [
     1.445305721320277,
     -0.5900435899266435
 ]
-C4 = [
+C4 = [                        # band 4, nine terms
     2.5033429417967046,
     -1.7701307697799304,
     0.9461746957575601,
@@ -51,7 +61,7 @@ C4 = [
     0.47308734787878004,
     -1.7701307697799304,
     0.6258357354491761,
-]   
+]
 
 
 def eval_sh(deg, sh, dirs):
@@ -66,22 +76,35 @@ def eval_sh(deg, sh, dirs):
         dirs: jnp.ndarray unit directions [..., 3]
     Returns:
         [..., C]
+
+    Each band is added on top of the previous one, so raising `deg` during training
+    (GaussianModel.oneupSHdegree) adds detail without invalidating what was learned
+    at the lower bands. `dirs` must already be normalised; this is not checked.
+
+    Only used when pipe.convert_SHs_python is set. In the default path the CUDA
+    rasteriser evaluates the same basis itself and this function never runs.
     """
     assert deg <= 4 and deg >= 0
     coeff = (deg + 1) ** 2
-    assert sh.shape[-1] >= coeff
+    assert sh.shape[-1] >= coeff    # extra unused coefficients are tolerated
 
+    # Band 0: direction-independent, i.e. the Gaussian's base colour.
     result = C0 * sh[..., 0]
     if deg > 0:
+        # Keep the trailing dim (0:1 rather than 0) so broadcasting against the
+        # [..., C] result works without an extra unsqueeze.
         x, y, z = dirs[..., 0:1], dirs[..., 1:2], dirs[..., 2:3]
+        # Band 1: linear in the direction. Signs follow the real-SH convention.
         result = (result -
                 C1 * y * sh[..., 1] +
                 C1 * z * sh[..., 2] -
                 C1 * x * sh[..., 3])
 
         if deg > 1:
+            # Products reused across the band-2 and band-3 terms below.
             xx, yy, zz = x * x, y * y, z * z
             xy, yz, xz = x * y, y * z, x * z
+            # Band 2: quadratic terms.
             result = (result +
                     C2[0] * xy * sh[..., 4] +
                     C2[1] * yz * sh[..., 5] +
@@ -90,6 +113,8 @@ def eval_sh(deg, sh, dirs):
                     C2[4] * (xx - yy) * sh[..., 8])
 
             if deg > 2:
+                # Band 3: cubic terms. This is the default max degree in 3DGS
+                # (sh_degree=3 -> 16 coefficients per channel).
                 result = (result +
                 C3[0] * y * (3 * xx - yy) * sh[..., 9] +
                 C3[1] * xy * z * sh[..., 10] +
@@ -100,6 +125,7 @@ def eval_sh(deg, sh, dirs):
                 C3[6] * x * (xx - 3 * yy) * sh[..., 15])
 
                 if deg > 3:
+                    # Band 4: supported here but beyond what the rasteriser accepts.
                     result = (result + C4[0] * xy * (xx - yy) * sh[..., 16] +
                             C4[1] * yz * (3 * xx - yy) * sh[..., 17] +
                             C4[2] * xy * (7 * zz - 1) * sh[..., 18] +
@@ -112,7 +138,18 @@ def eval_sh(deg, sh, dirs):
     return result
 
 def RGB2SH(rgb):
+    """Colour in [0, 1] -> the band-0 (DC) SH coefficient that reproduces it.
+
+    The 0.5 offset centres the representation, so a DC coefficient of 0 decodes
+    back to mid-grey. GaussianModel uses this to seed features_dc from the input
+    point cloud's colours.
+    """
     return (rgb - 0.5) / C0
 
 def SH2RGB(sh):
+    """Inverse of RGB2SH: band-0 coefficient -> colour in [0, 1].
+
+    Only exact for the DC term; higher bands contribute the view-dependent part
+    and are ignored here.
+    """
     return sh * C0 + 0.5
