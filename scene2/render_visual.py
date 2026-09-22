@@ -20,21 +20,38 @@ import time
 
 import numpy as np
 
+# The four cardinal yaws the RF spectrum datasets are captured at, so the visual
+# poses line up with them: -90, 0, +90, 180 degrees.
 VIEW_YAWS = (-math.pi / 2, 0.0, math.pi / 2, math.pi)
 
 
 def c2w_from(pos, yaw, pitch=0.0):
     """Camera-to-world in the Blender convention (camera looks down -z, y up),
-    looking along world +x rotated by yaw about z, then pitched."""
+    looking along world +x rotated by yaw about z, then pitched.
+
+    Returns a 4x4 matrix ready to go into transforms_*.json. Note the world is
+    z-up here while the camera frame is y-up, which is why `up_w` is (0, 0, 1)
+    but column 1 of the result is the camera's own up vector.
+    """
+    # Viewing direction on the unit sphere: yaw about world z, then pitch.
     forward = np.array([math.cos(yaw) * math.cos(pitch), math.sin(yaw) * math.cos(pitch), math.sin(pitch)])
     up_w = np.array([0.0, 0.0, 1.0])
+    # Gram-Schmidt against world up gives an orthonormal camera basis. Degenerate
+    # when forward is parallel to world up, i.e. pitch = +/-90 deg; the caller
+    # keeps |pitch| <= 0.35 rad so that never happens.
     right = np.cross(forward, up_w); right /= np.linalg.norm(right)
     up = np.cross(right, forward)
+    # Columns are [right, up, -forward, position]: the -z convention Blender uses.
     m = np.eye(4); m[:3, 0] = right; m[:3, 1] = up; m[:3, 2] = -forward; m[:3, 3] = pos
     return m
 
 
 def main():
+    """Generate poses, render each with Mitsuba, and write the dataset directory.
+
+    Produces transforms_train.json / transforms_test.json, the PNGs under
+    train/ and test/, and points3d.ply for the trainer's initialisation.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--scene", required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--width", type=int, default=1600); ap.add_argument("--height", type=int, default=900)
@@ -43,24 +60,34 @@ def main():
     ap.add_argument("--test-frac", type=float, default=0.05)
     ap.add_argument("--limit", type=int, default=None, help="render only the first N frames (smoke)")
     cfg = ap.parse_args()
+    # Imported late so that --help works without a CUDA-capable Mitsuba present.
     import mitsuba as mi
     mi.set_variant("cuda_ad_rgb")
     from PIL import Image
     layout = json.load(open(os.path.join(cfg.scene, "layout.json")))
-    rx_z = layout["rx_z"]
+    rx_z = layout["rx_z"]                 # receiver height: the route is walked at this z
+    # rx_route.txt is whitespace-separated with the position in millimetres in
+    # columns 1-2; the 4-field check skips headers and blank lines.
     route = [(float(p[1]) / 1000, float(p[2]) / 1000) for p in (l.split() for l in open(os.path.join(cfg.scene, "rx_route.txt"))) if len(p) == 4]
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(0)        # fixed seed: the dataset is reproducible
     poses = []
+    # Part 1 of the pose set: the RF route, four yaws at each sampled position.
     for (x, y) in route[:: cfg.route_every]:
         for yaw in VIEW_YAWS:
             poses.append(c2w_from(np.array([x, y, rx_z]), yaw, 0.0))
     spaces = layout["spaces"]
+    # Part 2: free poses anywhere in the rooms, so ceilings and upper walls get
+    # covered -- the route alone only ever looks horizontally at head height.
     for _ in range(cfg.extra):
         s = spaces[rng.integers(len(spaces))]
+        # Margins keep the camera off the walls (0.5 m), off the floor (1.0 m)
+        # and below the ceiling (0.6 m).
         pos = np.array([rng.uniform(s["x0"] + 0.5, s["x1"] - 0.5), rng.uniform(s["y0"] + 0.5, s["y1"] - 0.5), rng.uniform(layout["floor_z"] + 1.0, layout["ceil_z"] - 0.6)])
         poses.append(c2w_from(pos, rng.uniform(-math.pi, math.pi), rng.uniform(-0.35, 0.35)))
     if cfg.limit:
         poses = poses[: cfg.limit]
+    # Held-out split drawn uniformly at random over all poses, so the test set
+    # contains both route and free views rather than a contiguous block.
     n_test = int(round(cfg.test_frac * len(poses)))
     test_idx = set(rng.permutation(len(poses))[:n_test].tolist())
     os.makedirs(os.path.join(cfg.out, "train"), exist_ok=True); os.makedirs(os.path.join(cfg.out, "test"), exist_ok=True)
@@ -82,11 +109,17 @@ def main():
                                "sampler": {"type": "independent", "sample_count": cfg.spp},
                                "film": {"type": "hdrfilm", "width": cfg.width, "height": cfg.height, "pixel_format": "rgba",
                                         "rfilter": {"type": "gaussian"}}})
+        # seed=i makes each frame's Monte-Carlo noise independent but reproducible.
         img = mi.render(scene, sensor=sensor, spp=cfg.spp, seed=i)
+        # HDR -> 8-bit sRGB RGBA, which is what the trainer's Blender reader expects.
         rgba = np.clip(np.asarray(mi.Bitmap(img).convert(mi.Bitmap.PixelFormat.RGBA, mi.Struct.Type.UInt8, srgb_gamma=True)), 0, 255)
         split = "test" if i in test_idx else "train"
+        # Numbering is global across both splits, so indices are never reused.
         name = f"{split}/{i:04d}.png"
         Image.fromarray(rgba).save(os.path.join(cfg.out, name))
+        # NOTE: the *unflipped* c2w is recorded. The flip above is Mitsuba's
+        # convention only; the json must stay in Blender's, which is what the
+        # trainer reads.
         frames[split].append({"file_path": name, "transform_matrix": c2w.tolist()})   # with extension, as the lobby's json has it
         if i % 50 == 0:
             print(f"  {i}/{len(poses)} frames, {time.time() - t0:.0f} s")
@@ -96,13 +129,20 @@ def main():
     # points3d.ply: surface samples with their texture tint (the trainer's initial Gaussians)
     from make_corridor import box
     pts, cols = [], []
+    # Flat per-class colours; the scene has no textures, so one tint per surface
+    # class is all the initialisation needs.
     tint = {"wall": (190, 184, 166), "floor": (115, 107, 102), "ceiling": (217, 217, 209)}
     for name, cls, b in layout["pieces"]:
         verts, _, tris = box(*b)
         v = np.array(verts)
         for a, bb, c in tris:
+            # Area-proportional sampling at 40 points per square metre, so large
+            # walls get more initial Gaussians than small ones.
             area = 0.5 * np.linalg.norm(np.cross(v[bb] - v[a], v[c] - v[a]))
             n = max(1, int(area * 40))
+            # Uniform barycentric sampling of a triangle: sqrt on the first
+            # variate is what makes the density uniform rather than clustered at
+            # the first vertex.
             r1, r2 = rng.random(n), rng.random(n); s = np.sqrt(r1)
             p = (1 - s)[:, None] * v[a] + (s * (1 - r2))[:, None] * v[bb] + (s * r2)[:, None] * v[c]
             pts.append(p); cols.append(np.tile(np.array(tint[cls], np.uint8), (n, 1)))
@@ -111,6 +151,8 @@ def main():
         # the trainer's fetchPly wants x y z nx ny nz red green blue (it silently falls back to None otherwise)
         f.write(f"ply\nformat ascii 1.0\nelement vertex {len(pts)}\nproperty float x\nproperty float y\nproperty float z\n"
                 "property float nx\nproperty float ny\nproperty float nz\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n")
+        # Normals are written as zeros: fetchPly requires the fields to exist but
+        # 3DGS never reads their values.
         for p, c in zip(pts, cols):
             f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} 0 0 0 {c[0]} {c[1]} {c[2]}\n")
     print(f"{len(frames['train'])} train + {len(frames['test'])} test frames, {len(pts):,} initial points, {time.time() - t0:.0f} s -> {cfg.out}")
