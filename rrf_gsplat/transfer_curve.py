@@ -9,6 +9,9 @@ d_c, least squares on b0), and d_c is the correlation length of the
 adaptation. A negative benefit (worse than the visual geometry) is kept as
 is; the fit treats it as data.
 
+Keeping negative points matters: discarding them would guarantee a decaying
+curve whatever the data said.
+
     PYTHONUTF8=1 python rrf_gsplat/transfer_curve.py
 """
 
@@ -29,6 +32,7 @@ SOURCES.update({n: (f"t_txB_geom{n}_frozen", f"3dgs_MVDR_tx{n}") for n in "DENLO
 
 
 def _final(run):
+    """A run's final metrics, or None if that run has not been done."""
     p = os.path.join(OUT, run, "results.json")
     if not os.path.exists(p):
         return None
@@ -36,6 +40,7 @@ def _final(run):
 
 
 def main():
+    """Assemble the curve, fit both models, bootstrap, and test the zone reading."""
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--tag", default="", help="transfer budget suffix of the runs, e.g. 2k (t_txB_geomX_frozen_2k, t_txB_cold_2k)")
@@ -48,6 +53,8 @@ def main():
     for name, (run, ds) in SOURCES.items():
         f = _final(run + suf)
         meta = os.path.join(REG, ds, "generation_meta.json")
+        # Both the run and its source dataset must exist; a missing one is
+        # skipped rather than guessed at.
         if f is None or not os.path.exists(meta):
             continue
         tx = np.array(json.load(open(meta))["tx_loc"], dtype=float)
@@ -58,12 +65,16 @@ def main():
     out = {"tx_b": TX_B.tolist(), "transfer_budget": cfg.tag or "10k", "cold": cold, "own_unfrozen": own, "rows": rows}
     if cold is None or not rows:
         print(f"no rows for tag '{cfg.tag}'"); return
+    # Both references framed first: cold is the floor a transfer must beat,
+    # own-unfrozen is the ceiling it cannot exceed.
     print(f"Tx-B references: visual geometry frozen {cold['rmse_db_in_range']:.2f} dB in range; own geometry unfrozen {own['rmse_db_in_range']:.2f} dB")
     print(f"{'src':>3} {'tx':>22} {'d to B':>7} {'in-range':>9} {'benefit':>8} {'PSNR':>6}")
     for r in rows:
         print(f"{r['source']:>3} {str(r['tx']):>22} {r['distance_m']:7.2f} {r['rmse_in_range']:9.2f} {r['benefit_db']:+8.2f} {r['psnr']:6.2f}")
     if len(rows) >= 4 and cold:
         d = np.array([r["distance_m"] for r in rows]); b = np.array([r["benefit_db"] for r in rows])
+        # Model 1: pure decay through the origin. d_c is non-linear so it is
+        # grid-searched; b0 then has a closed form at each d_c.
         best = None
         for dc in np.linspace(0.25, 40.0, 1600):
             e = np.exp(-d / dc)
@@ -73,6 +84,8 @@ def main():
                 best = (dc, b0, sse)
         dc, b0, sse = best
         # also a constant-offset variant: b(d) = b0 exp(-d/dc) + c (c = the far-field benefit, may be negative)
+        # Fitted because the pure-decay model forces the benefit to zero at
+        # infinity, which is an assumption rather than an observation.
         best2 = None
         for dc2 in np.linspace(0.25, 40.0, 1600):
             e = np.exp(-d / dc2); A = np.stack([e, np.ones_like(e)], 1)
@@ -87,10 +100,16 @@ def main():
         print(f"fit b(d) = b0 exp(-d/d_c): d_c = {dc:.2f} m, b0 = {b0:.2f} dB, R^2 = {out['fit']['r2']:.2f}; "
               f"with offset: d_c = {best2[0]:.2f} m, b0 = {best2[1]:.2f}, c = {best2[2]:+.2f} dB, R^2 = {out['fit']['with_offset']['r2']:.2f}")
         # bootstrap (resample the points with replacement) for the offset model's d_c and c
+        # With ten points a single fitted d_c means little; the interval is the
+        # honest statement. share_d_c_at_grid_max is the key diagnostic: if most
+        # resamples hit the grid ceiling, no decay length was resolved at all
+        # and quoting one would be overclaiming.
         rng = np.random.default_rng(0); dcs, cs = [], []
         grid = np.linspace(0.25, 40.0, 320)
         for _ in range(1000):
             idx = rng.integers(0, len(d), len(d))
+            # A resample with fewer than four distinct points cannot support a
+            # two-parameter fit, so it is dropped.
             if len(set(idx.tolist())) < 4:
                 continue
             db, bb = d[idx], b[idx]; bestb = None
@@ -109,11 +128,15 @@ def main():
               f"({bs['share_d_c_at_grid_max']:.0%} of resamples hit the 40 m grid limit, i.e. no decay resolved); "
               f"plateau c median {bs['c_median']:+.2f} dB, 90% [{bs['c_p5']:+.2f}, {bs['c_p95']:+.2f}]")
         # the binary reading: same side of the lobby as Tx-B (x >= 5) against the rest
+        # A rival explanation to distance: if the two groups separate cleanly,
+        # topology explains the curve better than a smooth decay does.
         east = np.array([r["tx"][0] >= 5.0 for r in rows])
         out["zones"] = {"east_sources": [r["source"] for r, e in zip(rows, east) if e], "east_benefit": b[east].round(3).tolist(),
                         "other_benefit": b[~east].round(3).tolist(), "east_mean": float(b[east].mean()), "other_mean": float(b[~east].mean()),
                         "east_min": float(b[east].min()), "other_max": float(b[~east].max())}
         z = out["zones"]
+        # min of one group against max of the other: if they do not overlap, the
+        # separation needs no test statistic.
         print(f"zones: east side (x >= 5) {z['east_sources']} benefit {z['east_benefit']} (mean {z['east_mean']:+.2f}, min {z['east_min']:+.2f}); "
               f"other {z['other_benefit']} (mean {z['other_mean']:+.2f}, max {z['other_max']:+.2f})")
     else:

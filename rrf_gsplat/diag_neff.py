@@ -29,23 +29,27 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def main():
+    """Estimate the N_eff distribution for each run and report its quantiles."""
     from train_rrf import RRF, ensure_split, read_colmap_text
     from gsplat import rasterization
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", nargs="+", default=["e2_mvdr_db", "a_mvdr_db_geom"])
     ap.add_argument("--source", default=os.path.join(REPO, "RF-3DGS_dataset/regenerated/3dgs_MVDR_100_gpct"))
     ap.add_argument("--views", type=int, default=20)
+    # channels x draws is the sample count per pixel; 256 x 4 gives ~4 % error.
     ap.add_argument("--channels", type=int, default=256)
     ap.add_argument("--draws", type=int, default=4)
     cfg = ap.parse_args()
     dev = torch.device("cuda")
-    torch.manual_seed(0)
+    torch.manual_seed(0)              # the Rademacher draws are reproducible
     views = read_colmap_text(os.path.join(cfg.source, "sparse", "0"))
     _, test = ensure_split(cfg.source)
     names = test[:: max(1, len(test) // cfg.views)][: cfg.views]
     out = {}
     for run in cfg.runs:
         rdir = os.path.join(REPO, "output/rrf", run)
+        # The run's own config decides the mode and channel count, so a db run
+        # and an rgb run are each reconstructed as they were trained.
         rc = json.load(open(os.path.join(rdir, "results.json")))["config"]
         model = RRF(rc["checkpoint"], rc["mode"], 1 if rc["mode"] in ("db", "power") else 3, rc["sh_degree"], dev)
         model.load_state(torch.load(os.path.join(rdir, "rrf_state.pt"), map_location=dev))
@@ -57,6 +61,9 @@ def main():
                 viewmat, Km = torch.from_numpy(view).to(dev), torch.from_numpy(K).to(dev)
                 s2 = None
                 for _ in range(cfg.draws):
+                    # +-1 per Gaussian per channel. Rendering these as colours
+                    # makes each output channel an independent estimate of
+                    # sum w_i c_i, whose mean square is sum w_i^2.
                     r = (torch.randint(0, 2, (n, cfg.channels), device=dev) * 2 - 1).float()
                     img, alpha, _ = rasterization(model.means, model.quats, model.scales, model.opacities, r,
                                                   viewmat[None], Km[None], w, h, sh_degree=None,
@@ -66,10 +73,15 @@ def main():
                 s2 = s2 / cfg.draws
                 a = alpha[0, ..., 0]                                            # sum w_i
                 neff = a ** 2 / s2.clamp_min(1e-12)
+                # Only confident pixels: N_eff where alpha is near zero is a
+                # ratio of two noise estimates.
                 neff_all.append(neff[a > 0.5])
                 alpha_mean.append(float(a.mean()))
         ne = torch.cat(neff_all)
         q = torch.quantile(ne, torch.tensor([0.1, 0.5, 0.9], device=dev))
+        # share_neff_lt_1_5 is the number the section turns on: near 1 means
+        # dB and linear compositing cannot differ much, so the choice of domain
+        # is not what explains a discrepancy.
         out[run] = {"gaussians": n, "views": len(names), "pixels_alpha_gt_0.5": int(ne.numel()),
                     "share_pixels_alpha_gt_0.5": float(ne.numel() / (len(names) * w * h)),
                     "mean_alpha": float(sum(alpha_mean) / len(alpha_mean)),

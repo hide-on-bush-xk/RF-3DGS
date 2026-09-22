@@ -29,6 +29,7 @@ import numpy as np
 
 
 def main():
+    """Recompute the PNGs under the chosen range; share everything else."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("source")
@@ -50,14 +51,19 @@ def main():
 
     if cfg.norm.startswith("global"):
         if cfg.range:
-            vmin, vmax = cfg.range
+            vmin, vmax = cfg.range                # explicit wins over any computation
         elif cfg.norm == "global-minmax":
+            # Streamed, so the whole dataset never has to be in memory at once.
             vmin, vmax = np.inf, -np.inf
             for n in names:
                 a = np.load(os.path.join(src_float, n + ".npy"))
                 vmin, vmax = min(vmin, float(a.min())), max(vmax, float(a.max()))
         else:
             # percentiles over a subsample of pixels from every image
+            # 2000 pixels per image rather than all of them: the percentiles of
+            # a large uniform sample are accurate enough, and this keeps the
+            # pool small. Every image contributes equally, so a single extreme
+            # view cannot set the range.
             rng = np.random.default_rng(0)
             pool = []
             for n in names:
@@ -73,6 +79,8 @@ def main():
             lo, hi = float(a.min()), float(a.max())
         else:
             lo, hi = vmin, vmax
+        # Recorded for every image regardless of mode, so the CSV below always
+        # describes what was actually applied.
         ranges.append((n, lo, hi))
         norm = np.clip((a - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
         rgb = (jet(norm)[..., :3] * 255).round().astype(np.uint8)
@@ -92,10 +100,13 @@ def main():
             if cfg.copy_float:
                 shutil.copy(s, d)
             else:
+                # Hard links fail across volumes; a copy is the fallback.
                 try:
                     os.link(s, d)
                 except OSError:
                     shutil.copy(s, d)
+    # The split travels with the dataset, so a renormalised sibling is scored on
+    # exactly the same held-out views.
     for idx in ("train_index.txt", "test_index.txt"):
         p = os.path.join(cfg.source, idx)
         if os.path.exists(p):
@@ -107,6 +118,9 @@ def main():
     if cfg.norm.startswith("global"):
         meta.update(spec_min_db=vmin, spec_max_db=vmax)
     else:
+        # There is no single range in per-view mode. The mean is recorded only
+        # so the fields exist, and the note says not to trust it; the CSV is the
+        # real record, and it is what an oracle needs to restore absolute level.
         meta.update(spec_min_db=float(np.mean([r[1] for r in ranges])),
                     spec_max_db=float(np.mean([r[2] for r in ranges])),
                     note="per-view: spec_min/max are the mean per-image range; see per_view_ranges.csv")
