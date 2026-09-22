@@ -9,6 +9,10 @@ the multi-channel setting and prints the AoA elevation histogram, by path
 count and by power, plus the nearest-neighbour spacing of paths along
 azimuth and along zenith.
 
+The spacing measurement is the decisive one: if azimuth neighbours really are
+closer together than zenith neighbours, the kernel preference follows directly
+and needs no further explanation.
+
     PYTHONUTF8=1 python rrf_gsplat/diag_aoa_elevation.py
 """
 
@@ -25,6 +29,7 @@ sys.path.insert(0, os.path.join(REPO, "sionna_port"))
 
 
 def main():
+    """Solve a dozen route positions and report elevation and angular spacing."""
     import mitsuba as mi
     mi.set_variant("cuda_ad_mono_polarized")
     from sionna.rt import PathSolver, Receiver, Transmitter
@@ -32,10 +37,14 @@ def main():
     from rf_spectra import _path_arrays
     xml = os.path.join(REPO, "sionna_tutorial/RF-3DGS_Sionna_simulation_tutorial/NIST_lobby_v1.0/NIST_lobby_V1.1_sionna12.xml")
     route = os.path.join(REPO, "sionna_tutorial/RF-3DGS_Sionna_simulation_tutorial/NIST_rx_loc.txt")
+    # The exact settings of the dataset this diagnoses: 2.4 GHz, tutorial materials.
     cfg = Config(scene_xml=xml, rx_loc_file=route, out_dir="", spectrum="MULTI", frequency=2.4e9, materials="tutorial", dashboard=False)
     scene = build_scene(cfg); scene.add(Transmitter(name="tx", position=list(cfg.tx_loc))); solver = PathSolver()
     groups = read_pose_groups(os.path.join(REPO, "RF-3DGS_dataset/regenerated/3dgs_MVDR_100/sparse/0/images.txt"))
+    # Twelve positions spread evenly along the route, not the first twelve,
+    # which would all sit in one corner.
     positions = [groups[i][0] for i in range(0, len(groups), len(groups) // 12)][:12]
+    # Uneven bins, finer near the horizon where the paths are expected to be.
     edges = np.array([-90, -60, -45, -34, -25, -15, -5, 5, 15, 25, 34, 45, 60, 90], float)
     cnt, pw = np.zeros(len(edges) - 1), np.zeros(len(edges) - 1)
     spacing = {"az": [], "zen": []}
@@ -45,25 +54,36 @@ def main():
         scene.add(Receiver(name="rx", position=[float(v) for v in pos]))
         paths = solve_paths(solver, scene, cfg, view_index=k)
         amp, tau, th_r, ph_r, _, _ = (t.cpu().numpy() for t in _path_arrays(paths))
+        # Elevation from zenith, so 0 is the horizontal plane.
         el = 90.0 - np.degrees(th_r); p = amp ** 2
         c, _ = np.histogram(el, edges); w, _ = np.histogram(el, edges, weights=p)
+        # Counts accumulate raw; power is normalised per position first, so a
+        # strongly lit position cannot dominate the power histogram.
         cnt += c; pw += w / p.sum()
         # nearest-neighbour spacing of the strongest 2000 paths, along each axis, on the equirect grid (deg)
         top = np.argsort(p)[-2000:]
         az_d, ze_d = np.degrees(ph_r[top]), np.degrees(th_r[top])
         for key, a, b in (("az", az_d, ze_d), ("zen", ze_d, az_d)):
+            # "Neighbour" means within 1 degree on the OTHER axis: the question
+            # is how close paths get along one axis at a comparable position on
+            # the other, which is what a splat kernel has to separate.
             same = np.abs(b[:, None] - b[None]) < 1.0                 # neighbours in the other coordinate
+            # inf for non-neighbours and for the diagonal, so min() picks the
+            # nearest genuine neighbour and points with none give inf.
             da = np.abs(a[:, None] - a[None]); da[~same] = np.inf; np.fill_diagonal(da, np.inf)
             nn = da.min(1); spacing[key].append(nn[np.isfinite(nn)])
     cnt /= cnt.sum(); pw /= len(positions)
     print("AoA elevation histogram over 12 positions (share of paths / share of power):")
     for i in range(len(edges) - 1):
         print(f"  [{edges[i]:4.0f}, {edges[i+1]:4.0f}) deg: {cnt[i]:6.1%} / {pw[i]:6.1%}")
+    # Only bins wholly inside the limit are summed, so these are lower bounds.
     within = lambda lim: float(pw[(edges[:-1] >= -lim) & (edges[1:] <= lim)].sum())
     print(f"power within +-25 deg: {within(25):.1%}; within +-34 deg: {within(34):.1%}; within +-15 deg: {within(15):.1%}")
     out = {"edges_deg": edges.tolist(), "share_paths": cnt.round(4).tolist(), "share_power": pw.round(4).tolist()}
     for key in ("az", "zen"):
         s = np.concatenate(spacing[key])
+        # share_lt_1deg is the crowding figure the hypothesis predicts will
+        # differ between the two axes.
         out[f"nn_spacing_{key}_deg"] = {"median": float(np.median(s)), "p10": float(np.percentile(s, 10)), "share_lt_1deg": float((s < 1).mean())}
         print(f"nearest-neighbour spacing along {key} among the 2000 strongest paths (within 1 deg in the other axis): "
               f"median {np.median(s):.2f} deg, P10 {np.percentile(s, 10):.2f}, share < 1 deg {(s < 1).mean():.1%}")

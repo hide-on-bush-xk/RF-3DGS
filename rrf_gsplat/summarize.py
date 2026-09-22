@@ -12,17 +12,23 @@ import os
 
 
 def time_to(history, key, threshold, higher=True):
-    """Seconds until the running eval first crosses `threshold`, or None."""
+    """Seconds until the running eval first crosses `threshold`, or None.
+
+    Time-to-quality rather than final quality: two runs can end at the same
+    score having taken very different paths there, and for a method that claims
+    speed the path is the claim.
+    """
     for h in history:
         v = h.get(key)
         if v is None:
             continue
         if (v >= threshold) if higher else (v <= threshold):
             return h["seconds"], h["iteration"]
-    return None, None
+    return None, None                     # never reached the threshold
 
 
 def main():
+    """Walk every run directory, build the row set, print markdown and save JSON."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output", "rrf"))
     ap.add_argument("--out", default=None)
@@ -42,21 +48,31 @@ def main():
             "source": os.path.basename(c["source"].rstrip("/")),
             "mode": c["mode"], "sh_degree": c["sh_degree"],
             "iterations": c["iterations"], "n_train": r["n_train"],
+            # The two things a reader needs to interpret an RF-3DGS run: whether
+            # opacity moved and whether the geometry did.
             "opacity": "frozen" if c.get("freeze_opacity") else "trained",
             "warm": os.path.basename(os.path.dirname(c["init_from"])) if c.get("init_from") else "",
             "psnr_rgb": f["psnr_rgb"], "ssim_rgb": f["ssim_rgb"],
             "rmse_db": f["rmse_db"], "mae_db": f["mae_db"],
             "rmse_db_in_range": f.get("rmse_db_in_range"),
+            # Anything else the run reported as an rmse_* metric, so a new
+            # channel-specific score shows up here without editing this file.
             "extra": {k: v for k, v in f.items() if k.startswith("rmse_") and k not in ("rmse_db", "rmse_db_in_range")},
             "geometry": "trained" if c.get("train_geometry") else "frozen",
             "densify": c.get("densify", "none"), "gaussians": r.get("gaussians"),
+            # The dB span: PSNR on a jet image depends on it, so two runs with
+            # different spans are not directly comparable on psnr_rgb.
             "span_db": r["db_range"][1] - r["db_range"][0],
             "it_per_s": r["iters_per_second"], "train_s": r["train_seconds"],
             f"s_to_psnr{cfg.psnr_target:g}": t_psnr, f"it_to_psnr{cfg.psnr_target:g}": it_psnr,
+            # The whole history is kept in the JSON, so a curve can be redrawn
+            # without revisiting the run directories.
             "history": r["history"],
         })
     json.dump(rows, open(out, "w"), indent=1)
 
+    # Markdown to stdout: pasteable straight into notes, while the JSON above
+    # carries everything the table leaves out.
     hdr = ["run", "source", "mode", "sh", "views", "opacity", "warm", "PSNR(jet)", "SSIM",
            "RMSE dB", "RMSE in-range", "MAE dB", "it/s", "train s", f"s→PSNR{cfg.psnr_target:g}"]
     print("| " + " | ".join(hdr) + " |")
@@ -64,6 +80,8 @@ def main():
     for r in rows:
         t = r[f"s_to_psnr{cfg.psnr_target:g}"]
         ir = r["rmse_db_in_range"]
+        # A run that never reached the target prints a dash rather than being
+        # omitted, so the row count matches the number of runs found.
         print(f"| {r['run']} | {r['source']} | {r['mode']} | {r['sh_degree']} | {r['n_train']} | "
               f"{r['opacity']} | {r['warm']} | {r['psnr_rgb']:.2f} | {r['ssim_rgb']:.3f} | "
               f"{r['rmse_db']:.2f} | {'-' if ir is None else f'{ir:.2f}'} | {r['mae_db']:.2f} | "

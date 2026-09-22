@@ -12,6 +12,10 @@ Gaussians are opaque (alpha > 0.5) and the mesh is hit:
                    same pixels: the part of the delay residual that is a known
                    per-pixel geometric factor, not a geometry error.
 
+Separating those two is the point. One is the reconstruction being wrong; the
+other is the delay model using z where it should use the range, and would be
+there even with perfect geometry.
+
     PYTHONUTF8=1 python rrf_gsplat/depth_gt.py --scene-xml <sionna xml> --tag lobby
 """
 
@@ -27,6 +31,7 @@ C = 0.299792458   # m / ns
 
 
 def main():
+    """Ray-cast each saved view against the mesh and compare with the splats."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--scene-xml", required=True); ap.add_argument("--tag", required=True); ap.add_argument("--out", default="output/rrf")
     cfg = ap.parse_args()
@@ -42,23 +47,35 @@ def main():
     z_gt_all = np.full((n, h, w), np.nan, dtype=np.float32)
     for i in range(n):
         K = ks[i]; view = vms[i].astype(np.float64)
+        # +0.5 puts the ray through the pixel centre rather than its corner.
         u, v = np.meshgrid(np.arange(w) + 0.5, np.arange(h) + 0.5)
         d_cam = np.stack([(u - K[0, 2]) / K[0, 0], (v - K[1, 2]) / K[1, 1], np.ones_like(u)], -1)
         d_cam /= np.linalg.norm(d_cam, axis=-1, keepdims=True)                 # unit, camera frame (x right, y down, z forward)
         c2w = np.linalg.inv(view); o = c2w[:3, 3]; d_w = d_cam.reshape(-1, 3) @ c2w[:3, :3].T
+        # All H*W rays in one batched intersect; the origin is broadcast.
         ray = mi.Ray3f(o=mi.Point3f(*[mi.Float(np.full(h * w, o[k])) for k in range(3)]),
                        d=mi.Vector3f(mi.Float(d_w[:, 0].astype(np.float32)), mi.Float(d_w[:, 1].astype(np.float32)), mi.Float(d_w[:, 2].astype(np.float32))))
         si = ms.ray_intersect(ray)
         t = np.array(si.t).reshape(h, w)
+        # 1e3 m rejects rays that escaped the building through an opening.
         hit = np.isfinite(t) & (t < 1e3)
+        # t is the Euclidean range; multiplying by the direction's z component
+        # converts it to camera z, which is what gsplat's depth is.
         z_gt = np.where(hit, t * d_cam[..., 2], np.nan)
         z_gt_all[i] = z_gt
+        # Only confident pixels: expected depth where alpha is low is a ratio of
+        # two small numbers and carries no information.
         m = hit & (alpha[i] > 0.5)
         e = depth[i][m] - z_gt[m]
+        # 1/cos(theta) - 1, scaled by z: the range the delay term should have
+        # used minus the z it did use. Zero at the principal ray, largest at the
+        # image corner.
         gap = z_gt[m] * (1.0 / d_cam[..., 2][m] - 1.0) / C                   # (range - z) / c, ns
         errs.append(e); gaps.append(gap); gts.append(z_gt[m]); gss.append(depth[i][m])
         per_view.append({"view": int(i), "pixels": int(m.sum()), "rmse_m": float(np.sqrt((e ** 2).mean())) if m.any() else None})
     e = np.concatenate(errs); gap = np.concatenate(gaps); gt = np.concatenate(gts)
+    # mean_signed_m is the one to read against the delay residual's own sign:
+    # negative means the Gaussians sit in front of the surface.
     res = {"tag": cfg.tag, "views": n, "pixels": int(e.size), "share_pixels_used": float(e.size / (n * h * w)),
            "gt_depth_median_m": float(np.median(gt)),
            "depth_error": {"rmse_m": float(np.sqrt((e ** 2).mean())), "median_abs_m": float(np.median(np.abs(e))), "p90_abs_m": float(np.percentile(np.abs(e), 90)),
