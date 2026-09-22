@@ -25,20 +25,29 @@ def solve_tx(solver, scene, cfg):
 
     All receivers share a single launch, which is ~15x faster than one solve
     per (Tx, Rx) pair: the sampling cost is per source, not per receiver.
+
+    Returns a list of (a, tau, aod, aoa) with one entry per receiver, each
+    trimmed to that receiver's valid paths -- so the arrays are ragged.
     """
     paths = solver(scene=scene, max_depth=cfg.max_depth,
                    max_num_paths_per_src=10_000_000, samples_per_src=cfg.samples, los=True,
                    specular_reflection=True, diffuse_reflection=True,
                    refraction=False, synthetic_array=True, seed=cfg.seed)
     a, tau = paths.cir(normalize_delays=False, out_type="numpy")
+    # The singleton axes are rx antenna, tx, tx antenna and the trailing time
+    # axis: one element each, because both arrays are 1x1 and synthetic.
     a = np.asarray(a)[:, 0, 0, 0, :, 0]             # [num_rx, paths]
     tau = np.asarray(tau)[:, 0, :]
+    # Departure and arrival angles, in the same [num_rx, paths] layout.
     angles = [np.asarray(getattr(paths, k))[:, 0, :]
               for k in ("theta_t", "phi_t", "theta_r", "phi_r")]
+    # Three separate conditions: the solver's own validity flag, a finite delay,
+    # and a non-negative one. The last two catch padding slots the flag misses.
     valid = np.asarray(paths.valid)[:, 0, :] & np.isfinite(tau) & (tau >= 0)
     out = []
     for r in range(a.shape[0]):
         keep = valid[r]
+        # Angles are paired into [paths, 2] (zenith, azimuth) per end.
         out.append((a[r, keep], tau[r, keep],
                     np.stack([angles[0][r, keep], angles[1][r, keep]], axis=1),
                     np.stack([angles[2][r, keep], angles[3][r, keep]], axis=1)))
@@ -46,6 +55,7 @@ def solve_tx(solver, scene, cfg):
 
 
 def main():
+    """Sweep every candidate transmitter over the receiver grid and save the table."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scene-xml", required=True)
@@ -82,10 +92,12 @@ def main():
     print(f"{len(tx_positions)} Tx candidates x {len(rx_positions)} indoor Rx points")
 
     n_tx, n_rx = len(tx_positions), len(rx_positions)
+    # NaN, not 0: a pair with no paths at all is distinguishable from one at 0 dB.
     gain_db = np.full((n_tx, n_rx), np.nan, dtype=np.float32)
     n_paths = np.zeros((n_tx, n_rx), dtype=np.int32)
     cir = {}                                       # (ti, ri) -> arrays
     t0 = time.time()
+    # Receivers are added once and reused for every transmitter.
     for i, p in enumerate(rx_positions):
         scene.add(Receiver(name=f"rx{i}", position=[float(v) for v in p]))
     for ti, tx_pos in enumerate(tx_positions):
@@ -95,20 +107,26 @@ def main():
         for ri, (a, tau, aod, aoa) in enumerate(solve_tx(solver, scene, cfg)):
             n_paths[ti, ri] = a.size
             if a.size == 0:
-                continue
+                continue                           # leaves gain_db as NaN
             power = (np.abs(a) ** 2)
             gain_db[ti, ri] = 10 * np.log10(power.sum())
+            # Only the strongest paths are stored: a depth-1 diffuse solve can
+            # return far more than the RAN simulator needs, and the weak tail
+            # dominates the file size without changing the total gain.
             order = np.argsort(-power)[:cfg.max_paths_stored]
             cir[(ti, ri)] = (a[order].astype(np.complex64),
                              tau[order].astype(np.float32),
                              aod[order].astype(np.float32),
                              aoa[order].astype(np.float32))
+        # nanmean, because unreached receivers are NaN by design.
         rate = (ti + 1) / (time.time() - t0)
         print(f"  tx {ti+1}/{n_tx}: mean gain {np.nanmean(gain_db[ti]):.1f} dB, "
               f"coverage>-85 dB {np.mean(gain_db[ti] > -85):.0%}, {rate:.2f} tx/s")
 
     os.makedirs(os.path.dirname(cfg.out) or ".", exist_ok=True)
     # Ragged CIRs go in as object arrays keyed by pair index.
+    # cir_keys holds the (ti, ri) pairs in the same order as the object arrays,
+    # so a reader zips them back together; pairs with no paths simply have no key.
     keys = np.array(sorted(cir.keys()), dtype=np.int32)
     np.savez_compressed(
         cfg.out,
@@ -119,6 +137,8 @@ def main():
         cir_tau=np.array([cir[tuple(k)][1] for k in keys], dtype=object),
         cir_aod=np.array([cir[tuple(k)][2] for k in keys], dtype=object),
         cir_aoa=np.array([cir[tuple(k)][3] for k in keys], dtype=object),
+        # The full config travels with the data, so a table can always be traced
+        # back to the settings that produced it.
         meta=json.dumps(vars(cfg)))
     print(f"wrote {cfg.out}: gain table {gain_db.shape}, "
           f"{len(keys)} CIRs, {time.time()-t0:.0f} s")

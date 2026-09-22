@@ -31,6 +31,12 @@ from scene_common import (LOBBY_X, LOBBY_Y, RX_HEIGHT, clearance,
 
 
 def main():
+    """Run the ascent loop and write the full step history.
+
+    The history, not just the final position, is the output: every step records
+    its objective, hard coverage and gradient, so a run that wandered or stalled
+    can be diagnosed afterwards.
+    """
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scene-xml", required=True)
@@ -57,7 +63,10 @@ def main():
     ap.add_argument("--variant", default="cuda_ad_mono_polarized")
     cfg = ap.parse_args()
     if cfg.init_from:
+        # Warm start from the brute-force sweep's best position, so the descent
+        # refines a good candidate rather than searching from an arbitrary point.
         sweep = np.load(cfg.init_from, allow_pickle=True)
+        # NaN means "no paths", which must count as uncovered, not as covered.
         covered = np.nan_to_num(sweep["gain_db"], nan=-np.inf) > cfg.threshold_db
         cfg.tx_init = sweep["tx_positions"][np.argmax(covered.mean(1))].tolist()
         print(f"starting from sweep's best Tx {np.round(cfg.tx_init, 2).tolist()} "
@@ -66,11 +75,11 @@ def main():
     import drjit as dr
     import mitsuba as mi
     mi.set_variant(cfg.variant)
-    enable_reverse_mode()
+    enable_reverse_mode()                  # the Dr.Jit flag; see scene_common
     from sionna.rt import Receiver, Transmitter
 
     scene = load_radio_scene(cfg.scene_xml, scattering=cfg.scattering)
-    solver = make_solver(reverse_mode=True)
+    solver = make_solver(reverse_mode=True)      # evaluated loop mode, for gradients
 
     # All receivers live in the scene at once, so one solve covers the grid.
     rx_positions = rx_grid(LOBBY_X, LOBBY_Y, RX_HEIGHT, cfg.rx_step)
@@ -83,6 +92,11 @@ def main():
     noise = 10.0 ** (cfg.noise_floor_db / 10.0)
 
     def objective():
+        """The scalar being maximised, plus the per-receiver dB for reporting.
+
+        Returns (None, None) when the solve finds no paths at all, which is how
+        the caller detects that the transmitter has moved inside geometry.
+        """
         paths = solver(scene=scene, max_depth=cfg.max_depth,
                        max_num_paths_per_src=10_000_000, samples_per_src=cfg.samples, los=True,
                        specular_reflection=True, diffuse_reflection=True,
@@ -94,13 +108,18 @@ def main():
         p_rx = dr.square(a_re) + dr.square(a_im)
         for axis in range(p_rx.ndim - 1, 0, -1):
             p_rx = dr.sum(p_rx, axis=axis)                    # [num_rx]
+        # dr.log is natural log, hence the /log(10) to reach dB.
         p_db = 10.0 * dr.log(p_rx + noise) / math.log(10.0)
         if cfg.objective == "mean-db":
             return dr.mean(p_db), p_db
+        # Soft coverage: a hard count has zero gradient everywhere, so the
+        # threshold is replaced by a sigmoid whose width sets how far a point
+        # below the threshold can still pull on the transmitter.
         soft = 1.0 / (1.0 + dr.exp(-(p_db - cfg.threshold_db) / cfg.width_db))
         return dr.mean(soft), p_db
 
     def as_np(t):
+        """Flatten a Dr.Jit tensor into a 1-D numpy array."""
         return np.asarray(t).reshape(-1)
 
     history = []
@@ -121,6 +140,8 @@ def main():
         dr.backward(obj)
         g = as_np(dr.grad(p)).astype(float)
         obj_v = float(as_np(obj)[0])
+        # The hard coverage is recorded alongside the soft objective, because the
+        # soft one is a surrogate and the two can move in different directions.
         cov = float(np.mean(as_np(p_db) > cfg.threshold_db))
         history.append({"step": step, "position": pos.tolist(),
                         "objective": obj_v, "coverage_frac": cov,
@@ -132,13 +153,15 @@ def main():
             print("  non-finite gradient, stopping")
             break
         # Adam, ascent on the objective.
+        # Sign convention: `upd` is ADDED to pos below, so a positive gradient
+        # moves the transmitter the way that increases the objective.
         m = b1 * m + (1 - b1) * g
         v = b2 * v + (1 - b2) * g * g
-        mh, vh = m / (1 - b1 ** step), v / (1 - b2 ** step)
+        mh, vh = m / (1 - b1 ** step), v / (1 - b2 ** step)   # bias correction
         upd = cfg.lr * mh / (np.sqrt(vh) + eps)
         if cfg.tx_height is not None:
             upd[2] = 0.0
-            pos[2] = cfg.tx_height
+            pos[2] = cfg.tx_height        # re-pinned each step against drift
         # Keep the transmitter indoors and off the walls: the gradient knows
         # nothing about the wall it is about to push through (step 6 of the
         # first run walked straight out of the building at x = 8.48).
@@ -147,16 +170,21 @@ def main():
                     and clearance(scene, cand) >= cfg.margin)
         # Try the full step, then the step with the wall-normal component
         # removed (sliding along the wall), then shorter steps.
+        # The axis-zeroing trials are a cheap stand-in for a true projection:
+        # with axis-aligned walls, dropping one component is sliding along it.
         trials = [upd, upd * [0, 1, 1], upd * [1, 0, 1], upd * [0, 0, 1]]
         trials += [upd / 2 ** k for k in (1, 2, 3)]
         for trial in trials:
             cand = pos + trial
             cand[0] = np.clip(cand[0], *LOBBY_X)
             cand[1] = np.clip(cand[1], *LOBBY_Y)
+            # The all-zero check rejects a trial that would not move at all,
+            # which would otherwise "succeed" and stall the loop silently.
             if np.any(trial != 0) and admissible(cand):
                 pos = cand
                 break
         else:
+            # for/else: no trial was admissible.
             print("  blocked by a surface in every direction tried, stopping")
             break
 
@@ -164,6 +192,8 @@ def main():
     with open(cfg.out, "w", encoding="utf-8") as fid:
         json.dump({"config": vars(cfg), "history": history,
                    "seconds": time.time() - t0}, fid, indent=1)
+    # Best over the whole history, not the last step: Adam can overshoot, and the
+    # objective is stochastic, so the final position is not always the best one.
     best = max(history, key=lambda h: h["objective"])
     print(f"\nbest: obj {best['objective']:.4f} at step {best['step']}, "
           f"pos {np.round(best['position'], 2).tolist()}  "

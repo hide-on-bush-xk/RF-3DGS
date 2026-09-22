@@ -30,6 +30,13 @@ REPO = os.path.abspath(os.path.join(HERE, ".."))
 
 
 def main():
+    """Score every candidate transmitter at every requested depth on one grid.
+
+    Read the "flips" counts rather than only the coverage fraction: a placement
+    whose coverage is unchanged but that gains and loses different grid points
+    between depths is being evaluated on a different set of receivers, which is
+    the bias the script is looking for.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", nargs="+", required=True, help="optimize_tx result files; their start and final Tx are scored")
     ap.add_argument("--tx", nargs="*", default=[], metavar="x,y,z", help="extra transmitter positions")
@@ -44,9 +51,14 @@ def main():
     from scene_common import LOBBY_X, LOBBY_Y, RX_HEIGHT, indoor_mask, load_radio_scene, make_solver, rx_grid
 
     runs = [json.load(open(p)) for p in cfg.runs]
+    # The FIRST run's config defines the grid, threshold and scene for every
+    # candidate, so all of them are scored on identical terms even when they came
+    # from optimisations that used different settings.
     c0 = runs[0]["config"]
     cands = []
     for p, r in zip(cfg.runs, runs):
+        # Both ends of each optimisation: the starting guess and what it converged
+        # to. The label carries that run's own reported coverage for comparison.
         h = r["history"]; tag = os.path.splitext(os.path.basename(p))[0]
         cands.append((f"{tag} start (depth {r['config']['max_depth']})", h[0]["position"]))
         cands.append((f"{tag} final (depth {r['config']['max_depth']}, its own coverage {h[-1]['coverage_frac']:.3f})", h[-1]["position"]))
@@ -59,6 +71,8 @@ def main():
     rx = rx_grid(LOBBY_X, LOBBY_Y, RX_HEIGHT, c0["rx_step"]); rx = rx[indoor_mask(scene, rx)]
     for i, p in enumerate(rx):
         scene.add(Receiver(name=f"rx{i}", position=[float(v) for v in p]))
+    # One Transmitter object, repositioned per candidate: cheaper than rebuilding
+    # the scene, and it keeps the receiver set byte-identical across candidates.
     tx = Transmitter(name="tx", position=[float(v) for v in cands[0][1]]); scene.add(tx)
     noise = 10.0 ** (c0["noise_floor_db"] / 10.0); thr = c0["threshold_db"]
     print(f"{len(rx)} indoor receivers on a {c0['rx_step']} m grid, threshold {thr} dB, {cfg.samples:,} samples")
@@ -73,14 +87,18 @@ def main():
                            diffuse_reflection=True, refraction=False, synthetic_array=True, seed=42)
             a_re, a_im = paths.a
             p_rx = dr.square(a_re) + dr.square(a_im)
+            # Collapse every axis except the receiver axis (0), from the back
+            # forward so the axis indices stay valid as the array shrinks.
             for axis in range(p_rx.ndim - 1, 0, -1):
                 p_rx = dr.sum(p_rx, axis=axis)
             g = 10.0 * np.log10(np.asarray(p_rx).reshape(-1) + noise)
             gains[d] = g
             row["by_depth"][str(d)] = {"coverage": float((g > thr).mean()), "mean_db": float(g.mean()),
                                        "median_db": float(np.median(g)), "seconds": time.time() - t0}
-        d0 = cfg.depths[0]
+        d0 = cfg.depths[0]      # everything is expressed relative to the first depth
         for d in cfg.depths[1:]:
+            # Two separate counts, not a net figure: a placement can gain and lose
+            # the same number of points and look unchanged in coverage.
             flips_up = int(((gains[d] > thr) & ~(gains[d0] > thr)).sum()); flips_down = int((~(gains[d] > thr) & (gains[d0] > thr)).sum())
             row["by_depth"][str(d)]["gain_vs_depth1_db"] = {"mean": float((gains[d] - gains[d0]).mean()), "p90": float(np.percentile(gains[d] - gains[d0], 90)),
                                                              "max": float((gains[d] - gains[d0]).max())}

@@ -33,6 +33,7 @@ from scene_common import (LOBBY_X, LOBBY_Y, RX_HEIGHT, enable_reverse_mode,
 
 
 def add_twin_args(ap):
+    """Register the arguments MaterialTwin reads. Shared with active_measurement.py."""
     ap.add_argument("--scene-xml", required=True)
     ap.add_argument("--rx-step", type=float, default=2.0)
     ap.add_argument("--truth-seed", type=int, default=0,
@@ -77,6 +78,8 @@ class MaterialTwin:
         self.solver = make_solver(reverse_mode=True)
         rx = rx_grid(LOBBY_X, LOBBY_Y, RX_HEIGHT, cfg.rx_step)
         self.rx_positions = rx[indoor_mask(self.scene, rx)]
+        # Receivers are fixed for the lifetime of the twin; only the transmitter
+        # and the material values move.
         for i, p in enumerate(self.rx_positions):
             self.scene.add(Receiver(name=f"rx{i}", position=[float(v) for v in p]))
         self.tx = Transmitter(name="tx", position=[0.0, 0.0, 2.0])
@@ -85,17 +88,21 @@ class MaterialTwin:
 
         # Only materials attached to some object can be fitted or observed.
         self.mats = {n: m for n, m in self.scene.radio_materials.items() if m.is_used}
-        self.names = sorted(self.mats)
+        self.names = sorted(self.mats)        # sorted, so orderings are stable
         self.rng = np.random.default_rng(cfg.truth_seed)
+        # The hidden ground truth. It is drawn here and never read by the fit --
+        # only by the scoring, which is what makes this a proper recovery test.
         self.truth = dict(zip(self.names,
                               self.rng.uniform(0.2, 0.9, len(self.names)).round(3).tolist()))
 
     # -- scene state ------------------------------------------------------
     def set_materials(self, values):
+        """Write a {name: coefficient} dict into the live scene."""
         for n in self.names:
             self.mats[n].scattering_coefficient = float(values[n])
 
     def set_tx(self, pos):
+        """Move the single transmitter."""
         self.tx.position = [float(v) for v in pos]
 
     # -- forward model ----------------------------------------------------
@@ -116,14 +123,21 @@ class MaterialTwin:
                                f"{np.asarray(self.tx.position).reshape(-1)}: "
                                "it is inside an object or outside the building")
         p = dr.square(a_re) + dr.square(a_im)
+        # Collapse the three singleton antenna/tx axes, keeping [rx, paths].
         for axis in (3, 2, 1):
             p = dr.sum(p, axis=axis)                          # [rx, P]
+        # tau and valid are taken as plain numpy: they are the constants the
+        # docstring refers to, so no gradient flows through the binning itself.
         tau = np.asarray(paths.tau)[:, 0, :]
         valid = np.asarray(paths.valid)[:, 0, :] & (tau >= 0)
         b = np.floor(tau / (cfg.pdp_bin_ns * 1e-9)).astype(int)
+        # Everything past the last bin is folded INTO it; invalid paths get -1,
+        # which matches no bin and so is dropped.
         b = np.where(valid, np.minimum(b, cfg.pdp_bins - 1), -1)
         out = []
         for k in range(cfg.pdp_bins):
+            # Multiplying by a 0/1 constant mask keeps the sum differentiable in
+            # the path amplitudes while selecting only this bin's paths.
             mask = mi.TensorXf((b == k).astype(np.float32))
             p_k = dr.sum(p * mask, axis=1)
             out.append(10.0 * dr.log(p_k + self.noise) / math.log(10.0))
@@ -131,12 +145,17 @@ class MaterialTwin:
 
     @staticmethod
     def as_np(t):
+        """Dr.Jit tensor -> flat numpy; a list of them -> a [bins, rx] array."""
         if isinstance(t, list):
             return np.stack([MaterialTwin.as_np(x) for x in t])   # [bins, rx]
         return np.asarray(t).reshape(-1).astype(float)
 
     def measure(self, tx_pos, values, noisy=True):
-        """Synthetic measurement from `tx_pos` with the given materials."""
+        """Synthetic measurement from `tx_pos` with the given materials.
+
+        noisy=True stands in for a real measurement; noisy=False produces the
+        clean reference a fit is scored against.
+        """
         self.set_tx(tx_pos)
         self.set_materials(values)
         obs = self.as_np(self.observe())
@@ -145,12 +164,18 @@ class MaterialTwin:
         return obs
 
     def rmse(self, values, tx_pos, ref):
+        """RMSE in dB between this twin's prediction at tx_pos and `ref`."""
         self.set_tx(tx_pos)
         self.set_materials(values)
         return float(np.sqrt(np.mean((self.as_np(self.observe()) - ref) ** 2)))
 
     # -- gradients --------------------------------------------------------
     def _params_with_grad(self, values):
+        """Set the materials and mark every coefficient differentiable.
+
+        Must be called fresh before each backward pass: Dr.Jit's gradient state
+        does not survive the scene write in set_materials.
+        """
         self.set_materials(values)
         params = {n: self.mats[n].scattering_coefficient for n in self.names}
         for p in params.values():
@@ -158,6 +183,7 @@ class MaterialTwin:
         return params
 
     def _grads(self, params):
+        """Read the accumulated gradients back as plain floats."""
         return {n: float(self.as_np(self.dr.grad(params[n]))[0]) for n in self.names}
 
     def loss_and_grad(self, values, tx_pos, obs):
@@ -166,6 +192,8 @@ class MaterialTwin:
         self.set_tx(tx_pos)
         params = self._params_with_grad(values)
         pred = self.observe()
+        # Averaged over bins as well as receivers, so --pdp-bins does not change
+        # the loss scale and the same --lr works at any binning.
         loss = sum(dr.mean(dr.square(pred[k] - mi.TensorXf(obs[k].astype(np.float32))))
                    for k in range(self.cfg.pdp_bins)) / self.cfg.pdp_bins
         dr.backward(loss)
@@ -185,10 +213,12 @@ class MaterialTwin:
         for _ in range(n_probes):
             params = self._params_with_grad(values)
             pred = self.observe()
+            # One Gaussian probe vector over receivers, shared across bins.
             proj = sum(dr.sum(pred[k] * mi.TensorXf(
                 rng.normal(size=len(self.rx_positions)).astype(np.float32)))
                 for k in range(self.cfg.pdp_bins))
             dr.backward(proj)
+            # Averaged over probes: this is the expectation the estimator needs.
             for n, g in self._grads(params).items():
                 acc[n] += g * g / n_probes
         return acc
@@ -204,20 +234,26 @@ class MaterialTwin:
         for step in range(1, cfg.steps + 1):
             loss_total = 0.0
             grads = {n: 0.0 for n in self.names}
+            # Several transmitters are averaged, not concatenated, so adding an
+            # observation does not change the loss scale.
             for tx_pos, obs in observations:
                 loss, g = self.loss_and_grad(est, tx_pos, obs)
                 loss_total += loss / len(observations)
                 for n in self.names:
                     grads[n] += g[n] / len(observations)
+            # The gradient is recorded every step: identifiable() reads it back.
             history.append({"step": step, "loss_db2": loss_total,
                             "est": dict(est), "grad": grads})
             if verbose:
                 print(f"  step {step:3d}  RMSE {math.sqrt(loss_total):5.2f} dB  "
                       f"mean|est-truth| "
                       f"{np.mean([abs(est[n]-self.truth[n]) for n in self.names]):.3f}")
+            # `or 1.0` catches an all-zero gradient, which would divide by zero.
             g_max = max(abs(g) for g in grads.values() if math.isfinite(g)) or 1.0
             for n in self.names:
                 g = grads[n]
+                # A non-finite gradient for one material is skipped rather than
+                # poisoning the whole step.
                 if not math.isfinite(g):
                     continue
                 m[n] = b1 * m[n] + (1 - b1) * g
@@ -228,26 +264,40 @@ class MaterialTwin:
                     continue
                 mh, vh = m[n] / (1 - b1 ** step), v[n] / (1 - b2 ** step)
                 if cfg.optimizer == "adam":
+                    # Per-parameter normalisation: every material moves at ~lr,
+                    # including ones the data says nothing about.
                     upd = cfg.lr * mh / (math.sqrt(vh) + eps)
                 elif cfg.optimizer == "adam-rel":
+                    # Epsilon tied to the largest running gradient, so a material
+                    # with a tiny gradient is damped instead of normalised up.
                     upd = cfg.lr * mh / (math.sqrt(vh) + cfg.eps_rel * rms_max)
                 else:
+                    # ngd (the default): one global scale. Relative gradient
+                    # magnitudes survive, so unconstrained materials stay put.
                     upd = cfg.lr * grads[n] / g_max
+                # Minus: descent on the loss. Clipped to a physical range.
                 est[n] = float(np.clip(est[n] - upd, 0.01, 0.99))
         return est, history
 
     def identifiable(self, history, frac=0.02):
-        """Materials whose mean |gradient| over the fit is >= frac of the largest."""
+        """Materials whose mean |gradient| over the fit is >= frac of the largest.
+
+        A material below this threshold was never really constrained by the data,
+        so its fitted value is meaningless and reporting an error for it would
+        flatter or damn the fit for no reason.
+        """
         g_abs = {n: float(np.mean([abs(h["grad"][n]) for h in history])) for n in self.names}
         top = max(g_abs.values())
         return [n for n in self.names if g_abs[n] >= frac * top], g_abs
 
     def material_error(self, est, subset=None):
+        """Mean |estimate - truth|, over `subset` or over every material."""
         subset = subset or self.names
         return float(np.mean([abs(est[n] - self.truth[n]) for n in subset]))
 
 
 def main():
+    """Fit at Tx A, score at held-out Tx B, and report per-material recovery."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     add_twin_args(ap)
@@ -261,10 +311,11 @@ def main():
     twin = MaterialTwin(cfg)
     print(f"{len(twin.rx_positions)} indoor receivers, {len(twin.names)} used materials")
     t0 = time.time()
-    obs_a = twin.measure(cfg.tx_a, twin.truth)
-    true_b = twin.measure(cfg.tx_b, twin.truth, noisy=False)
+    obs_a = twin.measure(cfg.tx_a, twin.truth)            # noisy, the "measurement"
+    true_b = twin.measure(cfg.tx_b, twin.truth, noisy=False)   # clean, the target
 
     def score(values, label):
+        """RMSE at both transmitters. Tx A shows fit quality, Tx B generalisation."""
         e_a = twin.rmse(values, cfg.tx_a, obs_a)
         e_b = twin.rmse(values, cfg.tx_b, true_b)
         print(f"{label:28s} RMSE at Tx A {e_a:5.2f} dB   at held-out Tx B {e_b:5.2f} dB")
@@ -280,6 +331,8 @@ def main():
           f"(mean |grad| >= 2% of the largest); their mean |est - truth|: "
           f"init {twin.material_error(init, ident):.3f} -> "
           f"fitted {twin.material_error(est, ident):.3f}")
+    # Sorted by how strongly the data constrained each material, so the ones
+    # whose fitted values mean something appear first; * marks identifiable.
     print("material               truth   init  fitted   mean|grad|")
     for n in sorted(twin.names, key=lambda n: -g_abs[n]):
         print(f"  {n[:22]:22s} {twin.truth[n]:.3f}  {cfg.init:.3f}  {est[n]:.3f}   "
@@ -292,6 +345,7 @@ def main():
                    "rmse_db": {"baseline_a": base_a, "baseline_b": base_b,
                                "fitted_a": fit_a, "fitted_b": fit_b},
                    "seconds": time.time() - t0}, fid, indent=1)
+    # The headline claim of stage 3: the held-out transmitter's error must fall.
     print(f"\nheld-out Tx B: baseline {base_b:.2f} dB -> fitted {fit_b:.2f} dB "
           f"({time.time()-t0:.0f} s)")
 

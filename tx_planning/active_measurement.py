@@ -27,6 +27,12 @@ from scene_common import LOBBY_X, LOBBY_Y, indoor_mask, rx_grid
 
 
 def main():
+    """Score candidates, fit three arms, and compare them on held-out data.
+
+    The median candidate is the control: without it, a gain from "A + chosen C"
+    could not be separated from the gain of simply having a second transmitter
+    anywhere.
+    """
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     add_twin_args(ap)
@@ -42,6 +48,8 @@ def main():
                     help="random projections per candidate for the sensitivity")
     cfg = ap.parse_args()
     if cfg.tx_b is None:
+        # Three held-out positions spanning the lobby's topology, so the score is
+        # not read off a single lucky geometry.
         cfg.tx_b = [[0.0, -3.0, 2.0], [8.0, -15.0, 2.0], [8.0, 1.0, 2.0]]
 
     twin = MaterialTwin(cfg)
@@ -52,15 +60,17 @@ def main():
     # Candidates: indoor grid at AP height, excluding A and B themselves.
     cands = rx_grid(LOBBY_X, LOBBY_Y, cfg.cand_height, cfg.cand_step)
     cands = cands[indoor_mask(twin.scene, cands)]
+    # 1 m exclusion: a candidate coincident with A adds nothing, and one on top of
+    # a held-out B would leak the test set into the training data.
     keep = [np.linalg.norm(c - cfg.tx_a) > 1.0
             and all(np.linalg.norm(c - b) > 1.0 for b in cfg.tx_b) for c in cands]
     cands = cands[keep]
     print(f"{len(cands)} candidate positions for the second transmitter")
 
     # --- what A alone teaches ------------------------------------------------
-    obs_a = twin.measure(cfg.tx_a, twin.truth)
-    true_b = [twin.measure(b, twin.truth, noisy=False) for b in cfg.tx_b]
-    init = {n: cfg.init for n in names}
+    obs_a = twin.measure(cfg.tx_a, twin.truth)               # noisy, as a real measurement
+    true_b = [twin.measure(b, twin.truth, noisy=False) for b in cfg.tx_b]   # clean reference
+    init = {n: cfg.init for n in names}                      # the uninformed prior
 
     def rmse_b(values):
         """Mean over the held-out transmitters."""
@@ -78,13 +88,19 @@ def main():
     # as a planner would before measuring.
     scores = []
     for i, c in enumerate(cands):
+        # seed varies per candidate so the random projections are independent,
+        # but are reproducible for any given candidate index.
         s = twin.sensitivity(init, c, cfg.probes, seed=i + 1)
+        # The floor in the denominator keeps a material A never saw from giving
+        # an unbounded ratio.
         gain = sum(np.log1p(s[n] / (sens_a[n] + floor)) for n in names)
+        # Reported separately from the score: which materials this candidate would
+        # newly bring above the identifiability threshold.
         new = [n for n in names if s[n] >= floor and n not in ident_a]
         scores.append({"pos": c.tolist(), "score": float(gain), "newly_seen": new})
         print(f"  cand {i:2d} ({c[0]:5.1f},{c[1]:6.1f})  score {gain:6.2f}  "
               f"newly constrained {len(new):2d}  {time.time()-t0:5.0f} s")
-    order = np.argsort([-s["score"] for s in scores])
+    order = np.argsort([-s["score"] for s in scores])        # descending score
     best, median = scores[order[0]], scores[order[len(order) // 2]]
     print(f"\nbest candidate {np.round(best['pos'], 1).tolist()} score {best['score']:.2f}; "
           f"median candidate {np.round(median['pos'], 1).tolist()} score {median['score']:.2f}")
@@ -96,6 +112,8 @@ def main():
         print(f"\nfit from {label}")
         arms[label] = twin.fit([(cfg.tx_a, obs_a), (c, obs_c)], verbose=False)
 
+    # Three columns because they can disagree: a fit can improve the held-out
+    # prediction while leaving the unidentifiable materials at the prior.
     print(f"\n{'arm':14s} {'RMSE @ held-out Bs':>19s} {'|err| identifiable':>20s} "
           f"{'|err| all 29':>13s}  identifiable")
     rows = {}
@@ -107,6 +125,7 @@ def main():
                        "est": est}
         print(f"{label:14s} {e_b:15.2f} dB {rows[label]['err_ident']:20.3f} "
               f"{rows[label]['err_all']:13.3f}  {len(ident)}/{len(names)}")
+    # The prior's own numbers: the floor every arm has to beat to have learned anything.
     e_base = rmse_b(init)
     print(f"{'prior':14s} {e_base:15.2f} dB {twin.material_error(init):20.3f} "
           f"{twin.material_error(init):13.3f}  0/{len(names)}")
