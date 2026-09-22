@@ -1845,3 +1845,6 @@ Delay 图:R = 10log10(Σ amp·delay_norm) + 150,G = B = 10log10(Σ amp) + 150,de
 - NeRF² 的 PSNR 比发布模型高 0.73 dB,SSIM / LPIPS 更差;比我们的 A5 低 2.7 dB,训练慢 35×。同一 metrics.py、同一 640 张。CBF / TCBF / MPC 排在后面(各 ≈ 3.7 h)。
 - NeRF² CBF(30k,12,862 s):**13.683 / 0.654 / 0.516**——三项都低于发布模型(14.13 / 0.723 / 0.446),低于 ours A5(15.07 / 0.749 / 0.388)1.4 dB。
 - NeRF² TCBF(30k,13,583 s):**12.180 / 0.611 / 0.558**——无发布模型;比重训 fork(12.04 / 0.698 / 0.427)PSNR 高 0.14 dB 但 SSIM / LPIPS 明显更差,低于 ours A5(13.35 / 0.742 / 0.339)1.2 dB。MPC 08:47 开始。
+- NeRF² MPC(30k,13,341 s):**12.570 / 0.506 / 0.517**——比发布模型(15.51 / 0.628 / 0.385)低 2.9 dB,比 ours A4(16.59)低 4.0 dB;稀疏路径图对逐光线 MLP 最不利。四谱合计 52,848 s(14.7 h)训练,独占 RTX 4070 12 GB。
+- Track D 块(发布位姿 MULTI)在 round 22 里 4 s 退出:generate_dataset.py 即使带 --poses-from 也要求 --rx-loc-file,过滤器把 argparse 的报错吞了。已写 win_round22b.sh 在 round 23 之后重跑(避免两条 GPU 线并行)。
+- 干净重计时(独占卡):inria_MVDR 30k→40k 训练 273 s(round 21 受污染值 284 s);sota_MVDR_rgb 见 round 22 日志尾。
