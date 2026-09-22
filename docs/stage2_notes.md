@@ -1826,3 +1826,10 @@ Delay 图:R = 10log10(Σ amp·delay_norm) + 150,G = B = 10log10(Σ amp) + 150,de
 - 六列全部三项同优;A1(作者 train.py 重训)五列都逐位复现发布模型,说明比较的是方法不是运气。全表在 `output/rrf/sota_table.md`。
 - 分解:标量谱(MVDR/CBF/TCBF)最优是值目标 + 解冻几何;三通道编码谱(AoD/Delay)与稀疏的 MPC 最优是伪彩目标 + 解冻几何——解冻几何是六列共同的来源,值目标在逐图归一化的 CBF/TCBF 上把几何解冻从"降 PSNR"变成"升"。
 - 计时:round 21 各 run 的 wall 见日志;13:03–14:30 与其它作业重叠的(inria_MVDR、sota_MVDR_rgb、sota_MVDR_db)作废,round 22 末尾重测;其余为独占卡:训练 + 640 张渲染 ≈ 5–7 min / run,INRIA 30k→40k ≈ 4.7 min + render/metrics 7 min。
+
+### B2. NeRF² 评估的病理与修法(21:17–21:45)
+
+- 第一次 round 22 的 nerf2_MVDR 在 5k 步的中途评估上卡了 56 min(GPU 100%,12 GB 满)。隔离计时(独占卡,加载 + 1 步 + 8 张留出图):
+  chunk 16384 射线 → 8 张 **535 s**(67 s / 张,640 张 ≈ 12 h);chunk 4096 → 8 张 **13 s**(1.6 s / 张,640 张 ≈ 17 min)。1M 点 × 63 维编码 × 256 宽的中间张量把 12 GB 撑满后抖动。
+- 修:`--chunk` 默认 4096;`--eval-every 30000`(只在最后评一次 640 张);jet 逆映射标签缓存到数据集目录(`jet_inverse_{train,test}_N.npy`,首次 47–59 s,之后秒级)。
+- 训练速度独占卡 2.44 it/s → 30k 步 3.4 h / 谱;四谱 ≈ 14 h + 评估 4 × 17 min。round 22 于 21:45 重启;NeRF² 每张图 1.6 s 的渲染时间本身进成本表(gsplat 640 张 < 1 min)。

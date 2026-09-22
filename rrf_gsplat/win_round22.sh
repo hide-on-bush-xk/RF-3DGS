@@ -31,7 +31,7 @@ for S in MVDR CBF TCBF MPC; do
   DS=RF-3DGS_dataset/training-rf-spectrum/3dgs_${S}_100
   if [ ! -f output/rrf/nerf2_$S/results.json ]; then
     stamp "nerf2_$S"; T0=$(date +%s)
-    $WSLPY "cd /mnt/c/Users/Ke/Documents/GitHub/RF-3DGS && /home/ke/miniconda3/envs/rf-gsplat/bin/python rrf_gsplat/nerf2_pinhole.py --source $DS --out output/rrf/nerf2_$S --iterations 30000 > output/rrf/nerf2_$S.log 2>&1" < /dev/null
+    $WSLPY "cd /mnt/c/Users/Ke/Documents/GitHub/RF-3DGS && /home/ke/miniconda3/envs/rf-gsplat/bin/python rrf_gsplat/nerf2_pinhole.py --source $DS --out output/rrf/nerf2_$S --iterations 30000 --eval-every 30000 > output/rrf/nerf2_$S.log 2>&1" < /dev/null
     echo "wall $(( $(date +%s) - T0 )) s" >> $LOG; tail -1 output/rrf/nerf2_$S.log >> $LOG; stamp "done nerf2_$S"
   fi
   [ -f output/rrf/nerf2_$S/inria_metrics.json ] || $PYS rrf_gsplat/inria_metrics.py --run output/rrf/nerf2_$S --source $DS < /dev/null 2>&1 | tail -1 >> $LOG

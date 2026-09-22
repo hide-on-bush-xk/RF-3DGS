@@ -41,6 +41,7 @@ def main():
     ap.add_argument("--tx", type=float, nargs=3, default=[6.9, 0.0, 0.29], help="the fixed transmitter (a constant input)")
     ap.add_argument("--eval-views", type=int, default=-1, help="-1 = every held-out view"); ap.add_argument("--eval-every", type=int, default=5000)
     ap.add_argument("--overfit-one", action="store_true", help="smoke: train on one view's rays and evaluate that view")
+    ap.add_argument("--chunk", type=int, default=4096, help="rays per evaluation forward pass")
     ap.add_argument("--seed", type=int, default=0)
     cfg = ap.parse_args()
     torch.manual_seed(cfg.seed); rng = np.random.default_rng(cfg.seed)
@@ -63,16 +64,22 @@ def main():
     d_cam = np.stack([(u - K[0, 2]) / K[0, 0], (v - K[1, 2]) / K[1, 1], np.ones_like(u)], -1).reshape(-1, 3)
     d_cam = torch.as_tensor(d_cam / np.linalg.norm(d_cam, axis=-1, keepdims=True), dtype=torch.float32, device=device)   # [HW, 3]
 
-    def load(names):
-        R, o, lab = [], [], []
+    def load(names, tag):
+        R, o = [], []
         for n in names:
             view = views[n + ".png"][0].astype(np.float64); c2w = np.linalg.inv(view)
             R.append(c2w[:3, :3]); o.append(c2w[:3, 3])
-            img = torch.from_numpy(np.array(Image.open(os.path.join(cfg.source, "images", n + ".png")).convert("RGB"))).permute(2, 0, 1).float() / 255.0
-            lab.append(jet_inverse(img.to(device)).reshape(-1).half())
-        return (torch.as_tensor(np.stack(R), dtype=torch.float32, device=device), torch.as_tensor(np.stack(o), dtype=torch.float32, device=device), torch.stack(lab))
+        # the jet inverse of 3200 pictures is a nearest-LUT search (about 10 min on the GPU); cache it next to the dataset
+        cache = os.path.join(cfg.source, f"jet_inverse_{tag}_{len(names)}.npy")
+        if os.path.exists(cache):
+            lab = torch.from_numpy(np.load(cache)).to(device)
+        else:
+            lab = torch.stack([jet_inverse(torch.from_numpy(np.array(Image.open(os.path.join(cfg.source, "images", n + ".png")).convert("RGB")))
+                                           .permute(2, 0, 1).float().div(255.0).to(device)).reshape(-1).half() for n in names])
+            np.save(cache, lab.cpu().numpy())
+        return (torch.as_tensor(np.stack(R), dtype=torch.float32, device=device), torch.as_tensor(np.stack(o), dtype=torch.float32, device=device), lab)
 
-    R_tr, o_tr, y_tr = load(train_names); R_te, o_te, y_te = load(test_names)
+    R_tr, o_tr, y_tr = load(train_names, "train"); R_te, o_te, y_te = load(test_names, "test")
     n_tr, n_pix = len(train_names), d_cam.shape[0]
     tx = torch.tensor(cfg.tx, dtype=torch.float32, device=device)
     print(f"{n_tr} training views x {n_pix} rays, {len(test_names)} held-out views; near {cfg.near} far {cfg.far} m, {cfg.n_samples} samples; loaded in {time.time() - t0:.0f} s")
@@ -88,7 +95,8 @@ def main():
         return o, d
 
     @torch.no_grad()
-    def render_view(Rv, ov, chunk=16384):
+    def render_view(Rv, ov, chunk=None):
+        chunk = chunk or cfg.chunk
         net.eval(); out = []
         for s in range(0, n_pix, chunk):
             d = d_cam[s:s + chunk] @ Rv.T; o = ov[None].expand(d.shape[0], 3)
