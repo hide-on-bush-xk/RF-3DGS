@@ -101,11 +101,15 @@ results = []
 
 
 def check(name, ok, detail):
+    """Record and print one criterion. `detail` always carries the measured
+    value, so a pass is as auditable as a failure."""
     results.append((name, PASS if ok else FAIL, detail))
     print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
 
 
 def skip(name, detail):
+    """A criterion that could not be evaluated. Distinct from a pass: a smoke
+    with skips is incomplete, not passed (see the module docstring on E)."""
     results.append((name, SKIP, detail))
     print(f"[SKIP] {name}: {detail}")
 
@@ -117,6 +121,7 @@ def decode(ch):
 
 
 def wrap(a):
+    """An angle difference in radians wrapped into [-pi, pi)."""
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 
@@ -141,6 +146,12 @@ def project(theta, phi, yaw, width, height, fov_deg):
 
 
 def main():
+    """Run every criterion in order and print a PASS / FAIL / SKIP line for each.
+
+    A to C need nothing but torch; D needs the scene and a GPU; E needs a
+    trained AOD3 run. The later groups are guarded so the earlier ones still
+    report on a machine that cannot run them.
+    """
     from rf_spectra import equirect_to_perspective, multichannel_from_arrays
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     t_start = time.time()
@@ -152,6 +163,8 @@ def main():
     ch = multichannel_from_arrays(torch.tensor([1.0], device=dev), torch.tensor([50e-9], device=dev),
                                   r(80), r(30), r(100), r(-120), scale=3, sigma=3.0)
     ti, pi = int(round(80 * 3)), int(round((-30 + 180) * 3))         # equirect_splat's index convention
+    # The whole point of A: one path, so the "power-weighted mean" is that
+    # path's own angle and the decode must return exactly what went in.
     az, zen, dl, pw = decode(ch[:, ti, pi])
     ok = (abs(float(az) + 120) <= 0.34 and abs(float(zen) - 100) <= 0.34 and abs(float(dl) - 50) <= 1e-3
           and math.isfinite(float(pw)) and tuple(ch.shape) == (5, 540, 1080))
@@ -159,8 +172,11 @@ def main():
           f"az {float(az):.3f} (want -120), zen {float(zen):.3f} (want 100), delay {float(dl):.4f} ns (want 50), power {float(pw):.1f} dB, shape {tuple(ch.shape)}")
     faces = [equirect_to_perspective(ch, W, H, FOV, yaw_rad=y) for y in YAWS]
     check("A four faces resample", all(tuple(f.shape) == (5, H, W) for f in faces), f"{[tuple(f.shape) for f in faces]}")
+    # The independent check: project() was written from the angle-grid
+    # definitions rather than from the resampler, so agreement between the two
+    # is evidence and not a tautology.
     inside, row, col = project(r(80), r(30), 0.0, W, H, FOV)
-    am = int(faces[1][0].argmax()); ar, ac = am // W, am % W
+    am = int(faces[1][0].argmax()); ar, ac = am // W, am % W    # faces[1] is yaw 0
     ok = bool(inside[0]) and abs(ar - int(row[0])) <= 1 and abs(ac - int(col[0])) <= 1
     check("A projection agrees with the resampler", ok,
           f"projected (row {int(row[0])}, col {int(col[0])}), face power maximum at ({ar}, {ac}), inside {bool(inside[0])}")
@@ -174,6 +190,8 @@ def main():
           f"the circular mean is undefined here; this is the tail the RMSE carries, not judged by the smoke")
 
     # -- C. zero paths ------------------------------------------------------
+    # The degenerate path the project has actually been burned by: an outdoor
+    # or fully occluded receiver returns no paths at all.
     e = torch.zeros(0, device=dev)
     ch0 = multichannel_from_arrays(e, e, e, e, e, e)
     ok = tuple(ch0.shape) == (5, 540, 1080) and bool((ch0[0] == -200.0).all()) and bool((ch0[1:] == 0).all())
@@ -198,6 +216,9 @@ def main():
         scene = build_scene(cfg)
         scene.add(Transmitter(name="tx", position=list(cfg.tx_loc)))
         solver = PathSolver()
+        # The structured sample required by CLAUDE.md: both route endpoints (the
+        # boundary cases) and the middle, never a [::k] stride, plus one
+        # deliberately degenerate receiver.
         pts = [l.split() for l in open(route) if len(l.split()) == 4]
         rows = [pts[0], pts[len(pts) // 2], pts[-1]]                      # endpoints and the middle
         positions = [[float(p[1]) / 1000, float(p[2]) / 1000, 1.625 - 1.713] for p in rows]
@@ -227,8 +248,14 @@ def main():
                 ins.append(i_); land.append((r_, c_))
             ins = torch.stack(ins, 1)                                        # [P, 4]
             n_in = ins.sum(1)
+            # The four 90-degree faces tile the azimuth circle but leave polar
+            # caps uncovered. A path is legitimately outside when its elevation
+            # exceeds the coverage at its azimuth offset from the nearest face
+            # centre -- the cos(delta) is the widening towards a face edge.
             delta = torch.stack([wrap(ph_r - y) for y in VIEW_YAWS], 1).abs().min(1).values
             outside = torch.tan(math.pi / 2 - th_r).abs() > lim_y * torch.cos(delta)
+            # Two failure modes in one count: a path in neither category or in
+            # both (the != test), and a path counted by two faces (n_in > 1).
             mism = int(((n_in == 1) != ~outside).sum()) + int((n_in > 1).sum())
             cap_p = float(outside.float().mean()); cap_w = float((amp[outside] ** 2).sum() / (amp ** 2).sum())
             caps.append((cap_p, cap_w))
@@ -245,6 +272,8 @@ def main():
                     per_face.append(f"yaw {math.degrees(VIEW_YAWS[fi]):4.0f}: 0 paths, hit {hit_frac:.3f}")
                     continue
                 val = fc[0][land[fi][0][sel], land[fi][1][sel]]
+                # Only paths 20 dB clear of the truncation floor are required to
+                # land: one within a few dB of it may legitimately be truncated.
                 strong = pw_path[sel] >= pf + 20
                 n_strong += int(strong.sum()); n_hit += int((val[strong] > pf).sum())
                 hits = val[val > pf]
@@ -293,6 +322,9 @@ def main():
     else:
         skip("E known failure", "no output/rrf/encoding_comparison.json; the smoke is incomplete")
 
+    # Exit code is the result, so this can gate a full run from a shell script.
+    # Note skips do not fail the run but are counted and reported: a smoke with
+    # skips has not answered everything it claims to.
     n_fail = sum(1 for _, s, _ in results if s == FAIL); n_skip = sum(1 for _, s, _ in results if s == SKIP)
     print(f"\n{len(results)} checks: {len(results) - n_fail - n_skip} pass, {n_fail} fail, {n_skip} skip; {time.time() - t_start:.0f} s total")
     print("not answered by this smoke: tail behaviour (P90/RMSE), stability at scale, memory, throughput, boundary resampling")

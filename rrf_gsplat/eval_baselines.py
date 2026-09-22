@@ -17,6 +17,10 @@ the 64 x 64 array the paper headlines). top-k = the true beam is among the k
 codebook cells nearest to the decoded direction. Unweighted over hit pixels
 and weighted by each pixel's linear power.
 
+Why the floor matters: on a dense route the nearest training position is 0.23 m
+away, so copying its spectrum is already a strong predictor. A field that does
+not beat "copy" has not demonstrated that it learned a field.
+
     PYTHONUTF8=1 python rrf_gsplat/eval_baselines.py --multi output/rrf/m_multi_24_tut_cs \
         --truth RF-3DGS_dataset/regenerated/3dgs_MULTI_24ghz_tut_cs
 """
@@ -32,11 +36,19 @@ import numpy as np
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 VIEW_YAWS = (-math.pi / 2, 0.0, math.pi / 2, math.pi)
+# theta_3dB = 101.5 deg / M, the standard beamwidth of an M-element uniform
+# array. Both are reported because the headline array is 6.4x finer, so an
+# angular error that is harmless at M = 10 need not be at 64.
 ARRAYS = {"M=10 (these datasets)": 101.5 / 10, "64x64 (paper headline)": 101.5 / 64}
 
 
 def read_poses(images_txt):
-    """name -> (rx [3], yaw index)."""
+    """name -> (rx [3], yaw index).
+
+    The yaw is recovered as an index into VIEW_YAWS by nearest rotation match,
+    which is what lets the baselines below search for a training position "at
+    the same yaw" rather than at an arbitrary orientation.
+    """
     import sys
     sys.path.insert(0, os.path.join(REPO, "sionna_port"))
     from generate_dataset import euler_to_quaternion
@@ -60,6 +72,11 @@ def read_poses(images_txt):
 
 
 def decode(arr, ch):
+    """Channels -> (azimuth deg, zenith deg, delay ns). The shared decoder.
+
+    Several other scripts import this so every one of them reads a dataset the
+    same way; changing it changes all of them together, which is the intent.
+    """
     az = np.degrees(np.arctan2(arr[ch["aod_az_sin"]], arr[ch["aod_az_cos"]]))
     return az, arr[ch["aod_zen"]] * 180.0, arr[ch["delay_ns"]]
 
@@ -79,12 +96,21 @@ def topk_hits(az_p, zen_p, az_t, zen_t, cell, ks=(1, 3, 5)):
             d = np.hypot(az_p - (ca + 0.5) * cell, zen_p - (cz + 0.5) * cell)
             is_true = (ca == it_az) & (cz == it_zen)
             closer += ((d < d_true) & ~is_true).astype(np.int32)
+    # Beyond the 7x7 window the count would be wrong, so those pixels are given
+    # a rank that fails every k rather than a possibly flattering one.
     far = d_true > 3.5 * cell                       # true cell outside the neighbourhood: rank > 49
     rank = np.where(far, 10_000, closer)
+    # rank 0 = the true cell is the nearest, so rank < k is "within the top k".
     return {k: rank < k for k in ks}
 
 
 def main():
+    """Score four methods on identical pixels and report errors and beam accuracy.
+
+    Every method is decoded through the same decode(), masked by the same
+    truth-derived mask and weighted by the same per-pixel power, so the columns
+    differ only in the prediction.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--multi", required=True); ap.add_argument("--truth", required=True)
     ap.add_argument("--out", default=None)
@@ -103,6 +129,9 @@ def main():
         per_pos, n_pos = 4, len(train) // 4
         keep = max(1, cfg.max_train_views // per_pos)
         if cfg.subset_mode == "fps":
+            # Farthest-point sampling: greedily take the position furthest from
+            # everything chosen so far, which spreads the subset over the plan
+            # rather than along the route order.
             pos = np.array([poses[train[p * per_pos]][0] for p in range(n_pos)])
             chosen = [0]; dmin = np.linalg.norm(pos - pos[0], axis=1)
             while len(chosen) < keep:
@@ -120,6 +149,8 @@ def main():
             raise SystemExit("refusing a partial test set: " + msg + " (or pass --allow-partial to score the subset, labelled as such)")
         print("WARNING, partial test set: " + msg)
     # constant predictor: the training pixels' circular-mean azimuth, mean zenith, mean delay
+    # The weakest possible baseline: one number for the whole dataset. Any
+    # method that does not beat this has learned nothing at all.
     cs = np.zeros(2); zs = ds = cnt = 0.0
     for n in train:
         a = np.load(os.path.join(cfg.truth, "spectra_float", n + ".npy")).astype(np.float64)
@@ -147,9 +178,15 @@ def main():
         mask = (truth[0] - lo0) / (hi0 - lo0) > 0.02
         if not mask.any():
             continue
+        # Nearest two TRAINING positions at the same yaw. Restricting to the
+        # same yaw is what makes "copy" a fair baseline: a spectrum from a
+        # different facing is not a usable copy.
         d = np.linalg.norm(tpos[y] - rx, axis=1); order = np.argsort(d)[:2]
         nn_dist.append(float(d[order[0]])); view_rx.append(np.asarray(rx, float))
         near = load(tnames[y][order[0]]); second = load(tnames[y][order[1]])
+        # Inverse-distance weights. Blending the raw channels means the cos/sin
+        # pair blends as a vector, which is the circular mean of the azimuth --
+        # the reason the vector encoding exists.
         w1, w2 = 1.0 / max(d[order[0]], 1e-6), 1.0 / max(d[order[1]], 1e-6)
         interp = (w1 * near + w2 * second) / (w1 + w2)
         preds = {"nearest": near, "interp2": interp, "rrf": np.load(os.path.join(cfg.multi, "renders", n + ".npy")).astype(np.float64)}
@@ -175,6 +212,9 @@ def main():
     for m in methods:
         row = {}
         for q in ("az", "zen", "delay"):
+            # Weighted quantiles: sort by error, walk the cumulative power.
+            # The _pw pair answers "how wrong is it where the signal is", which
+            # can differ sharply from the unweighted figure.
             e = np.concatenate(err[m][q]); order = np.argsort(e); cw = np.cumsum(w[order])
             row[q] = {"median": float(np.median(e)), "p90": float(np.percentile(e, 90)), "rmse": float(np.sqrt((e ** 2).mean())),
                       "median_pw": float(e[order][np.searchsorted(cw, 0.5)]), "p90_pw": float(e[order][np.searchsorted(cw, 0.9)])}
@@ -196,6 +236,7 @@ def main():
         # crossover can be read per propagation regime; a jittered position outside every box goes to the nearest one
         spaces = json.load(open(cfg.layout))["spaces"]
         def space_of(rx):
+            """Which space a receiver sits in, 0.3 m tolerance, nearest as fallback."""
             for s in spaces:
                 if s["x0"] - 0.3 <= rx[0] <= s["x1"] + 0.3 and s["y0"] - 0.3 <= rx[1] <= s["y1"] + 0.3:
                     return s["name"]

@@ -17,6 +17,10 @@ Three measurements on the checkpoint against a run's rrf_state.pt:
      random directions, and the alignment of the rotation axis with those
      directions. A pure geometric correction cannot know where Tx-A is.
 
+Measurement 3 is the discriminating one, and Tx-B and the random directions
+are its controls: a change that looks Tx-A-specific but is equally strong
+towards Tx-B is not Tx-specific at all.
+
     PYTHONUTF8=1 python rrf_gsplat/diag_shape.py --run output/rrf/a_mvdr_db_geom
 """
 
@@ -45,12 +49,23 @@ def quat_to_R(q):
 
 
 def extent_along(R, s, u):
-    """sqrt(u^T Sigma u) with Sigma = R diag(s^2) R^T; u [N,3] unit."""
+    """sqrt(u^T Sigma u) with Sigma = R diag(s^2) R^T; u [N,3] unit.
+
+    The Gaussian's width in a given world direction. Computed by rotating u
+    into the Gaussian's own frame, where Sigma is diagonal, rather than by
+    forming Sigma for every Gaussian.
+    """
     a = np.einsum("nij,nj->ni", np.transpose(R, (0, 2, 1)), u)     # u in the Gaussian frame
     return np.sqrt(((a * s) ** 2).sum(1))
 
 
 def nearest_normal(scene, pts):
+    """Distance to, and surface normal of, the nearest surface along six axis rays.
+
+    Axis-aligned like scene_common.clearance, and returns the normal as well,
+    which is what measurement 2 needs. inf distance means no surface was found
+    along any axis.
+    """
     import mitsuba as mi
     o = mi.Point3f(pts[:, 0].tolist(), pts[:, 1].tolist(), pts[:, 2].tolist())
     best_t = np.full(len(pts), np.inf); best_n = np.zeros((len(pts), 3))
@@ -58,12 +73,14 @@ def nearest_normal(scene, pts):
         si = scene.mi_scene.ray_intersect(mi.Ray3f(o, mi.Vector3f(*map(float, d))))
         t = np.asarray(si.t).reshape(-1)
         n = np.stack([np.asarray(si.n.x).reshape(-1), np.asarray(si.n.y).reshape(-1), np.asarray(si.n.z).reshape(-1)], 1)
+        # Keep the normal belonging to whichever ray hit closest.
         closer = t < best_t
         best_t[closer] = t[closer]; best_n[closer] = n[closer]
     return best_t, best_n
 
 
 def main():
+    """Run the three measurements and write shape.json into the run directory."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", required=True)
     ap.add_argument("--checkpoint", default=os.path.join(REPO, "RF-3DGS_dataset/blender_visual_trained/chkpnt30000.pth"))
@@ -74,12 +91,15 @@ def main():
     cfg = ap.parse_args()
     rng = np.random.default_rng(0)
 
+    # Checkpoint tuple indices: 1 = xyz, 4 = log scale, 5 = quaternion.
     (m, _) = torch.load(cfg.checkpoint, weights_only=False, map_location="cpu")
     mu0, ls0, q0 = m[1].detach().numpy(), m[4].detach().numpy(), m[5].detach().numpy()
     st = torch.load(os.path.join(cfg.run, "rrf_state.pt"), map_location="cpu")
     mu1, ls1, q1 = st["means"].numpy(), st["scales"].numpy(), st["quats"].numpy()
     op1 = 1 / (1 + np.exp(-st["opacities"].numpy().reshape(-1)))
     alive = op1 > 0.01                           # Gaussians the trained field still uses
+    # Sampled from the alive ones only: a faded Gaussian's shape is arbitrary
+    # because nothing constrains it any more.
     idx = rng.choice(np.flatnonzero(alive), min(cfg.subset, int(alive.sum())), replace=False)
     s0, s1 = np.exp(ls0[idx]), np.exp(ls1[idx]); R0, R1 = quat_to_R(q0[idx]), quat_to_R(q1[idx]); mu = mu1[idx]
     out = {"n": int(len(idx)), "alive_frac": float(alive.mean())}
@@ -94,6 +114,8 @@ def main():
     srt0, srt1 = np.sort(s0, 1), np.sort(s1, 1)               # ascending: min, mid, max
     mid0, mid1 = srt0[:, 1] / srt0[:, 0], srt1[:, 1] / srt1[:, 0]
     top0, top1 = srt0[:, 2] / srt0[:, 1], srt1[:, 2] / srt1[:, 1]
+    # A factor of 3 on each ratio is the (arbitrary but stated) threshold that
+    # separates the two shapes; a Gaussian can be neither.
     disc0, disc1 = (mid0 > 3) & (top0 < 3), (mid1 > 3) & (top1 < 3)
     needle0, needle1 = (top0 > 3) & (mid0 < 3), (top1 > 3) & (mid1 < 3)
     print(f"1. anisotropy s_max/s_min: before median {np.median(an0):.2f} (P90 {np.percentile(an0, 90):.1f}), "
@@ -115,19 +137,25 @@ def main():
     from scene_common import load_radio_scene
     scene = load_radio_scene(cfg.scene_xml)
     t, n = nearest_normal(scene, mu)
-    near = np.isfinite(t) & (t < 0.2)
+    near = np.isfinite(t) & (t < 0.2)            # only Gaussians actually on a surface
     def short_axis_angle(R, s):
+        """Angle between each Gaussian's shortest axis and the surface normal."""
         k = s.argmin(1)
         ax = R[np.arange(len(R)), :, k]                       # column k
+        # abs(): an axis and its negation are the same direction, so the answer
+        # lives in [0, 90] rather than [0, 180].
         c = np.abs((ax * n).sum(1)) / (np.linalg.norm(ax, axis=1) * np.linalg.norm(n, axis=1) + 1e-12)
         return np.degrees(np.arccos(np.clip(c, 0, 1)))
     a0, a1 = short_axis_angle(R0, s0)[near], short_axis_angle(R1, s1)[near]
+    # 60 degrees is the isotropic expectation, printed so the numbers have a
+    # null hypothesis beside them.
     print(f"2. shortest axis vs surface normal ({near.sum():,} Gaussians within 0.2 m of a surface): "
           f"before median {np.median(a0):.1f} deg (within 20 deg: {(a0 < 20).mean():.1%}), after median {np.median(a1):.1f} deg "
           f"(within 20 deg: {(a1 < 20).mean():.1%}); random axes would give median 60 deg")
     # the test that is well defined for a needle: does the long axis lie in the
     # tangent plane (90 deg from the normal)?
     def long_axis_angle(R, s):
+        """Angle between each Gaussian's longest axis and the surface normal."""
         k = s.argmax(1)
         ax = R[np.arange(len(R)), :, k]
         c = np.abs((ax * n).sum(1)) / (np.linalg.norm(ax, axis=1) * np.linalg.norm(n, axis=1) + 1e-12)
@@ -137,6 +165,8 @@ def main():
     nd, nd1 = needle0[near], needle1[near]
     print(f"   longest axis vs normal: before median {np.median(l0):.1f} deg (within 20 deg of the tangent plane, i.e. > 70: {(l0 > 70).mean():.1%}), "
           f"after median {np.median(l1):.1f} deg (> 70: {(l1 > 70).mean():.1%})")
+    # Each shape class judged by the axis that is well defined for it, and only
+    # when there are enough of them for the median to mean anything.
     if dn.sum() > 100:
         print(f"   discs only ({dn.sum():,}): short axis vs normal before median {np.median(a0[dn]):.1f}, after (same Gaussians) {np.median(a1[dn]):.1f} deg")
     if nd.sum() > 100:
@@ -150,12 +180,16 @@ def main():
                                "needle_long_after": float(np.median(l1[nd])) if nd.sum() else None}
 
     # 3. does the change know where Tx-A is?
+    # Three unit directions per Gaussian: towards the trained transmitter,
+    # towards an untrained one, and at random. Only the first is "special" if
+    # the adaptation is Tx-specific.
     dA = np.array(cfg.tx_a) - mu; dA /= np.linalg.norm(dA, axis=1, keepdims=True)
     dB = np.array(cfg.tx_b) - mu; dB /= np.linalg.norm(dB, axis=1, keepdims=True)
     dR = rng.normal(size=mu.shape); dR /= np.linalg.norm(dR, axis=1, keepdims=True)
     rows = {}
     for name, u in (("to Tx-A", dA), ("to Tx-B", dB), ("random", dR)):
         e0, e1 = extent_along(R0, s0, u), extent_along(R1, s1, u)
+        # Log ratio, so growth and shrinkage are symmetric.
         lr = np.log(e1 / e0)
         rows[name] = {"mean_log_ratio": float(lr.mean()), "std": float(lr.std()), "frac_shrunk": float((lr < -0.1).mean()),
                       "frac_grown": float((lr > 0.1).mean())}
@@ -164,16 +198,22 @@ def main():
     lrA = np.log(extent_along(R1, s1, dA) / extent_along(R0, s0, dA))
     lrB = np.log(extent_along(R1, s1, dB) / extent_along(R0, s0, dB))
     lrR = np.log(extent_along(R1, s1, dR) / extent_along(R0, s0, dR))
+    # A high A-vs-B correlation means the change is not direction-specific at all.
     print(f"   correlation of per-Gaussian extent change: along Tx-A vs Tx-B {np.corrcoef(lrA, lrB)[0,1]:.3f}, "
           f"Tx-A vs random {np.corrcoef(lrA, lrR)[0,1]:.3f}")
     # rotation axis of the change against the directions
+    # R1 R0^T is the rotation applied; its trace gives the angle and its
+    # antisymmetric part the axis.
     dRot = np.einsum("nij,nkj->nik", R1, R0)                 # R1 R0^T
     tr = np.clip((np.trace(dRot, axis1=1, axis2=2) - 1) / 2, -1, 1)
     ang = np.degrees(np.arccos(tr))
     axis = np.stack([dRot[:, 2, 1] - dRot[:, 1, 2], dRot[:, 0, 2] - dRot[:, 2, 0], dRot[:, 1, 0] - dRot[:, 0, 1]], 1)
+    # Below 5 degrees the extracted axis is numerical noise, so those are excluded.
     turned = ang > 5
     axis = axis[turned] / (np.linalg.norm(axis[turned], axis=1, keepdims=True) + 1e-12)
     cosA, cosB, cosR = (np.abs((axis * d[turned]).sum(1)) for d in (dA, dB, dR))
+    # 0.500 is the isotropic expectation for |cos| between random unit vectors,
+    # printed as the null.
     print(f"   rotation: median {np.median(ang):.2f} deg, turned > 5 deg: {turned.mean():.1%}; among those, |cos(axis, dir)| mean "
           f"to Tx-A {cosA.mean():.3f}, to Tx-B {cosB.mean():.3f}, random {cosR.mean():.3f} (isotropic: 0.500)")
     out["tx_direction"] = {"extent": rows, "corr_A_B": float(np.corrcoef(lrA, lrB)[0, 1]), "corr_A_random": float(np.corrcoef(lrA, lrR)[0, 1]),

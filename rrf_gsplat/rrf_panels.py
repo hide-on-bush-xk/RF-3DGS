@@ -6,6 +6,10 @@ normalisation comparisons, ablations, the time-to-quality curves for a moved
 transmitter (cold against warm start), and the per-transmitter pipeline cost
 of the original tutorial against this port. Inline SVG on the dashboard's
 tokens, like planning_panels.py.
+
+Every card is optional: collect() returns only the files that exist, and
+render() emits a card only when its data is present, so a partially finished
+experiment set still produces a valid section.
 """
 
 from __future__ import annotations
@@ -21,6 +25,8 @@ CSS = """
 .rrf-grid .tablewrap table { min-width:0; }
 """
 
+# Card title -> run-name prefix. Runs are grouped by the naming convention
+# alone, so adding an experiment means naming it with the right prefix.
 GROUPS = {
     "colour": ("Colour function", "e2_"),
     "norm": ("Normalisation", "e1"),          # e1_ (60 GHz) and e1b_ (2.4 GHz, the released setting)
@@ -52,6 +58,7 @@ def crossover(rows, ch):
 
 
 def collect(rrf_dir):
+    """Whatever the experiment directory holds. Missing files are simply absent."""
     found = {}
     for key, name in (("summary", "summary.json"), ("tut019", "tutorial_019_timing.json"),
                       ("inria", "inria_timing.json"), ("gen", "generation_timing.json")):
@@ -101,6 +108,8 @@ def collect(rrf_dir):
 
 
 def _label(r):
+    """A short human label for a run: only the settings that differ from the
+    defaults are listed, so two runs' labels differ exactly where the runs do."""
     bits = [r["mode"]]
     if r["sh_degree"] != 3:
         bits.append(f"SH{r['sh_degree']}")
@@ -129,6 +138,8 @@ def hbars(rows, key, unit, fmt="{:.2f}", lower_better=False, width=560):
     vals = [r[key] for r in rows]
     vmax = max(vals) or 1.0
     pw = width - pad_l - 70
+    # The best run is highlighted, and which direction is "best" depends on the
+    # metric -- PSNR up, RMSE down.
     best = (min if lower_better else max)(vals)
     parts = [f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{key}" style="width:100%;height:auto">']
     for i, r in enumerate(rows):
@@ -150,6 +161,8 @@ def curves(rows, key="psnr_rgb", unit="dB", width=560, height=240, x="iteration"
 
     Iterations by default: wall time depends on what else shared the GPU.
     """
+    # Four at most: the CSS token set has four series colours, and more lines
+    # than that stop being readable anyway.
     rows = [r for r in rows if r.get("history")][:4]
     if not rows:
         return ""
@@ -190,11 +203,13 @@ def curves(rows, key="psnr_rgb", unit="dB", width=560, height=240, x="iteration"
 
 
 def _meter(value, label, unit=""):
+    """One headline number for the row of meters above the cards."""
     unit_html = f"<i> {unit}</i>" if unit else ""
     return f'<div class="meter"><b>{value}{unit_html}</b><span>{label}</span></div>'
 
 
 def _table(head, body_rows):
+    """A table where the first cell of each row is a header cell (the row label)."""
     h = "".join(f"<th>{c}</th>" for c in head)
     b = "".join("<tr>" + "".join((f"<th>{c}</th>" if i == 0 else f"<td>{c}</td>")
                                  for i, c in enumerate(row)) + "</tr>" for row in body_rows)
@@ -204,6 +219,8 @@ def _table(head, body_rows):
 def transfer_card(tr, width=560, height=260):
     """In-range RMSE on Tx-B against the source transmitter's distance to Tx-B."""
     rows = tr["rows"]
+    # The two reference lines drawn across the plot: the floor a transfer must
+    # beat and the ceiling it cannot exceed.
     cold, own = tr["cold"]["rmse_db_in_range"], tr["own_unfrozen"]["rmse_db_in_range"]
     pad_l, pad_r, pad_t, pad_b = 48, 12, 14, 30
     pw, ph = width - pad_l - pad_r, height - pad_t - pad_b
@@ -323,6 +340,8 @@ SOTA_SPECTRA = ["MVDR", "CBF", "TCBF", "AoD", "Delay", "MPC"]
 def sota_card(sota):
     """The released-benchmark table: released data, released split, the fork's metrics.py; best cell per column bold."""
     def best(S, key, lower):
+        """Which row holds the best cell of this column, or None if the column
+        is empty. `lower` because LPIPS is better when smaller."""
         vals = [(sota[k][S][key], k) for k, _ in SOTA_ROWS if S in sota.get(k, {})]
         return (min if lower else max)(vals)[1] if vals else None
     head = ["row"] + SOTA_SPECTRA
@@ -332,6 +351,8 @@ def sota_card(sota):
         for S in SOTA_SPECTRA:
             d = sota.get(kind, {}).get(S)
             if not d:
+                # Same distinction sota_table.py makes: N/A means the cell can
+                # never exist, a dash means it has not been produced yet.
                 cells.append("N/A" if (kind in ("db", "db_geom", "nerf2") and S in ("AoD", "Delay")) else "&ndash;"); continue
             parts = []
             for key, lower in (("PSNR", False), ("SSIM", False), ("LPIPS", True)):
@@ -350,9 +371,12 @@ def sota_card(sota):
 
 
 def render(found):
+    """The whole stage-2 section from whatever collect() found. "" if nothing."""
     runs = found.get("summary") or []
     if not runs and not found.get("tut019"):
         return ""
+    # Runs bucketed by the GROUPS prefixes; a run matching no prefix simply
+    # appears in no card.
     by = {g: [r for r in runs if r["run"].startswith(pre)] for g, (_, pre) in GROUPS.items()}
     meters, cards = [], []
 

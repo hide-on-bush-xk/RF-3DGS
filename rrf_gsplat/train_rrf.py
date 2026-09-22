@@ -49,6 +49,7 @@ from jet import jet_rgb, jet_inverse               # noqa: E402
 # data
 # --------------------------------------------------------------------------
 def qvec2rotmat(q):
+    """COLMAP quaternion (w, x, y, z) -> 3x3 rotation."""
     w, x, y, z = q
     return np.array([
         [1 - 2 * y * y - 2 * z * z, 2 * x * y - 2 * z * w, 2 * x * z + 2 * y * w],
@@ -91,6 +92,7 @@ def read_colmap_text(sparse_dir):
 
 
 def read_index(path):
+    """One image name per line, blanks dropped. The dataset's split file."""
     with open(path) as fid:
         return [l.strip() for l in fid if l.strip()]
 
@@ -107,6 +109,9 @@ def ensure_split(source, test_fraction=0.2, seed=0, views_per_position=4):
         return read_index(tr), read_index(te)
     names = sorted(os.path.splitext(f)[0] for f in os.listdir(os.path.join(source, "images"))
                    if f.endswith(".png"))
+    # By position, not by view: holding out a single yaw of a position would
+    # leave the other three faces of the same receiver in training, which is a
+    # leak rather than a held-out sample.
     n_pos = len(names) // views_per_position
     rng = np.random.default_rng(seed)
     test_pos = set(rng.permutation(n_pos)[:int(round(test_fraction * n_pos))].tolist())
@@ -143,6 +148,8 @@ def load_views(source, names, views, device, want_float):
         elif (w, h) != (width, height):
             raise ValueError(f"{n}: image size {w}x{h} differs from the first view's {width}x{height}")
         viewmats.append(torch.from_numpy(view)); Ks.append(torch.from_numpy(np.ascontiguousarray(K)))
+    # Everything resident on the GPU: uint8 for the PNGs and float16 for the
+    # spectra, which is what makes a whole dataset fit alongside the model.
     out = {"rgb": torch.stack(rgb).to(device), "viewmats": torch.stack(viewmats).to(device),
            "Ks": torch.stack(Ks).to(device), "names": names, "width": width, "height": height}
     if have_float:
@@ -216,6 +223,9 @@ class RRF(torch.nn.Module):
         self.visual_iteration = it
         self.last_info = None
 
+    # The activated views of the raw parameters. Same convention as INRIA's
+    # GaussianModel: parameters are stored unconstrained (log scale, logit
+    # opacity, unnormalised quaternion) and these apply the activation.
     @property
     def means(self):
         return self.params["means"]
@@ -258,6 +268,9 @@ class RRF(torch.nn.Module):
         return (self.sh * basis[:, :, None]).sum(dim=1) + 0.5
 
     def render(self, viewmat, K, width, height, span_db):
+        """One view, [C, H, W]. Three paths depending on mode, plus the optional
+        delay-depth decomposition; span_db is the dataset's dB range, needed only
+        by the power mode and the delay term."""
         from gsplat import rasterization
         device = self.means.device
         if self.mode == "rgb" and self.sh_degree > 0:
@@ -323,6 +336,8 @@ class RRF(torch.nn.Module):
         p["opacities"].data.copy_(st["opacity_logit"].reshape(-1))
 
     def state(self):
+        """Everything rrf_state.pt holds: the raw parameters plus the two fields
+        needed to reconstruct the model that produced them."""
         return {k: v.data for k, v in self.params.items()} | {"mode": self.mode, "sh_degree": self.sh_degree}
 
 
@@ -330,6 +345,8 @@ class RRF(torch.nn.Module):
 # evaluation
 # --------------------------------------------------------------------------
 def psnr(a, b):
+    """PSNR in dB for tensors in [0, 1]. The epsilon bounds identical inputs at
+    about 120 dB instead of returning inf."""
     mse = ((a - b) ** 2).mean()
     return float(20 * torch.log10(1.0 / torch.sqrt(mse + 1e-12)))
 
@@ -432,6 +449,12 @@ def evaluate_multi(model, data, idx, ch_ranges, channel_names, save_dir=None, ma
 
 # --------------------------------------------------------------------------
 def main():
+    """Load the dataset and checkpoint, run the fine-tune, evaluate and save.
+
+    Writes into --out: results.json (config, per-eval history, final metrics and
+    wall time), rrf_state.pt (the parameters) and, with --save-renders, the
+    held-out predictions in both PNG and .npy form.
+    """
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--source", required=True, help="dataset dir: images/, sparse/0, [spectra_float/]")
@@ -594,6 +617,12 @@ def main():
         print(f"delay channel {model.delay_channel}: rendered depth / c added, span {model.delay_span_ns:.1f} ns")
 
     def target(i):
+        """Training view i as the tensor this mode's loss expects, in [0, 1].
+
+        Every mode normalises to [0, 1] so one set of learning rates works
+        across all of them: rgb from the PNG, multi per channel from the
+        dataset's channel_ranges, db and power from the single global range.
+        """
         if cfg.mode == "rgb":
             return train["rgb"][i].float() / 255.0
         if cfg.mode == "multi":

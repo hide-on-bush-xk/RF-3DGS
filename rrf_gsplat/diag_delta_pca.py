@@ -45,6 +45,7 @@ TX = {"A": (6.905, 0.0, 0.287), "C": (0.0, -3.0, 2.0), "D": (6.9, -5.4, 0.8), "E
 
 
 def quat_normalize(q):
+    """Unit quaternions; the clamp guards a zero-norm row."""
     return q / q.norm(dim=1, keepdim=True).clamp_min(1e-12)
 
 
@@ -58,10 +59,17 @@ def quat_mul(a, b):
 
 
 def rotvec_between(q_from, q_to):
-    """Rotation vector of q_to * conj(q_from): the rotation applied to the Gaussian's axes."""
+    """Rotation vector of q_to * conj(q_from): the rotation applied to the Gaussian's axes.
+
+    A rotation vector rather than a quaternion difference, because the stacking
+    below is linear algebra: quaternions do not live in a vector space, axis
+    times angle does.
+    """
     q_from, q_to = quat_normalize(q_from), quat_normalize(q_to)
     conj = q_from * torch.tensor([1.0, -1.0, -1.0, -1.0])
     r = quat_mul(q_to, conj)
+    # q and -q are the same rotation; picking w >= 0 takes the short way round,
+    # without which a small rotation could be recorded as a nearly 2*pi one.
     r = torch.where(r[:, :1] < 0, -r, r)                              # w >= 0: the short rotation
     v = r[:, 1:]; n = v.norm(dim=1, keepdim=True)
     ang = 2 * torch.atan2(n, r[:, :1])
@@ -69,6 +77,7 @@ def rotvec_between(q_from, q_to):
 
 
 def main():
+    """Stack the ten deformations, report their spectrum, and test predictability."""
     (m, _) = torch.load(CKPT, weights_only=False, map_location="cpu")
     (_, xyz0, _, _, scaling0, rotation0, *_ ) = m
     xyz0, scaling0, rotation0 = (t.detach().float() for t in (xyz0, scaling0, rotation0))
@@ -76,9 +85,11 @@ def main():
     for name, run in SOURCES.items():
         p = os.path.join(OUT, run, "rrf_state.pt")
         if not os.path.exists(p):
-            continue
+            continue                       # a source that has not been run yet
         st = torch.load(p, map_location="cpu")
         names.append(name)
+        # Differences in the SAME space the parameters are stored in: log scale,
+        # rotation vector, position. Each is additive, so the stack is linear.
         blocks["dlogs"].append((st["scales"].float() - scaling0).numpy())
         blocks["drot"].append(rotvec_between(rotation0, st["quats"].float()).numpy())
         blocks["dmu"].append((st["means"].float() - xyz0).numpy())
@@ -90,8 +101,13 @@ def main():
 
     def spectrum(X, label):
         """X [n_src, D]. Returns uncentered energy shares and centered variance shares."""
+        # The Gram matrix is 10x10 while D is ~27 million: eigenvalues of X X^T
+        # are the same as those of X^T X, so this never forms the large matrix.
         G = X @ X.T
         ev = np.sort(np.linalg.eigvalsh(G))[::-1].clip(min=0)
+        # Centered = variance about the mean deformation. The mean is the part
+        # every transmitter shares, so the centered spectrum is what says
+        # whether the Tx-SPECIFIC part is low-rank.
         Xc = X - X.mean(0, keepdims=True)
         evc = np.sort(np.linalg.eigvalsh(Xc @ Xc.T))[::-1].clip(min=0)
         e, ec = ev / ev.sum(), evc / max(evc.sum(), 1e-30)
@@ -101,7 +117,8 @@ def main():
         print(f"  uncentered energy share, cumulative: " + " ".join(f"{v:.2f}" for v in np.cumsum(e)))
         print(f"  centered variance share, cumulative: " + " ".join(f"{v:.2f}" for v in np.cumsum(ec)))
         print(f"  mean deformation carries {ev.sum() - evc.sum():.3g} of {ev.sum():.3g} energy ({1 - evc.sum() / ev.sum():.1%})")
-        iu = np.triu_indices(n_src, 1)
+        iu = np.triu_indices(n_src, 1)     # each unordered pair once
+        # Does similarity track distance? The rival explanation to a shared basis.
         r = np.corrcoef(cos[iu], dist[iu])[0, 1]
         print(f"  pairwise cosine: mean {cos[iu].mean():.3f}, min {cos[iu].min():.3f}, max {cos[iu].max():.3f}; corr with Tx distance {r:+.2f}")
         near = sorted(zip(cos[iu], dist[iu], [f"{names[i]}-{names[j]}" for i, j in zip(*iu)]), reverse=True)[:4]
@@ -115,15 +132,22 @@ def main():
         Xs[key] = X
         out["blocks"][key] = spectrum(X, key)
     # combined, each block scaled to unit pooled RMS
+    # Without the rescaling the combined spectrum would be whichever block
+    # happens to have the largest raw units, not a combination.
     Xall = np.concatenate([Xs[k] / np.sqrt((Xs[k] ** 2).mean()) for k in ("dlogs", "drot", "dmu")], 1)
     out["blocks"]["combined"] = spectrum(Xall, "combined (blocks at unit RMS)")
 
     # leave-one-out: predict the held-out deformation from the others' coefficients regressed on Tx position
+    # Two baselines in the same units: the mean deformation (what you get with
+    # no position information) and the nearest source's (what a copy would give).
+    # The k columns only mean something if they beat both.
     print("\nleave-one-out prediction of a source's deformation (combined, relative error ||pred - true|| / ||true||):")
     print(f"{'held out':>9} {'k=1':>6} {'k=3':>6} {'k=5':>6} {'mean':>6} {'nearest':>8} {'d nearest':>9}")
     loo = []
     for i in range(n_src):
         keep = [j for j in range(n_src) if j != i]
+        # PCA fitted on the nine only: the held-out source contributes nothing
+        # to the basis, which is what makes this a genuine prediction.
         Xk = Xall[keep]; mu = Xk.mean(0, keepdims=True); Xc = Xk - mu
         U, S, Vt = np.linalg.svd(Xc, full_matrices=False)          # Xc = U S Vt; coefficients = U S
         coef = U * S
@@ -142,6 +166,7 @@ def main():
         loo.append(row)
         print(f"{row['held']:>9} {row['k1']:6.2f} {row['k3']:6.2f} {row['k5']:6.2f} {row['mean']:6.2f} {row['nearest']:8.2f} {row['d_nearest']:9.1f}")
     out["loo"] = loo
+    # Medians, because ten points make any single row noisy.
     for key in ("k1", "k3", "k5", "mean", "nearest"):
         print(f"  median relative error, {key}: {np.median([r[key] for r in loo]):.2f}")
     json.dump(out, open(os.path.join(OUT, "diag_delta_pca.json"), "w"), indent=1)
