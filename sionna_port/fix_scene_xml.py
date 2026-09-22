@@ -29,6 +29,7 @@ from collections import Counter
 # these bands Sionna raises "Properties of ITU material ... are not defined for
 # this frequency" when the scene frequency is set, which is easy to mistake for a
 # problem with the scene.
+# Checking here turns that late, confusing failure into an early, specific one.
 ITU_BANDS_GHZ = {
     "brick": [(1.0, 40.0)],
     "ceiling_board": [(1.0, 100.0), (220.0, 450.0)],
@@ -59,8 +60,10 @@ DEFAULT_CUSTOM_MAP = {
 
 
 def valid_at(itu_type: str, freq_ghz: float) -> bool:
+    """Is this material's ITU data defined at that frequency? Bands may be disjoint."""
     return any(lo <= freq_ghz <= hi for lo, hi in ITU_BANDS_GHZ[itu_type])
 
+# Blender's duplicate suffix: ".001", ".016" and so on, only at the end.
 SUFFIX = re.compile(r"\.\d+$")
 
 
@@ -68,17 +71,23 @@ def resolve_type(mat_id: str, custom_map: dict[str, str]) -> str | None:
     """ITU material type for a Blender material id, or None if unmappable."""
     name = mat_id[4:] if mat_id.startswith("mat-") else mat_id
     base = SUFFIX.sub("", name)
+    # Both spellings appear in exports from different Blender plugin versions.
     if base.startswith("itu_") or base.startswith("itu-"):
         itu_type = base[4:]
+        # An itu_ prefix on an unknown type is NOT silently passed through:
+        # returning None routes it to the "unmapped" report instead.
         return itu_type if itu_type in ITU_TYPES else None
     return custom_map.get(base)
 
 
 def fix(in_path: str, out_path: str, custom_map: dict[str, str],
         freq_ghz: float = 60.0, verbose: bool = True) -> Counter:
+    """Rewrite every <bsdf> into an itu-radio-material. Returns a type histogram."""
     tree = ET.parse(in_path)
     root = tree.getroot()
 
+    # Validate the mapping table before touching the scene, so a bad --map fails
+    # immediately rather than after a partial rewrite.
     bad = {t: custom_map[t] for t in custom_map if not valid_at(custom_map[t], freq_ghz)}
     if bad:
         options = sorted(t for t in ITU_TYPES if valid_at(t, freq_ghz))
@@ -88,20 +97,25 @@ def fix(in_path: str, out_path: str, custom_map: dict[str, str],
 
     stats = Counter()
     unmapped = set()
+    # Materials appear both at the top level and nested inside shapes.
     for bsdf in root.findall("./bsdf") + root.findall(".//shape/bsdf"):
         mat_id = bsdf.attrib.get("id")
         if not mat_id:
-            continue
+            continue                     # anonymous bsdf; nothing can reference it
         itu_type = resolve_type(mat_id, custom_map)
         if itu_type is not None and not valid_at(itu_type, freq_ghz):
             raise SystemExit(
                 f"{mat_id} resolves to ITU material {itu_type!r}, which is not "
                 f"defined at {freq_ghz} GHz. Remap it with --map.")
         if itu_type is None:
+            # Left as it is, and reported: rewriting it to an arbitrary material
+            # would produce a scene that loads but is quietly wrong.
             unmapped.add(mat_id)
             stats["unmapped"] += 1
             continue
 
+        # clear() drops the original plugin's children and attributes; the id is
+        # then put back, because the shapes' <ref id="..."> must keep resolving.
         bsdf.clear()
         bsdf.attrib["id"] = mat_id
         bsdf.attrib["name"] = mat_id
@@ -109,7 +123,8 @@ def fix(in_path: str, out_path: str, custom_map: dict[str, str],
         bsdf.append(ET.Element("string", {"name": "type", "value": itu_type}))
         stats[itu_type] += 1
 
-    ET.indent(root, space="\t")
+    ET.indent(root, space="\t")          # keep the file diffable
+    # No XML declaration: matches how the original was written.
     tree.write(out_path, encoding="utf-8", xml_declaration=False)
 
     if verbose:
@@ -123,6 +138,7 @@ def fix(in_path: str, out_path: str, custom_map: dict[str, str],
 
 
 def main():
+    """Parse arguments, apply any --map overrides, and rewrite the scene."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input")
@@ -137,6 +153,7 @@ def main():
     custom_map = dict(DEFAULT_CUSTOM_MAP)
     for item in args.map:
         name, _, itu_type = item.partition("=")
+        # Rejected here rather than at load time, with the valid list in the message.
         if itu_type not in ITU_TYPES:
             ap.error(f"{itu_type!r} is not an ITU material; pick from "
                      f"{sorted(ITU_TYPES)}")

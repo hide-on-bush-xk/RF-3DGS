@@ -11,6 +11,8 @@ import os
 
 from reference_panels import embed_image
 
+# Sticky header and a scroll container, because the table is wider than the
+# page: the algorithm names have to stay visible while scrolling sideways.
 CSS = """
 .cmp-scroll { overflow-x: auto; border:1px solid var(--line); border-radius:4px;
   background:var(--surface); }
@@ -43,23 +45,36 @@ table.cmp tbody tr:last-child th, table.cmp tbody tr:last-child td { border-bott
 
 
 def render(payload, max_width: int = 260) -> str:
+    """Build the whole comparison section from a manifest dict.
+
+    The manifest supplies `columns` (algorithms), `rows` (source + setting) and
+    two roots: image paths are resolved against the repository or against the
+    output directory depending on where that image came from.
+    """
     cols = payload["columns"]
     rows = payload["rows"]
     root = payload.get("root", ".")
     out_base = payload.get("out_base", ".")
 
+    # Leading blank header cell sits above the row labels.
     head = ['<th style="width:150px"></th>']
     for c in cols:
+        # Unported algorithms are labelled in the header, so the dashed cells
+        # below are read as scope rather than as failure.
         ported = "" if c["ported"] else "<small>not ported</small>"
         head.append(f'<th>{c["name"]}<small>{c["algorithm"]}</small>{ported}</th>')
 
     body = []
     for row in rows:
+        # The row's settings as a definition list inside its label cell.
         meta = "".join(f"<div><dt>{k}</dt><dd>{v}</dd></div>"
                        for k, v in row.get("params", {}).items())
         cells = [f'<th>{row["label"]}<dl>{meta}</dl></th>']
         for c in cols:
             cell = row.get("cells", {}).get(c["name"])
+            # Three distinct empty states, deliberately distinguishable:
+            # no entry at all, an entry that explains why it is missing, and an
+            # entry whose file could not be found on disk.
             if not cell:
                 cells.append('<td class="gap"><span>&mdash;</span></td>')
                 continue
@@ -72,6 +87,7 @@ def render(payload, max_width: int = 260) -> str:
             # though the rest of that row does not.
             which = cell.get("base", row.get("base"))
             base = root if which == "root" else out_base
+            # Inlined as a data URI, so the dashboard is one self-contained file.
             src = embed_image(os.path.join(base, cell["image"]), max_width)
             if not src:
                 cells.append('<td class="gap"><span>file missing</span></td>')

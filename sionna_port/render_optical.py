@@ -32,6 +32,9 @@ def boresight(position, yaw_rad: float):
     Sionna's receiver orientation is (yaw, pitch, roll) on an array whose
     initial direction is +x -- the frame the tutorial's euler_to_quaternion
     maps onto COLMAP's.
+
+    The camera wants a look_at point rather than an angle, so the yaw is turned
+    into one. Only yaw is handled; pitch and roll are zero in this campaign.
     """
     direction = np.array([math.cos(yaw_rad), math.sin(yaw_rad), 0.0])
     # Plain floats: mi.Point3f rejects numpy scalars.
@@ -48,11 +51,17 @@ def render_pose(scene, position, yaw_rad: float, width: int = 300,
     building renders black -- measured mean 0.0000 against 0.128 for the same
     scene seen from above. Clipping the geometry a metre over the receiver lets
     the light in while leaving everything the receiver can see intact.
+
+    `paths` optionally overlays a solved path set on the render, which is how a
+    spectrum feature can be traced to the surface that produced it.
+    Returns an HxWx3 uint8 array.
     """
     from sionna.rt import Camera
 
     camera = Camera(position=[float(v) for v in position],
                     look_at=boresight(position, yaw_rad))
+    # Passed as **extra rather than a keyword, since clip_at must be absent
+    # entirely (not None) when clipping is disabled.
     extra = {} if clip_above is None else {
         "clip_at": float(position[2]) + clip_above}
     bitmap = scene.render(camera=camera, fov=fov_deg,
@@ -62,11 +71,16 @@ def render_pose(scene, position, yaw_rad: float, width: int = 300,
                           paths=paths, show_devices=False,
                           return_bitmap=True, **extra)
     arr = np.array(bitmap.convert(srgb_gamma=True, component_format=1))  # UInt8
-    return arr[..., :3]
+    return arr[..., :3]      # drop alpha
 
 
 def load_radio_scene(scene_xml: str, frequency: float = 60e9,
                      scattering: float = 0.7):
+    """The radio scene with a uniform scattering coefficient.
+
+    A local copy of tx_planning/scene_common.load_radio_scene without the
+    antenna arrays, which rendering does not need.
+    """
     from sionna.rt import load_scene
     scene = load_scene(scene_xml, merge_shapes=True)
     scene.frequency = frequency
@@ -76,10 +90,13 @@ def load_radio_scene(scene_xml: str, frequency: float = 60e9,
 
 
 def main():
+    """Render one position at each requested yaw and write the PNGs."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scene-xml", required=True)
     ap.add_argument("--position", type=float, nargs=3, default=[3.0, -2.0, 0.0])
+    # The four cardinal yaws the spectrum campaign uses, so each render pairs
+    # with one face of the receiver's spectrum set.
     ap.add_argument("--yaw-deg", type=float, nargs="+",
                     default=[-90.0, 0.0, 90.0, 180.0])
     ap.add_argument("--out-dir", default="../output/optical")
@@ -107,6 +124,7 @@ def main():
                           clip_above=args.clip_above)
         name = f"optical_yaw{yaw:+.0f}.png"
         imageio.imwrite(os.path.join(args.out_dir, name), img)
+        # The mean is the black-render check: near 0 means the light never got in.
         print(f"  {name}  mean {img.mean():.1f}")
 
 

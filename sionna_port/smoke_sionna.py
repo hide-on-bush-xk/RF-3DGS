@@ -7,6 +7,10 @@ Sionna's PlanarArray lays out its elements, the peak lands somewhere else.
 
 Run inside WSL:
     LD_LIBRARY_PATH=$CONDA_PREFIX/lib python smoke_sionna.py --scene-xml ...
+
+Exit codes are meaningful, so this can gate a dataset generation run:
+0 = agreement, 1 = the scene did not produce exactly one LOS path,
+2 = the element ordering is wrong.
 """
 
 import argparse
@@ -35,18 +39,24 @@ def select_variant(variant: str) -> str:
 
 
 def sphere_grid(n_theta=181, n_phi=361, device=None):
-    """Full-sphere angle grid, so the peak is findable in any direction."""
+    """Full-sphere angle grid, so the peak is findable in any direction.
+
+    One degree of spacing in both angles; the tolerance below is set against it.
+    A pinhole grid would only cover +-45 degrees and could hide a gross error.
+    """
     theta = torch.linspace(0.0, math.pi, n_theta, device=device)
     phi = torch.linspace(-math.pi, math.pi, n_phi, device=device)
     return torch.meshgrid(theta, phi, indexing="ij")
 
 
 def main():
+    """Load the scene, solve LOS only, and compare the CBF peak with Sionna's AoA."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--scene-xml", required=True)
     ap.add_argument("--tx", type=float, nargs=3, default=[6.905, 0.0, 0.287])
     ap.add_argument("--rx", type=float, nargs=3, default=[3.0, -2.0, 0.0])
     ap.add_argument("--M", type=int, default=10)
+    # Defaults to the LLVM variant, which is what works in WSL2 (see select_variant).
     ap.add_argument("--variant", default="llvm_ad_mono_polarized",
                     help="Mitsuba variant; 'auto' lets sionna.rt decide")
     args = ap.parse_args()
@@ -72,6 +82,8 @@ def main():
     solver = PathSolver()
 
     # --- 1. line of sight only, so there is exactly one path ------------------
+    # max_depth=0 with every interaction off: the only possible path is direct,
+    # which is what makes the AoA unambiguous and the check decisive.
     paths = solver(scene=scene, max_depth=0, los=True,
                    specular_reflection=False, diffuse_reflection=False,
                    refraction=False, samples_per_src=10_000, seed=42)
@@ -84,6 +96,8 @@ def main():
     n_valid = int(valid.sum())
     print(f"valid paths: {n_valid}")
     if n_valid != 1:
+        # Zero means the receiver is occluded; more than one would mean the
+        # interaction flags above did not take effect.
         print("  expected exactly one LOS path; is the receiver behind geometry?")
         sys.exit(1)
 
@@ -93,6 +107,8 @@ def main():
 
     # --- 2. beamform over the whole sphere and find the peak -----------------
     th, ph = sphere_grid(device=device)
+    # ArrayGrid built directly rather than via .build(), because the angles here
+    # are a full sphere instead of a pinhole view.
     grid = ArrayGrid(M=args.M, theta=th, phi=ph,
                      steering=steering_vector(args.M, th, ph),
                      manifold=array_manifold_vector(args.M, th, ph))
@@ -114,6 +130,7 @@ def main():
     # Accept either, and check the ambiguity itself separately below.
     mirror_phi = math.pi - aoa_phi
     d_theta = abs(math.degrees(peak_theta - aoa_theta))
+    # (x + 180) % 360 - 180 wraps an angular difference into [-180, 180).
     d_phi_direct = abs((math.degrees(peak_phi - aoa_phi) + 180) % 360 - 180)
     d_phi_mirror = abs((math.degrees(peak_phi - mirror_phi) + 180) % 360 - 180)
     d_phi = min(d_phi_direct, d_phi_mirror)
@@ -131,6 +148,8 @@ def main():
         sys.exit(2)
 
     # --- 2b. the ambiguity is a property of the array, not a bug -------------
+    # Measured rather than asserted: the inner product of the two steering
+    # vectors is 1 exactly when the array cannot tell the directions apart.
     pair_theta = torch.tensor([[aoa_theta, aoa_theta]], device=device)
     pair_phi = torch.tensor([[aoa_phi, mirror_phi]], device=device)
     pair = steering_vector(args.M, pair_theta, pair_phi)
@@ -143,6 +162,8 @@ def main():
               "in a neighbouring view rather than the same image.")
 
     # --- 3. a realistic solve, for shapes and path counts --------------------
+    # No assertion here: this leg just reports whether the dataset settings will
+    # give MVDR enough delay taps to work without diagonal loading.
     paths = solver(scene=scene, max_depth=1, los=True,
                    specular_reflection=True, diffuse_reflection=True,
                    refraction=False, samples_per_src=100_000, seed=42)

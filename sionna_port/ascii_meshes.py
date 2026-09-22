@@ -22,6 +22,8 @@ import re
 import unicodedata
 
 # Blender's default primitive names in a Chinese UI, plus the scene's own nouns.
+# Transliterated rather than dropped, so the renamed files stay readable; an
+# unlisted word simply falls through to the ASCII-stripping step below.
 TRANSLIT = {
     "立方体": "cube",
     "球体": "sphere",
@@ -43,20 +45,27 @@ def to_ascii(name: str, fallback_index: int) -> str:
     out = stem
     for zh, en in TRANSLIT.items():
         out = out.replace(zh, en)
+    # NFKD then encode-with-ignore strips accents and drops anything still
+    # non-ASCII, e.g. characters TRANSLIT does not cover.
     out = unicodedata.normalize("NFKD", out).encode("ascii", "ignore").decode()
     out = re.sub(r"[^A-Za-z0-9._-]+", "_", out).strip("_")
+    # A name made entirely of stripped characters would come out empty or as
+    # punctuation only; fall back to the index so it is still unique.
     if not out or out.lstrip("._-") == "":
         out = f"mesh_{fallback_index:04d}"
     return out + ext
 
 
 def rename_meshes(mesh_dir: str, dry_run: bool = False) -> dict[str, str]:
+    """Rename every non-ASCII .ply in place. Returns {old: new}."""
     mapping: dict[str, str] = {}
     taken: set[str] = set()
+    # sorted() so the fallback indices are stable between runs.
     for i, name in enumerate(sorted(os.listdir(mesh_dir))):
         if not name.lower().endswith(".ply"):
             continue
         if name.isascii():
+            # Already fine, but it still reserves its name against a collision.
             taken.add(name)
             continue
         new = to_ascii(name, i)
@@ -88,12 +97,15 @@ def sanitize_shape_ids(text: str) -> tuple[str, int]:
     count = 0
 
     def fix(match):
+        """Rewrite one id/name attribute value, de-duplicating as it goes."""
         nonlocal count
         attr, value = match.group(1), match.group(2)
         new = value
         for zh, en in TRANSLIT.items():
             new = new.replace(zh, en)
         new = unicodedata.normalize("NFKD", new).encode("ascii", "ignore").decode()
+        # Note '.' is absent from the allowed set here, unlike to_ascii: that is
+        # the whole point, since the dot is what Mitsuba rejects.
         new = re.sub(r"[^A-Za-z0-9_-]+", "_", new).strip("_") or "shape"
         candidate, n = new, 1
         while candidate in seen:
@@ -114,6 +126,11 @@ def sanitize_shape_ids(text: str) -> tuple[str, int]:
 
 
 def rewrite_xml(xml_path: str, out_path: str, mapping: dict[str, str]) -> int:
+    """Substitute the renamed mesh filenames throughout the XML.
+
+    A plain text replace rather than an XML parse, so formatting and comments
+    survive untouched. Safe here because the names are long and distinctive.
+    """
     with open(xml_path, encoding="utf-8") as fid:
         text = fid.read()
     n = 0
@@ -121,12 +138,14 @@ def rewrite_xml(xml_path: str, out_path: str, mapping: dict[str, str]) -> int:
         if old in text:
             text = text.replace(old, new)
             n += 1
+    # newline="\n" so the file does not gain CRLF line endings on Windows.
     with open(out_path, "w", encoding="utf-8", newline="\n") as fid:
         fid.write(text)
     return n
 
 
 def main():
+    """Rename the meshes, update the XML, and write the restore sidecar."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("xml", help="scene XML to rewrite")
@@ -141,6 +160,7 @@ def main():
 
     mapping = rename_meshes(mesh_dir, args.dry_run)
     print(f"{len(mapping)} meshes renamed to ASCII")
+    # A sample rather than the whole list, which runs to hundreds of entries.
     for old, new in list(mapping.items())[:5]:
         print(f"  {old}  ->  {new}")
     if len(mapping) > 5:
@@ -149,6 +169,8 @@ def main():
     if not args.dry_run:
         n = rewrite_xml(args.xml, out, mapping)
         print(f"{n} references updated in {out}")
+        # ensure_ascii=False so the original names stay readable in the sidecar,
+        # which is what makes a restore possible.
         sidecar = os.path.join(mesh_dir, "ascii_rename_map.json")
         with open(sidecar, "w", encoding="utf-8") as fid:
             json.dump(mapping, fid, ensure_ascii=False, indent=1)
