@@ -23,6 +23,7 @@ KPIs (rate in bit/s/Hz): coverage = share of receivers whose best-serving gain e
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import os
@@ -67,6 +68,15 @@ class Evaluator:
         paths = self.solver(scene=self.scene, max_depth=self.cfg.max_depth, max_num_paths_per_src=10_000_000, samples_per_src=samples,
                             los=True, specular_reflection=True, diffuse_reflection=True, refraction=False, synthetic_array=True, seed=seed)
         self.solves += 1; self.solve_seconds += time.time() - t0
+        if self.solves % 25 == 0:
+            gc.collect(); dr.flush_malloc_cache()
+        if self.solves % 100 == 0:
+            import subprocess
+            try:
+                mem = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader"], capture_output=True, text=True, timeout=10).stdout.strip()
+            except Exception:
+                mem = "?"
+            print(f"    [solve {self.solves}: GPU memory used {mem}]", flush=True)
         return paths
 
     def gains_db(self, positions, samples):
@@ -194,18 +204,27 @@ def main():
     ap.add_argument("--margin", type=float, default=0.2); ap.add_argument("--max-depth", type=int, default=1); ap.add_argument("--scattering", type=float, default=0.7)
     ap.add_argument("--variant", default="cuda_ad_mono_polarized"); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--control", type=float, nargs=3, default=None, help="known placement to evaluate first (e.g. the earlier optimum)")
+    ap.add_argument("--resume", action="store_true", help="keep the methods already in --out and skip them")
     cfg = ap.parse_args()
     rng = np.random.default_rng(cfg.seed)
     ev = Evaluator(cfg)
     print(f"{len(ev.rx)} indoor receivers; SNR = gain + {ev.snr_offset_db:.1f} dB; threshold {cfg.threshold_db} dB")
     results = {"config": vars(cfg), "n_rx": int(len(ev.rx)), "snr_offset_db": ev.snr_offset_db, "methods": {}}
-    if cfg.control:
+    if cfg.control and not results.get("control"):
         kp = ev.kpis(ev.gains_db([np.array(cfg.control)], cfg.samples)); print(f"control {cfg.control} at {cfg.samples} samples: {kp}")
         results["control"] = {"position": cfg.control, "samples": cfg.samples, **kp}
+
+    if cfg.resume and os.path.exists(cfg.out):
+        prev = json.load(open(cfg.out)); results["methods"] = prev.get("methods", {}); results.setdefault("control", prev.get("control"))
+        print(f"resuming: {sorted(results['methods'])} already in {cfg.out}")
+
+    def done(name, K):
+        return f"{name}_K{K}" in results["methods"]
 
     def record(name, K, placement, solves, seconds):
         g = ev.gains_db(placement, cfg.eval_samples); kp = ev.kpis(g)
         results["methods"][f"{name}_K{K}"] = {"placement": [list(map(float, p)) for p in placement], "solves": int(solves), "seconds": float(seconds), **kp}
+        os.makedirs(os.path.dirname(os.path.abspath(cfg.out)), exist_ok=True); json.dump(results, open(cfg.out, "w"), indent=1)
         print(f"  {name:12s} K={K}: coverage {kp['coverage']:.3f}  mean rate {kp['mean_rate']:.2f}  edge rate {kp['edge_rate_p5']:.2f} bit/s/Hz  "
               f"({solves} solves, {seconds:.0f} s)  at {np.round(placement, 2).tolist()}")
 
@@ -213,24 +232,29 @@ def main():
     cand = candidates(ev, cfg.cand_step); print(f"{len(cand)} admissible candidate cells at {cfg.cand_step} m")
     s0, t0 = ev.solves, time.time(); G, greedy = exhaustive(ev, cand, cfg.samples); ex_solves, ex_sec = ev.solves - s0, time.time() - t0
     for K in cfg.k:
-        record("exhaustive" if K == 1 else "greedy", K, [np.array(p) for p in greedy[K]], ex_solves, ex_sec)
+        if not done("exhaustive" if K == 1 else "greedy", K):
+            record("exhaustive" if K == 1 else "greedy", K, [np.array(p) for p in greedy[K]], ex_solves, ex_sec)
     best_cell = np.array(greedy[1][0])
     for K in cfg.k:
         # random search
         s0, t0 = ev.solves, time.time(); best = (None, None)
-        for _ in range(cfg.budget):
+        for _ in range(0 if done("random", K) else cfg.budget):
             pl = [ev.random_position(rng) for _ in range(K)]; kp = ev.kpis(ev.gains_db(pl, cfg.samples)); key = (kp["coverage"], kp["mean_rate"])
             if best[1] is None or key > best[1]:
                 best = (pl, key)
-        record("random", K, best[0], ev.solves - s0, time.time() - t0)
+        if best[0] is not None:
+            record("random", K, best[0], ev.solves - s0, time.time() - t0)
         # Nelder-Mead from the exhaustive best cell(s)
         start = [np.array(p) for p in greedy[K]]
-        s0, t0 = ev.solves, time.time(); pl = nelder_mead(ev, start, cfg.budget); record("nelder-mead", K, pl, ev.solves - s0, time.time() - t0)
+        if not done("nelder-mead", K):
+            s0, t0 = ev.solves, time.time(); pl = nelder_mead(ev, start, cfg.budget); record("nelder-mead", K, pl, ev.solves - s0, time.time() - t0)
         # gradient from the exhaustive best cell(s), then random restarts; report the best and every start
-        s0, t0 = ev.solves, time.time(); pl = gradient(ev, start, cfg.steps); record("gradient", K, pl, ev.solves - s0, time.time() - t0)
+        if not done("gradient", K):
+            s0, t0 = ev.solves, time.time(); pl = gradient(ev, start, cfg.steps); record("gradient", K, pl, ev.solves - s0, time.time() - t0)
         for r in range(cfg.restarts):
-            st = [ev.random_position(rng) for _ in range(K)]
-            s0, t0 = ev.solves, time.time(); pl = gradient(ev, st, cfg.steps); record(f"gradient_rand{r}", K, pl, ev.solves - s0, time.time() - t0)
+            st = [ev.random_position(rng) for _ in range(K)]        # drawn even when skipped, so the rng stream is unchanged
+            if not done(f"gradient_rand{r}", K):
+                s0, t0 = ev.solves, time.time(); pl = gradient(ev, st, cfg.steps); record(f"gradient_rand{r}", K, pl, ev.solves - s0, time.time() - t0)
     results["total_solves"] = ev.solves; results["total_solve_seconds"] = ev.solve_seconds
     os.makedirs(os.path.dirname(os.path.abspath(cfg.out)), exist_ok=True)
     json.dump(results, open(cfg.out, "w"), indent=1)
