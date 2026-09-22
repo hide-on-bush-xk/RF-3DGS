@@ -2,6 +2,11 @@
 
 Charts are inline SVG against CSS custom properties, so the file opens from disk
 with no network and no CDN, and both themes come from the same tokens.
+
+The four panel modules imported below are optional: each import is guarded, and
+build() emits that section only when its module loaded. Two of them live in
+sibling directories and are reached by extending sys.path, so this file works
+whether or not tx_planning/ and rrf_gsplat/ have been set up.
 """
 
 from __future__ import annotations
@@ -119,6 +124,8 @@ footer { margin-top:38px; padding-top:14px; border-top:1px solid var(--line);
 
 
 def _fmt(v, digits=1):
+    """Number for display. None and inf/NaN become "n/a" rather than crashing
+    or printing "inf" -- an infinite coherence bandwidth is a real result here."""
     if v is None or (isinstance(v, float) and not math.isfinite(v)):
         return "n/a"
     return f"{v:,.{digits}f}"
@@ -136,9 +143,12 @@ def grouped_bars(runs, key, title, unit, log=False, width=520, height=250):
     finite = [v for v in vals.values() if v is not None and math.isfinite(v)]
     if not finite:
         return ""
+    # min(0, ...) anchors the axis at zero unless the data goes negative, so bar
+    # lengths stay proportional to the values.
     vmax = max(finite)
     vmin = min(0.0, min(finite))
     if log:
+        # Path counts span orders of magnitude; clamping at 1 keeps log10 defined.
         vmax = math.log10(max(vmax, 1.0)) or 1.0
         vmin = 0.0
 
@@ -149,6 +159,8 @@ def grouped_bars(runs, key, title, unit, log=False, width=520, height=250):
         span = (vmax - vmin) or 1.0
         return pad_t + ph - (t - vmin) / span * ph
 
+    # Group width follows the scattering count; bar width is capped at 26 px so
+    # a two-depth sweep does not render as two enormous slabs.
     gw = pw / max(len(scatters), 1)
     bw = min(26.0, (gw - 12) / max(len(depths), 1))
 
@@ -196,6 +208,8 @@ def _flatten(seq):
 
 
 def line_chart(x, y, title, x_unit, y_unit, width=520, height=230):
+    """A single series. Used for the channel frequency response, which is why
+    the x labels below are hard-coded to GHz rather than using x_unit."""
     x, y = _flatten(list(x)), _flatten(list(y))
     pad_l, pad_r, pad_t, pad_b = 62, 14, 16, 36
     pw, ph = width - pad_l - pad_r, height - pad_t - pad_b
@@ -268,11 +282,21 @@ def per_view_bars(values, title, unit, width=520, height=230):
     return "".join(parts)
 
 
+# NOTE: from here to _unused_reference_strip, three definitions are repeated
+# verbatim -- `embed` twice, `METRIC_ROWS` three times and `spectrum_matrix`
+# twice. Python keeps the last of each, so the earlier copies are dead code and
+# the file behaves as if only the final ones existed. Nothing depends on the
+# duplication; it looks like a paste accident. Left as found, since the brief
+# here was comments only, but it is worth deleting the earlier copies: an edit
+# applied to one of them would silently have no effect.
 def embed(path):
+    """A PNG as a data URI. Unlike reference_panels.embed_image this does no
+    resizing and raises on a missing file -- callers check os.path.isfile first."""
     with open(path, "rb") as fid:
         return "data:image/png;base64," + base64.b64encode(fid.read()).decode()
 
 
+# (key in metrics_mean, table label, decimal places) for the summary table.
 METRIC_ROWS = [
     ("num_paths", "paths", 0),
     ("rms_delay_spread_ns", "RMS delay (ns)", 2),
@@ -387,6 +411,8 @@ def spectrum_matrix(runs, base_dir):
 
 
 def _unused_reference_strip(paths_and_labels):
+    """Kept but not called -- the leading underscore and the name say so.
+    reference_panels.render superseded it."""
     cells = []
     for path, label in paths_and_labels:
         if path and os.path.isfile(path):
@@ -397,6 +423,16 @@ def _unused_reference_strip(paths_and_labels):
 
 
 def build(data, preview_dir=None):
+    """The document body. Two layouts from one function.
+
+    A sweep (several runs) is drawn as grouped bars across settings; a single
+    generation run has nothing to compare against, so it is drawn per view
+    instead. That switch is `single` below, and it is why one dashboard can
+    serve both run_report.json and ablation.json.
+
+    Sections whose data is absent are simply not emitted: the optional keys
+    (_comparison, _planning_dir, _rrf_dir, ...) are all checked before use.
+    """
     runs = data["runs"]
     depths = sorted({r["max_depth"] for r in runs})
     series_names = [f"depth {d}" for d in depths]
@@ -600,6 +636,12 @@ def render(data, preview_dir=None):
 
 
 def main():
+    """Read a report or sweep JSON and write one self-contained HTML file.
+
+    Every optional section is opt-in through a flag; the underscore-prefixed
+    keys stuffed into `data` below are how build() receives them without
+    changing its signature.
+    """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("ablation_json")
     ap.add_argument("--out", default="dashboard.html")
@@ -629,10 +671,15 @@ def main():
         with open(args.comparison, encoding="utf-8") as fid:
             data["_comparison"] = json.load(fid)
     html = build(data, args.preview_dir)
+    # Same head as render() builds; duplicated here rather than calling render(),
+    # which would re-run build().
     head = ('<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
             '<meta name="viewport" content="width=device-width, initial-scale=1">\n')
     with open(args.out, "w", encoding="utf-8", newline="\n") as fid:
         fid.write(head + html + "\n</body>\n</html>\n")
+    # The size is worth printing: every image is inlined, so this runs to
+    # megabytes and a surprise here means a preview directory was larger than
+    # expected.
     print(f"wrote {args.out} ({os.path.getsize(args.out)/1e6:.2f} MB)")
 
 

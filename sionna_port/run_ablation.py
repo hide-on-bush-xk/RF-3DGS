@@ -19,7 +19,15 @@ import numpy as np
 
 
 def build_scene(scene_xml, frequency, M, scattering, variant):
+    """A fresh scene at one scattering coefficient.
+
+    Rebuilt per configuration rather than mutated, because changing a material
+    on a loaded scene does not reliably invalidate everything the solver caches.
+    The transmitter is the NIST measurement position and is fixed here.
+    """
     import mitsuba as mi
+    # Only set the variant if nothing has yet: changing it after Dr.Jit has
+    # initialised raises.
     if mi.variant() is None:
         mi.set_variant(variant)
     from sionna.rt import load_scene, PlanarArray, Transmitter
@@ -38,6 +46,7 @@ def build_scene(scene_xml, frequency, M, scattering, variant):
 
 
 def sweep(args):
+    """Run every (scattering, depth) pair and write one JSON entry per configuration."""
     import mitsuba as mi
     mi.set_variant(args.variant)
     from sionna.rt import PathSolver, Receiver
@@ -50,10 +59,13 @@ def sweep(args):
     grid = ArrayGrid.build(args.M, args.width, args.height, args.fov, device=device)
     solver = PathSolver()
 
+    # Fixed seed, so every configuration is scored at the SAME receiver
+    # positions -- the sweep compares settings, not sampling of the room.
     rng = np.random.default_rng(0)
     rx_positions = [[rng.uniform(-3.0, 6.0), rng.uniform(-8.0, 0.0),
                      rng.uniform(-1.1, 0.2)] for _ in range(args.positions)]
 
+    # Full cross product of the two swept axes.
     configs = []
     for scattering in args.scattering:
         for depth in args.depth:
@@ -69,6 +81,7 @@ def sweep(args):
         per_position, spectra, solve_times, cfr_curve = [], [], [], None
 
         for i, pos in enumerate(rx_positions):
+            # One receiver at a time, swapped by name.
             if "rx" in scene.receivers:
                 scene.remove("rx")
             scene.add(Receiver(name="rx", position=pos, orientation=[0.0, 0.0, 0.0]))
@@ -78,24 +91,31 @@ def sweep(args):
                            specular_reflection=True, diffuse_reflection=True,
                            refraction=False, synthetic_array=True, seed=42)
             n_valid = int(np.asarray(paths.valid).sum())
+            # Timed even when the position yields nothing, so the cost figure
+            # covers every solve actually performed.
             solve_times.append(time.time() - t0)
             if n_valid == 0:
-                continue
+                continue                 # a position with no coverage at all
             try:
                 metrics = channel_metrics(paths, bandwidth_hz=args.bandwidth)
                 per_position.append(metrics.as_dict())
             except ValueError:
-                continue
+                continue                 # channel_metrics rejects an empty path set
 
             response = paths_to_response(paths, args.time_interval, device=device)
             spec_fn = mvdr_spectrum if args.spectrum == "MVDR" else cbf_spectrum
             try:
+                # MVDR takes the loading argument; CBF has no such parameter.
                 _, spec_db = (spec_fn(response, grid, args.diagonal_loading)
                               if args.spectrum == "MVDR" else spec_fn(response, grid))
                 spectra.append(spec_db.cpu().numpy().astype(np.float32))
             except ValueError as exc:
+                # A singular covariance at one position is reported and skipped;
+                # the channel metrics for it are still kept.
                 print(f"    spectrum failed at position {i}: {exc}")
 
+            # Frequency response from the first position only: it is per-position
+            # detail, and one curve is enough to show the selectivity.
             if cfr_curve is None and args.cfr:
                 try:
                     freqs, mag_db = frequency_response(
@@ -119,13 +139,18 @@ def sweep(args):
             import imageio.v2 as imageio
             from matplotlib import colormaps
             panel = spectra[0]
+            # Per-panel normalisation: these are for eyeballing the structure,
+            # not for comparing absolute levels between configurations.
             lo, hi = float(panel.min()), float(panel.max())
             norm = np.clip((panel - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
             rgb = (colormaps["jet"](norm)[..., :3] * 255).astype(np.uint8)
             name = f"s{cfg['scattering_coefficient']:g}_d{cfg['max_depth']}.png"
             imageio.imwrite(os.path.join(preview_dir, name), rgb)
+            # Stored relative, so the dashboard resolves it from its own directory.
             preview_rel = os.path.join("ablation_previews", name)
 
+        # Mean and spread across positions: the spread is what says whether a
+        # difference between configurations is bigger than the room's variation.
         keys = per_position[0].keys()
         summary = {k: float(np.mean([p[k] for p in per_position])) for k in keys}
         spread = {k: float(np.std([p[k] for p in per_position])) for k in keys}
@@ -136,6 +161,8 @@ def sweep(args):
                  "mean_solve_seconds": float(np.mean(solve_times)),
                  "metrics_mean": summary,
                  "metrics_std": spread,
+                 # Per-position values are kept, so the distribution can be
+                 # re-analysed without re-solving.
                  "per_position": per_position}
         if spectra:
             from rf_metrics import spectrum_stats
@@ -148,6 +175,7 @@ def sweep(args):
               f"K {summary['k_factor_db']:.1f} dB  "
               f"capacity {summary['capacity_bps_hz']:.1f} bps/Hz")
 
+    # The settings travel with the results, so a dashboard card can state them.
     out = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "scene_xml": args.scene_xml,
@@ -165,10 +193,12 @@ def sweep(args):
 
 
 def main():
+    """Parse arguments and run the sweep."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scene-xml", required=True)
     ap.add_argument("--out", default="ablation.json")
+    # 0.0 is included as the control: no diffuse scattering at all.
     ap.add_argument("--scattering", type=float, nargs="+",
                     default=[0.0, 0.3, 0.5, 0.7])
     ap.add_argument("--depth", type=int, nargs="+", default=[1, 2, 3])
@@ -183,6 +213,8 @@ def main():
     ap.add_argument("--subcarriers", type=int, default=128)
     ap.add_argument("--time-interval", type=float, default=0.1)
     ap.add_argument("--spectrum", default="MVDR", choices=["CBF", "MVDR"])
+    # 0.0 means no loading: MVDR then raises on a singular covariance rather
+    # than silently returning a spectrum built from numerical noise.
     ap.add_argument("--diagonal-loading", type=float, default=0.0)
     ap.add_argument("--cfr", action="store_true", default=True)
     ap.add_argument("--no-previews", dest="previews", action="store_false",

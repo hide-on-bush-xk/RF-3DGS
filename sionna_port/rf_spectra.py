@@ -4,6 +4,11 @@ Ported from the project's Sionna simulation tutorial, which was written against
 Sionna 0.19 and TensorFlow. The maths is unchanged; the tensors are torch and the
 per-view work that used to be redone for every receiver pose is hoisted into a
 cache, because the angle grid is fixed by the camera model.
+
+Two families live here. The beamformed spectra (CBF, TCBF, MVDR) evaluate an
+array response over a pinhole angle grid. The projection spectra (MPC, Delay,
+AoD and the multichannel encoding) splat each path onto an equirectangular grid
+at its angle of arrival and never form a beam at all.
 """
 
 from __future__ import annotations
@@ -31,12 +36,19 @@ def compute_angle_matrices(width: int, height: int, fov_deg: float,
     """Zenith/azimuth of every pixel of a pinhole view, following the tutorial.
 
     Returns (theta, phi), each [height, width], in radians.
+
+    This function defines the convention the whole module shares: the camera
+    looks along +z, theta is measured from +y (so the optical axis is
+    theta = 90 degrees) and phi increases to the left, which is why the x
+    component is negated below.
     """
     focal = width / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
     x = torch.linspace(-width / 2, width / 2, width, device=device, dtype=dtype)
+    # y descends, so row 0 is the top of the image.
     y = torch.linspace(height / 2, -height / 2, height, device=device, dtype=dtype)
     yy, xx = torch.meshgrid(y, x, indexing="ij")
 
+    # Pinhole ray per pixel, normalised to the unit sphere.
     dirs = torch.stack([xx / focal, yy / focal, torch.ones_like(xx)], dim=-1)
     dirs = dirs / dirs.norm(dim=-1, keepdim=True)
 
@@ -46,7 +58,14 @@ def compute_angle_matrices(width: int, height: int, fov_deg: float,
 
 
 def _element_offsets(M: int, device=None, dtype=torch.float32):
-    """Element positions of an M x M UPA in wavelengths, tutorial ordering."""
+    """Element positions of an M x M UPA in wavelengths, tutorial ordering.
+
+    Half-wavelength spacing centred on the array: for even M the offsets are
+    +-0.25, +-0.75, ... so no element sits at the origin. The z axis is
+    reversed relative to y, and the .T before reshape sets the flattening order
+    -- both match how Sionna's PlanarArray enumerates its elements. This
+    ordering is exactly what smoke_sionna.py exists to verify.
+    """
     values = 0.25 + 0.5 * np.arange(M // 2)
     y_i = np.concatenate((-values[::-1], values))
     z_i = np.concatenate((values[::-1], -values))
@@ -60,9 +79,13 @@ def _element_offsets(M: int, device=None, dtype=torch.float32):
 def steering_vector(M: int, theta: torch.Tensor, phi: torch.Tensor) -> torch.Tensor:
     """Unit-gain steering vectors, [M**2, *theta.shape], complex."""
     y_i, z_i = _element_offsets(M, device=theta.device, dtype=theta.dtype)
+    # The array lies in the y-z plane, so only these two direction cosines
+    # matter. Note v is unchanged by phi -> 180 - phi: that is the front/back
+    # ambiguity smoke_sionna.py measures.
     v = torch.sin(theta) * torch.sin(phi)
     w = torch.cos(theta)
 
+    # Broadcast the element axis against however many angle axes were passed.
     shape = (M ** 2,) + (1,) * v.dim()
     phase = 2 * math.pi * (y_i.reshape(shape) * v.unsqueeze(0)
                            + z_i.reshape(shape) * w.unsqueeze(0))
@@ -101,6 +124,12 @@ class ArrayGrid:
     @classmethod
     def build(cls, M: int, width: int, height: int, fov_deg: float,
               element_gain_fn=None, device=None) -> "ArrayGrid":
+        """Build the cache for one pinhole view geometry.
+
+        `element_gain_fn(theta, phi)` supplies a non-isotropic element pattern;
+        with None the manifold and the steering vectors are the same tensor's
+        worth of data, computed twice.
+        """
         theta, phi = compute_angle_matrices(width, height, fov_deg, device=device)
         gain = None if element_gain_fn is None else element_gain_fn(theta, phi)
         return cls(M=M, theta=theta, phi=phi,
@@ -116,10 +145,18 @@ def merge_paths_to_time_grid(a: torch.Tensor, tau_ns: torch.Tensor,
     tau_ns    [P] delays in ns, shared across elements
     time_grid [L] ascending bin edges in ns
     returns   [M**2, L] complex
+
+    Paths landing in the same bin add *coherently* (complex sum), which is the
+    physically correct thing to do and what makes the bin width matter: too
+    coarse a grid merges paths that should have interfered separately.
     """
+    # searchsorted then -1 maps a delay to the bin whose edge it sits above.
     idx = torch.searchsorted(time_grid, tau_ns, right=False) - 1
+    # Clamped rather than dropped: a delay below the first edge or past the last
+    # is folded into the nearest bin.
     idx = idx.clamp_(0, time_grid.numel() - 1)
     out = torch.zeros(a.shape[0], time_grid.numel(), dtype=a.dtype, device=a.device)
+    # index_add_ is the vectorised replacement for the tutorial's Python loop.
     out.index_add_(1, idx, a)
     return out
 
@@ -130,21 +167,29 @@ def paths_to_response(paths, time_interval_ns: float = 1.0,
 
     `paths` is a Sionna RT 2.x Paths object. Delays are *not* normalized, matching
     `paths.normalize_delays = False` in the 0.19 tutorial.
+
+    The number of delay taps L follows from the scene's own delay spread, so it
+    varies per receiver -- which is what determines whether MVDR's covariance is
+    invertible at that position.
     """
     a, tau = paths.cir(normalize_delays=False, out_type="torch")
     # a:   [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths, num_time_steps]
     # tau: [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths]
     a = a[0, :, 0, 0, :, 0]                      # [M**2, P]
+    # tau's layout depends on whether the array is synthetic; handle both.
     tau = tau[0, 0, 0, 0, :] if tau.dim() == 5 else tau.reshape(-1)
     if device is not None:
         a, tau = a.to(device), tau.to(device)
 
+    # Drop padding slots before anything downstream sees them.
     finite = torch.isfinite(tau) & (tau >= 0)
     a, tau = a[:, finite], tau[finite]
     if tau.numel() == 0:
         raise ValueError("no valid paths for this receiver pose")
 
     tau_ns = tau / 1e-9
+    # Grid spans 0 to the largest delay present; max(..., 1) keeps it non-empty
+    # when every path is under a nanosecond.
     max_spread = math.ceil(float(tau_ns.max().item()))
     time_grid = torch.arange(0, max(max_spread, 1), time_interval_ns,
                              device=a.device, dtype=tau_ns.dtype)
@@ -156,8 +201,14 @@ def cbf_spectrum(response: torch.Tensor, grid: ArrayGrid):
 
     response [M**2, L] from `paths_to_response`
     returns (linear [H, W], dB [H, W]), both real
+
+    A matched filter: correlate the measured response against the steering
+    vector for every direction. Cheap and robust, but its sidelobes are fixed by
+    the aperture, which is what TCBF tapers and MVDR adapts away.
     """
+    # Sums over elements m and delay taps l at once; no covariance needed.
     amp = torch.einsum("ml,mhw->hw", response.conj(), grid.steering).abs()
+    # 20 log10 because amp is an amplitude; clamp_min avoids log(0).
     return amp, 20.0 * torch.log10(amp.clamp_min(torch.finfo(amp.dtype).tiny))
 
 
@@ -179,21 +230,26 @@ def mvdr_spectrum(response: torch.Tensor, grid: ArrayGrid,
             f"Shorten time_interval_ns or set diagonal_loading."
         )
 
+    # Sample covariance over delay taps, treating each tap as a snapshot.
     R = response @ response.conj().transpose(0, 1)
     if diagonal_loading > 0:
+        # Scaled by the mean diagonal, so the same fraction means the same
+        # thing whatever the absolute power level is.
         eps = diagonal_loading * torch.diagonal(R).real.mean()
         R = R + eps * torch.eye(m2, dtype=R.dtype, device=R.device)
     R_inv = torch.linalg.inv(R)
+    # Second guard: enough taps does not guarantee they are independent.
     if not torch.isfinite(R_inv).all():
         raise ValueError(
             "covariance inverse is not finite; the delay taps are linearly "
             "dependent. Set diagonal_loading to regularise it."
         )
 
+    # P(direction) = 1 / (a^H R^-1 a), evaluated for every pixel at once.
     aH_Rinv = torch.einsum("mhw,mn->nhw", grid.manifold.conj(), R_inv)
     quad = torch.einsum("nhw,nhw->hw", aH_Rinv, grid.manifold).abs()
     p = 1.0 / quad.clamp_min(torch.finfo(quad.dtype).tiny)
-    return p, 10.0 * torch.log10(p)
+    return p, 10.0 * torch.log10(p)        # 10 log10: p is already a power
 
 
 # --------------------------------------------------------------------------
@@ -206,10 +262,12 @@ def mvdr_spectrum(response: torch.Tensor, grid: ArrayGrid,
 # --------------------------------------------------------------------------
 
 def _gaussian_kernel(kernel_size: int, sigma: float, device=None):
+    """Normalised 2-D Gaussian and its side length, in pixels."""
     size = int(kernel_size * sigma) | 1          # odd, as in the tutorial
     axis = torch.arange(size, device=device, dtype=torch.float32) - size // 2
     yy, xx = torch.meshgrid(axis, axis, indexing="ij")
     k = torch.exp(-(xx ** 2 + yy ** 2) / (2 * sigma ** 2))
+    # Sum to 1, so a path's total splatted weight equals its own weight.
     return k / k.sum(), size
 
 
@@ -231,19 +289,27 @@ def equirect_splat(theta_rad: torch.Tensor, phi_rad: torch.Tensor,
     kernel, size = _gaussian_kernel(kernel_size, sigma, device)
     half = size // 2
 
+    # Degrees times scale gives the pixel index; the negation and +180 put
+    # phi = +180 at the left edge.
     theta_idx = (torch.rad2deg(theta_rad) * scale).round().long()
     phi_idx = ((-torch.rad2deg(phi_rad) + 180.0) * scale).round().long()
 
+    # Every kernel tap for every path, computed as one flat scatter rather than
+    # a Python loop over paths.
     offs = torch.arange(-half, half + 1, device=device)
     dy, dx = torch.meshgrid(offs, offs, indexing="ij")
     dy, dx = dy.reshape(-1), dx.reshape(-1)
     kflat = kernel.reshape(-1)
 
+    # Clamped at the poles and at the azimuth seam: a blob near an edge piles up
+    # against it rather than wrapping. Acceptable because the interesting angles
+    # are nowhere near the poles.
     ys = (theta_idx.unsqueeze(1) + dy.unsqueeze(0)).clamp_(0, h - 1)
     xs = (phi_idx.unsqueeze(1) + dx.unsqueeze(0)).clamp_(0, w - 1)
     flat = (ys * w + xs).reshape(-1)
 
     out = torch.zeros(channels, h * w, device=device, dtype=weights.dtype)
+    # One index_add_ per channel; the index tensor is shared across them.
     for c in range(channels):
         contrib = (weights[c].unsqueeze(1) * kflat.unsqueeze(0)).reshape(-1)
         out[c].index_add_(0, flat, contrib)
@@ -254,15 +320,19 @@ def _path_arrays(paths, device=None):
     """(amplitude, delay, AoA, AoD) for the valid paths, as torch tensors."""
     a, tau = paths.cir(normalize_delays=False, out_type="torch")
     a = a[0, :, 0, 0, :, 0]                       # [ant, path]
+    # Amplitudes summed incoherently over elements: these spectra are about
+    # where power arrives from, not about array phase.
     amp = a.abs().sum(dim=0) if a.dim() == 2 else a.abs()
     tau = tau.reshape(-1)
 
     def to_t(x):
+        """Sionna's Dr.Jit angle arrays as flat float32 torch tensors."""
         return torch.as_tensor(np.asarray(x).reshape(-1), dtype=torch.float32,
                                device=amp.device)
 
     theta_r, phi_r = to_t(paths.theta_r), to_t(paths.phi_r)
     theta_t, phi_t = to_t(paths.theta_t), to_t(paths.phi_t)
+    # amp > 0 also drops paths that are valid but carry no power.
     keep = torch.isfinite(tau) & (tau >= 0) & (amp > 0)
     out = (amp[keep], tau[keep], theta_r[keep], phi_r[keep],
            theta_t[keep], phi_t[keep])
@@ -278,12 +348,18 @@ def mpc_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0):
     nonzero = img > 0
     out = torch.full_like(img, float("nan"))
     out[nonzero] = 10 * torch.log10(img[nonzero])
+    # Untouched pixels get 10 dB below the weakest real one, rather than -inf.
     floor = out[nonzero].min() - 10 if nonzero.any() else torch.tensor(-200.0)
     return torch.nan_to_num(out, nan=float(floor))
 
 
 def delay_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0):
-    """Amplitude in green and blue, normalised delay in red, as the tutorial has it."""
+    """Amplitude in green and blue, normalised delay in red, as the tutorial has it.
+
+    Note the red channel is delay TIMES amplitude, so it confounds the two: a
+    faint late path and a strong early one can produce the same red. The
+    multichannel encoding below exists to avoid exactly this.
+    """
     amp, tau, theta_r, phi_r, _, _ = _path_arrays(paths)
     lo, hi = tau.min(), tau.max()
     r_weight = amp * ((tau - lo) / (hi - lo).clamp_min(1e-30))
@@ -293,9 +369,15 @@ def delay_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0):
 
 
 def aod_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0):
-    """Departure zenith in red, departure azimuth in green, amplitude in blue."""
+    """Departure zenith in red, departure azimuth in green, amplitude in blue.
+
+    Splatted at the angle of ARRIVAL while coloured by the angle of DEPARTURE,
+    which is what makes this a picture of where energy went as well as where it
+    came back from. Same amplitude-times-angle confound as Delay above.
+    """
     amp, _, theta_r, phi_r, theta_t, phi_t = _path_arrays(paths)
     r_weight = amp * (torch.rad2deg(theta_t) / 180.0).clamp(0, 1)
+    # 1 - (...) so the azimuth runs the same way as the image's x axis.
     g_weight = amp * (1.0 - (torch.rad2deg(phi_t) + 180.0) / 360.0).clamp(0, 1)
     stacked = torch.stack([r_weight, g_weight, amp])
     img = equirect_splat(theta_r, phi_r, stacked, scale, sigma)
@@ -345,14 +427,17 @@ def multichannel_from_arrays(amp, tau, theta_r, phi_r, theta_t, phi_t,
     out = torch.zeros(5, h, w_px, device=device, dtype=torch.float32)
     out[0] = floor_db
     if amp.numel() == 0:
-        return out
+        return out                        # a receiver with no paths at all
+    # Power, not amplitude, is the weight: these are power-weighted means.
     w = amp * amp
+    # Each channel is splatted pre-multiplied by the weight; dividing by the
+    # splatted weight below turns the sums into weighted means.
     stacked = torch.stack([w, w * torch.cos(phi_t), w * torch.sin(phi_t),
                            w * theta_t, w * tau * 1e9])
     img = equirect_splat(theta_r, phi_r, stacked, scale, sigma)
     power, cos_az, sin_az, zen, delay = img
     hit = power > 10.0 ** (power_floor_db / 10.0)
-    p = power.clamp_min(1e-300)
+    p = power.clamp_min(1e-300)           # only ever divides where hit is True
     out[0] = torch.where(hit, 10 * torch.log10(p), torch.full_like(power, floor_db))
     out[1] = torch.where(hit, cos_az / p, torch.zeros_like(cos_az))
     out[2] = torch.where(hit, sin_az / p, torch.zeros_like(sin_az))
@@ -362,12 +447,20 @@ def multichannel_from_arrays(amp, tau, theta_r, phi_r, theta_t, phi_t,
 
 
 def decode_azimuth_deg(cos_ch, sin_ch):
-    """(cos, sin) channels -> azimuth in degrees, (-180, 180]."""
+    """(cos, sin) channels -> azimuth in degrees, (-180, 180].
+
+    The inverse of the vector encoding in multichannel_from_arrays. atan2 needs
+    no normalisation, so an unnormalised (cos, sin) pair still decodes correctly.
+    """
     return torch.rad2deg(torch.atan2(sin_ch, cos_ch))
 
 
 def _log_rgb(img: torch.Tensor) -> torch.Tensor:
-    """10log10 with the tutorial's +150 dB offset, clipped at zero."""
+    """10log10 with the tutorial's +150 dB offset, clipped at zero.
+
+    The offset puts a plausible received power near 0, so clipping at zero
+    discards what is below the noise floor rather than useful signal.
+    """
     out = torch.zeros_like(img)
     nz = img > 0
     out[nz] = 10 * torch.log10(img[nz]) + 150.0
@@ -388,12 +481,14 @@ def equirect_to_perspective(equirect: torch.Tensor, width: int, height: int,
     src_h, src_w = src.shape[-2:]
 
     theta, phi = compute_angle_matrices(width, height, fov_deg, device=device)
-    phi = phi + yaw_rad
+    phi = phi + yaw_rad                   # rotate the view about the vertical
 
     # Same index convention as equirect_splat.
     y = (torch.rad2deg(theta) * (src_h / 180.0)).clamp(0, src_h - 1)
+    # Modulo, not clamp: azimuth wraps, so a view straddling the seam works.
     x = ((-torch.rad2deg(phi) + 180.0) * (src_w / 360.0)) % src_w
 
+    # grid_sample wants normalised [-1, 1] coordinates in (x, y) order.
     grid_y = (y / (src_h - 1)) * 2 - 1
     grid_x = (x / (src_w - 1)) * 2 - 1
     grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
@@ -404,7 +499,12 @@ def equirect_to_perspective(equirect: torch.Tensor, width: int, height: int,
 
 
 def tapering_matrix(M: int, tapering_level: float = 1.0, device=None):
-    """Hann taper over the array, the window TCBF applies to CBF's weights."""
+    """Hann taper over the array, the window TCBF applies to CBF's weights.
+
+    Separable: the outer product of a 1-D Hann window with itself. Note the
+    window is zero at both ends, so the outermost ring of elements contributes
+    nothing -- that is the aperture loss traded for lower sidelobes.
+    """
     x = torch.linspace(0, 1, M, device=device)
     window = 0.5 * (1 - torch.cos(2 * math.pi * x))
     return torch.outer(window, window).reshape(-1) * tapering_level
@@ -415,6 +515,7 @@ def tcbf_spectrum(response: torch.Tensor, grid: "ArrayGrid",
     """CBF with a Hann-tapered weight vector: lower sidelobes, wider main lobe."""
     taper = tapering_matrix(grid.M, tapering_level,
                             device=grid.steering.device).to(grid.steering.dtype)
+    # Identical to cbf_spectrum except for this per-element weighting.
     weights = grid.steering * taper.reshape(-1, 1, 1)
     amp = torch.einsum("ml,mhw->hw", response.conj(), weights).abs()
     return amp, 20.0 * torch.log10(amp.clamp_min(torch.finfo(amp.dtype).tiny))

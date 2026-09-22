@@ -6,6 +6,12 @@ Two things changed beyond the API translation, both flagged in README.md:
 * every spectrum type is normalised the same way, and
 * the float spectrum is written next to the PNG, so the quantisation is no
   longer the only surviving copy of the data.
+
+Output layout, which is what the 3DGS trainer reads:
+  images/NNNNN.png          jet-colourmapped spectrum, the trainable target
+  spectra_float/NNNNN.npy   the same data before quantisation
+  sparse/0/{cameras,images}.txt   COLMAP poses, one "camera" per receiver view
+  generation_meta.json      every setting, plus the normalisation range
 """
 
 from __future__ import annotations
@@ -39,6 +45,8 @@ VIEW_YAWS = (-math.pi / 2, 0.0, math.pi / 2, math.pi)
 
 @dataclass
 class Config:
+    """Every knob of one generation run. Serialised wholesale into
+    generation_meta.json, so a dataset always carries the settings that made it."""
     scene_xml: str
     rx_loc_file: str
     out_dir: str
@@ -101,11 +109,14 @@ def euler_to_quaternion(euler):
 
 
 def write_cameras_txt(path, camera_id, width, height, fx, fy, cx, cy):
+    """One shared PINHOLE intrinsic for every view; the trainer requires this model."""
     with open(path, "w") as fid:
         fid.write(f"{camera_id} PINHOLE {width} {height} {fx} {fy} {cx} {cy}\n")
 
 
 def write_images_txt(path, images):
+    """COLMAP images.txt. The blank line after each entry is part of the format:
+    it stands in for the 2D feature list, which these synthetic views do not have."""
     with open(path, "w") as fid:
         for img_id, (qvec, tvec, camera_id, name) in sorted(images.items()):
             fid.write(f"{img_id} {' '.join(map(str, qvec))} "
@@ -120,21 +131,28 @@ def read_pose_groups(images_txt):
     reproduces the rotation. Consecutive views at one position form a group.
     """
     def rotmat(q):
+        """COLMAP quaternion (scalar first) -> 3x3 rotation."""
         w, x, y, z = q
         return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
                          [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
                          [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+    # Precomputed rotation per candidate yaw, so recovering the yaw is a
+    # nearest-match over four options rather than an angle extraction.
     yaw_R = {yaw: euler_to_quaternion([yaw, 0.0, 0.0])[0].as_matrix() for yaw in VIEW_YAWS}
     groups = []
     with open(images_txt) as fid:
         for line in fid:
             p = line.split()
+            # Skips the blank lines and any comment: only a full pose line
+            # naming a .png is a view.
             if len(p) < 10 or not p[9].lower().endswith(".png"):
                 continue
             R = rotmat([float(v) for v in p[1:5]])
             t = np.array([float(v) for v in p[5:8]])
             rx = (-R.T @ t).tolist()
             yaw = min(VIEW_YAWS, key=lambda y: np.abs(yaw_R[y] - R).sum())
+            # Consecutive views at the same position belong to one sphere, which
+            # is what lets the projection family solve once per group.
             if groups and np.allclose(groups[-1][0], rx, atol=1e-6):
                 groups[-1][1].append(yaw)
             else:
@@ -150,6 +168,10 @@ def load_rx_locations(path, rng):
             parts = line.split()
             if len(parts) != 4:
                 continue
+            # The NIST file is in millimetres. The jitter is the tutorial's:
+            # +-0.5 m horizontally and an asymmetric -1.0/+0.3 m vertically
+            # about the 1.625 m receiver height, which keeps the sampled poses
+            # below the transmitter rather than straddling it.
             x_pos, y_pos = float(parts[1]), float(parts[2])
             locs.append([x_pos / 1000 + rng.uniform(-0.5, 0.5),
                          y_pos / 1000 + rng.uniform(-0.5, 0.5),
@@ -162,6 +184,12 @@ def load_rx_locations(path, rng):
 # --------------------------------------------------------------------------
 
 def build_scene(cfg: Config):
+    """The radio scene with both arrays and the chosen material treatment.
+
+    Note the element pattern here is tr38901, not the isotropic one the planning
+    scripts use: element_gain_fn below applies the matching pattern to the
+    beamformer's manifold, and the two must agree.
+    """
     scene = load_scene(cfg.scene_xml, merge_shapes=True)
     scene.frequency = cfg.frequency
     scene.tx_array = PlanarArray(num_rows=1, num_cols=1,
@@ -199,6 +227,9 @@ def solve_paths(solver, scene, cfg: Config, view_index: int = 0):
                   refraction=cfg.refraction,
                   diffraction=cfg.diffraction,
                   synthetic_array=True,
+                  # The seed IS the sampling lattice: advancing it per view (or
+                  # per position) decorrelates the residual, holding it fixed
+                  # does not. See Config.per_view_seed.
                   seed=cfg.seed + (view_index if cfg.per_view_seed else 0))
 
 
@@ -212,6 +243,7 @@ def element_gain_fn(theta: torch.Tensor, phi: torch.Tensor) -> torch.Tensor:
     """
     import drjit as dr
     import mitsuba as mi
+    # Flattened for the Dr.Jit call, then reshaped back to the pixel grid.
     t = mi.Float(theta.reshape(-1).cpu().numpy())
     p = mi.Float(phi.reshape(-1).cpu().numpy())
     c_theta = v_tr38901_pattern(t, p)
@@ -239,6 +271,8 @@ def projection_equirect(paths, kind: str, device, sigma: float = 3.0, power_floo
     in equirect pixels (1/3 degree each): it sets how many paths share a
     pixel, i.e. how much the encoded mean angle departs from any real path.
     """
+    # Imported here rather than at module scope, so the beamformed path does not
+    # pay for these when it is the one being run.
     from rf_spectra import aod_spectrum_equirect, multichannel_spectrum_equirect
     eq = (multichannel_spectrum_equirect(paths, sigma=sigma, power_floor_db=power_floor_db) if kind == "MULTI"
           else aod_spectrum_equirect(paths, sigma=sigma))
@@ -246,6 +280,8 @@ def projection_equirect(paths, kind: str, device, sigma: float = 3.0, power_floo
 
 
 def spectrum_for_paths(paths, grid: ArrayGrid, cfg: Config, yaw: float = 0.0):
+    """Dispatch to the right spectrum family. Returns (linear, dB); the
+    projection family has no linear form and returns None for it."""
     kind = cfg.spectrum.upper()
     if kind in PROJECTION_KINDS:
         from rf_spectra import equirect_to_perspective
@@ -268,6 +304,10 @@ def channel_ranges(all_db: np.ndarray, kind: str, power_floor_db: float = -150.0
         # floor into edge pixels, so "above the floor" is not enough; nothing
         # physical sits below -150 dB here.
         hit = power > power_floor_db     # the encoder truncated there; a face pixel resampled across the hit/floor edge is not a hit
+        # Power and delay get percentile ranges from the data (so a single
+        # outlier cannot compress everything else); the angle channels have
+        # fixed analytic ranges, since cos/sin are bounded and zenith is
+        # already normalised to [0, 1].
         rng = [[float(np.percentile(power[hit], 1)), float(np.percentile(power[hit], 99.99))],
                [-1.0, 1.0], [-1.0, 1.0], [0.0, 1.0],
                [float(np.percentile(all_db[:, 4][hit], 0.1)), float(np.percentile(all_db[:, 4][hit], 99.9))]]
@@ -286,6 +326,8 @@ def generate(cfg: Config, shared=None):
     scene load, the OptiX acceleration structure and the array grid are the
     same for every transmitter, only the Tx object moves."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Drives the receiver-position jitter only; the solver's sampling seed is
+    # cfg.seed directly, see solve_paths.
     rng = np.random.default_rng(cfg.seed)
 
     os.makedirs(os.path.join(cfg.out_dir, "images"), exist_ok=True)
@@ -375,6 +417,9 @@ def generate(cfg: Config, shared=None):
             if "rx" in scene.receivers:
                 scene.remove("rx")
 
+    # Every view is held in memory at once, because the normalisation range has
+    # to be known before any PNG can be written. This is what bounds how large a
+    # dataset one process can produce.
     all_db = np.stack(specs)
     multi = all_db.ndim == 4                                  # [n, C, H, W]
     if multi:
@@ -395,12 +440,16 @@ def generate(cfg: Config, shared=None):
     images = {}
     for n, (spec_db, (rx_loc, yaw)) in enumerate(zip(specs, poses), start=1):
         preview = spec_db[0] if multi else spec_db           # the PNG shows channel 0
+        # One range for the whole dataset, not per image: this is the change
+        # from the tutorial, and it is what makes two views comparable.
         norm = np.clip((preview - spec_min) / (spec_max - spec_min), 0.0, 1.0)
         rgb = (jet(norm)[..., :3] * 255).astype(np.uint8)
         imageio.imwrite(os.path.join(cfg.out_dir, "images", f"{n:05d}.png"), rgb)
         if cfg.save_float:
             np.save(os.path.join(cfg.out_dir, "spectra_float", f"{n:05d}.npy"), spec_db)
 
+        # COLMAP stores t = -R_c2w(rx), not the position itself; read_pose_groups
+        # above inverts exactly this.
         r_c2w, qvec = euler_to_quaternion([yaw, 0.0, 0.0])
         images[n] = (qvec, (-r_c2w.apply(rx_loc)).tolist(), 1, f"{n:05d}.png")
 
@@ -442,6 +491,8 @@ def generate(cfg: Config, shared=None):
                 fid.write(html)
             print(f"dashboard: {out_html}")
         except Exception as exc:
+            # The dataset is already on disk at this point, so a dashboard
+            # failure must not fail the run.
             print(f"dashboard skipped: {type(exc).__name__}: {exc}")
 
 
@@ -477,6 +528,12 @@ def build_report(cfg, meta, per_view, all_db, cfr_curve):
 
 
 def main():
+    """Parse arguments into a Config and generate one dataset, or several.
+
+    Note every argparse dest matches a Config field name, which is what makes
+    the Config(**vars(args)) construction below work -- adding a flag means
+    adding the matching field.
+    """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--scene-xml", required=True)
     ap.add_argument("--rx-loc-file", required=True)
@@ -520,6 +577,7 @@ def main():
                     help="reuse one sampling lattice for every view, which "
                          "correlates the sampling residual across views")
     args = ap.parse_args()
+    # Removed before the Config construction, because tx_list is not a Config field.
     tx_list = vars(args).pop("tx_list")
     if not tx_list:
         generate(Config(**vars(args)))
@@ -534,6 +592,8 @@ def main():
                            element_gain_fn=element_gain_fn, device=device)
     print(f"scene + solver + grid built once in {time.time() - t0:.1f} s for {len(tx_list)} transmitters")
     for entry in tx_list:
+        # "NAME:x,y,z" -> a Config that differs from the base only in the
+        # transmitter position and the output directory suffix.
         name, xyz = entry.split(":")
         cfg = dataclasses.replace(base, tx_loc=tuple(float(v) for v in xyz.split(",")),
                                   out_dir=base.out_dir + name)

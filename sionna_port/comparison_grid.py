@@ -27,6 +27,8 @@ SPECTRA = [
     ("TCBF", "Tapered beamforming", True),
 ]
 
+# The two the authors rescaled per image. That is the finding the table is built
+# to show: they are also the two whose reported PSNR collapses.
 PER_VIEW_NORMALISED = {"CBF", "TCBF"}
 
 # Every row reports the same fields in the same order, so the column can be read
@@ -46,6 +48,8 @@ ROW_FIELDS = [
 
 def row_params(**values) -> dict:
     """Fill the fixed field list, leaving a dash wherever a row has no value."""
+    # Raises on a typo rather than silently dropping the value, which would
+    # leave a dash that looks like a legitimate "no data".
     unknown = set(values) - {key for _, key in ROW_FIELDS}
     if unknown:
         raise TypeError(f"unknown row fields: {sorted(unknown)}")
@@ -90,14 +94,17 @@ def recover_pose(root: str, spectrum: str = "MVDR", test_view_index: int = 0):
         else:
             return None
 
+    # scipy wants the scalar last; COLMAP stores it first.
     r_c2w = Rotation.from_quat([qvec[1], qvec[2], qvec[3], qvec[0]])
     position = -r_c2w.as_matrix().T @ tvec
+    # Undo the fixed camera/array frame change, leaving only the yaw.
     r_posz2posx = Rotation.from_euler("ZYX", [-np.pi / 2, 0.0, -np.pi / 2])
     yaw = float((r_c2w.inv() * r_posz2posx.inv()).as_euler("ZYX")[0])
     return [float(v) for v in position], yaw
 
 
 def _published_psnr(root: str, name: str) -> str | None:
+    """The authors' own reported PSNR for one spectrum, or None if unavailable."""
     path = os.path.join(root, "RF-3DGS_dataset", "RF-3DGS_trained_RRF",
                         f"3dgs_{name}_100", "results.json")
     if not os.path.isfile(path):
@@ -131,6 +138,9 @@ def released_rows(root: str, view: str, test_view: str = "00000.png",
             gt_cells[name] = {"image": os.path.relpath(gt_img, root),
                               "params": {"normalisation": norm}}
         else:
+            # No test render for this spectrum: fall back to a training image,
+            # which is a DIFFERENT pose. The note below says so in the cell, so
+            # the row is not read as a like-for-like comparison.
             fallback = os.path.join(root, "RF-3DGS_dataset",
                                     "training-rf-spectrum", f"3dgs_{name}_100",
                                     "images", view)
@@ -194,6 +204,9 @@ def spectrum_panel(name, paths, response, grid, args):
         else:
             _, spec_db = cbf_spectrum(response, grid)
         arr = spec_db.detach().cpu().numpy()
+        # Per-panel normalisation: these panels are for comparing structure
+        # across settings, not absolute levels. The generated datasets use one
+        # global range instead.
         lo, hi = float(arr.min()), float(arr.max())
         norm = np.clip((arr - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
         return (colormaps["jet"](norm)[..., :3] * 255).astype(np.uint8)
@@ -207,12 +220,15 @@ def spectrum_panel(name, paths, response, grid, args):
         norm = np.clip((arr - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
         return (colormaps["jet"](norm)[..., :3] * 255).astype(np.uint8)
 
+    # Delay and AoD are already RGB (angle and amplitude in separate channels),
+    # so they get no colourmap -- only a transpose to HWC and a scale.
     equirect = (delay_spectrum_equirect(paths, args.equirect_scale)
                 if name == "Delay"
                 else aod_spectrum_equirect(paths, args.equirect_scale))
     view = equirect_to_perspective(equirect, args.width, args.height,
                                    args.fov, args.yaw)
     arr = view.detach().cpu().numpy().transpose(1, 2, 0)
+    # One shared maximum across channels, so the relative channel weights survive.
     hi = max(float(arr.max()), 1e-9)
     return np.clip(arr / hi * 255.0, 0, 255).astype(np.uint8)
 
@@ -244,6 +260,11 @@ def render_optical_cell(scene_xml, position, yaw, args, tag):
 
 
 def generate_rows(args):
+    """One row per (scattering, depth), each with every spectrum as a cell.
+
+    All rows share the receiver pose, the transmitter and the seed, so a column
+    varies only in the setting named in its row label.
+    """
     import mitsuba as mi
     mi.set_variant(args.variant)
     from sionna.rt import PathSolver, PlanarArray, Receiver, Transmitter, load_scene
@@ -296,6 +317,8 @@ def generate_rows(args):
             try:
                 rgb = spectrum_panel(name, paths, response, grid, args)
             except ValueError as exc:
+                # A singular MVDR covariance is the usual cause; the reason goes
+                # into the cell so the gap is explained rather than blank.
                 cells[name] = {"missing": str(exc)[:40]}
                 continue
             fname = f"{name}_s{scattering:g}_d{depth}.png"
@@ -323,6 +346,10 @@ def generate_rows(args):
 
 
 def main():
+    """Recover the released pose, generate our rows at it, and write the manifest.
+
+    The output is a JSON manifest, not HTML: comparison_table.py renders it.
+    """
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scene-xml", required=True)
@@ -368,12 +395,15 @@ def main():
             args.yaw = yaw
         released_optical = render_optical_cell(args.scene_xml, position, yaw,
                                                args, "released")
+    # Fallback pose, used only when the released dataset is not present.
     if args.rx is None:
         args.rx = [3.0, -2.0, 0.0]
     if args.yaw is None:
         args.yaw = 0.0
 
     rows = released_rows(args.root, args.view, optical=released_optical)         + generate_rows(args)
+    # The optical view leads the columns; the two absolute roots let the
+    # renderer resolve cells against the repo or against our own output.
     payload = {"columns": [{"name": OPTICAL[0], "algorithm": OPTICAL[1],
                             "ported": True}]
                           + [{"name": n, "algorithm": a, "ported": p}
