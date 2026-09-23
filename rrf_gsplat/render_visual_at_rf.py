@@ -10,15 +10,18 @@ beside a spectrum that could just be looked up.
 But the two live in the same world frame -- that is the whole premise of the
 two-stage training, where stage 2 freezes the geometry stage 1 learned -- so the
 visual model can simply be rendered at a receiver's pose.  The RF reconstruction
-uses a single PINHOLE camera, 300x200 with f=150 (90.0 x 67.4 degrees), so the
-result is pixel-aligned in direction with the spectrum: whatever sits at pixel
-(u, v) of the spectrum is the surface at pixel (u, v) of this render.
+uses a single PINHOLE camera at f=150 over a 300x200 frame (90.0 x 67.4 degrees),
+so the result is aligned in direction with the spectrum: whatever sits at (u, v)
+of the spectrum is the surface at (u, v) of this render.
 
 All six spectrum datasets share one set of poses and one split -- images.txt,
 cameras.txt, train_index.txt and test_index.txt are byte-identical across
-3dgs_{AoD,CBF,Delay,MPC,MVDR,TCBF}_100 -- so ONE run of this script serves all
-six, and the output is written to a single directory rather than once per
-spectrum.
+3dgs_{AoD,CBF,Delay,MPC,MVDR,TCBF}_100 -- so the poses need rendering only once
+per IMAGE SIZE, not once per spectrum.  There are two sizes: cameras.txt says
+300x200 everywhere, but the AoD and Delay images on disk are 231x154, and 3DGS
+renders at the image size while taking the field of view from cameras.txt.  The
+aspect is the same either way, so both cover the same directions.  Output goes
+to <out>/<W>x<H>/ and the viewer picks the directory matching the spectrum.
 
 Output is named by the ORIGINAL view name (00005.png), which is what our own
 runs use.  The released models number their renders by position in the sorted
@@ -27,6 +30,7 @@ held-out split instead; viewer.py holds that mapping.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import time
 
@@ -116,12 +120,14 @@ def main():
                     help="the trained stage-1 visual model")
     ap.add_argument("--source", default=os.path.join(REPO, "RF-3DGS_dataset", "training-rf-spectrum", "3dgs_MVDR_100"),
                     help="any RF dataset; all six carry identical poses")
-    ap.add_argument("--out", default=os.path.join(REPO, "output", "visual_at_rf"))
+    ap.add_argument("--out", default=os.path.join(REPO, "output", "visual_at_rf"),
+                    help="renders land in <out>/<W>x<H>/, since the datasets "
+                         "do not all use the same image size")
     ap.add_argument("--split", default="test", choices=["test", "train", "all"])
     ap.add_argument("--white", action="store_true", help="white background instead of black")
     args = ap.parse_args()
 
-    cams, (w, h, fx, fy) = read_colmap(os.path.join(args.source, "sparse", "0"))
+    cams, (cw, ch, fx, fy) = read_colmap(os.path.join(args.source, "sparse", "0"))
     if args.split == "all":
         names = sorted(cams)
     else:
@@ -130,6 +136,17 @@ def main():
     missing = [n for n in names if n not in cams]
     if missing:
         raise KeyError(f"{len(missing)} split names absent from the reconstruction, e.g. {missing[:3]}")
+
+    # 3DGS takes the FIELD OF VIEW from cameras.txt but the RENDER SIZE from the
+    # image on disk, and the two disagree here: every dataset's cameras.txt says
+    # 300x200, yet the AoD and Delay images are 231x154. Same aspect, so the same
+    # FoV covers both; matching the image size is what makes the render line up
+    # with the spectrum it sits beside.
+    probe = sorted(os.listdir(os.path.join(args.source, "images")))[0]
+    with Image.open(os.path.join(args.source, "images", probe)) as im:
+        w, h = im.size
+    fovx, fovy = focal2fov(fx, cw), focal2fov(fy, ch)
+    args.out = os.path.join(args.out, f"{w}x{h}")
 
     it, ply = newest_ply(args.model)
     gs = GaussianModel(3)
@@ -141,14 +158,17 @@ def main():
     print(f"model      {os.path.relpath(args.model, REPO)}  iteration {it}  "
           f"{gs.get_xyz.shape[0]} gaussians")
     print(f"poses      {os.path.relpath(args.source, REPO)}  split={args.split}  {len(names)} views")
-    print(f"camera     PINHOLE {w}x{h}  f={fx:g}")
+    print(f"camera     FoV from cameras.txt ({cw}x{ch}, f={fx:g}) -> "
+          f"{math.degrees(fovx):.1f} x {math.degrees(fovy):.1f} deg")
+    print(f"           rendered at the dataset's image size {w}x{h}"
+          + ("" if (w, h) == (cw, ch) else "  [differs from cameras.txt]"))
     print(f"out        {os.path.relpath(args.out, REPO)}")
 
     # warm-up, excluded from the timing: the first launch pays CUDA context and
     # kernel compilation and is not representative
     R, T = cams[names[0]]
     with torch.no_grad():
-        render(Camera(0, R, T, focal2fov(fx, w), focal2fov(fy, h),
+        render(Camera(0, R, T, fovx, fovy,
                       torch.zeros((3, h, w)), None, names[0], 0), gs, pipe, bg)
     torch.cuda.synchronize()
 
@@ -158,7 +178,7 @@ def main():
         R, T = cams[n]
         t = time.time()
         with torch.no_grad():
-            img = render(Camera(0, R, T, focal2fov(fx, w), focal2fov(fy, h),
+            img = render(Camera(0, R, T, fovx, fovy,
                                 torch.zeros((3, h, w)), None, n, k), gs, pipe, bg)["render"]
         torch.cuda.synchronize()
         per_view.append(time.time() - t)

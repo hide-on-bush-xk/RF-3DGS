@@ -36,6 +36,7 @@ select, button { font:inherit; color:var(--ink); background:var(--sunk);
   border:1px solid var(--line); border-radius:4px; padding:5px 9px; cursor:pointer; }
 button:hover, select:hover { border-color:var(--accent); }
 button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+button:disabled { opacity:.4; cursor:default; border-color:var(--line); }
 input[type=range] { accent-color:var(--accent); }
 .grow { flex:1; min-width:120px; }
 .mono { font-family:"IBM Plex Mono",ui-monospace,monospace; font-variant-numeric:tabular-nums; }
@@ -44,18 +45,24 @@ input[type=range] { accent-color:var(--accent); }
 .card { background:var(--surface); border:1px solid var(--line);
   border-radius:6px; padding:12px; }
 .card h2 { font-size:13px; margin:0 0 8px; font-weight:600; }
-.panes { display:grid; gap:10px; grid-template-columns:repeat(3,1fr); }
-.panes.two { grid-template-columns:repeat(2,1fr); }
-.pane { min-width:0; }
-/* the panel wall: one column per thing being shown, wrapping rather than
-   shrinking past the point where 300x200 is still readable */
-.grid { display:grid; gap:10px;
-  grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); }
-.grid figure { margin:0; min-width:0; }
-.grid figcaption { font-size:11px; color:var(--muted); margin-top:5px;
+/* The panel wall is a fixed grid, never auto-fill: one row per prediction and
+   a label gutter, so every prediction sits in the SAME column at the SAME width
+   and can be read down the page. Auto-fill wrapped the panels into whatever
+   order fitted, which is the one thing a comparison must not do. */
+.wall { display:grid; gap:10px 12px; align-items:start;
+  grid-template-columns:118px 1fr 1fr; }
+.wall.noerr { grid-template-columns:118px 1fr; }
+.wall .lab { font-size:11px; line-height:1.45; padding-top:2px; min-width:0;
+  font-family:"IBM Plex Mono",ui-monospace,monospace; color:var(--muted);
+  overflow-wrap:anywhere; }
+.wall .lab b { display:block; color:var(--ink); font-size:12px; font-weight:600; }
+.wall .lab .rel { color:var(--s2); }
+.wall .cell { min-width:0; }
+.wall .cap { font-size:11px; color:var(--muted); margin-top:4px;
   font-family:"IBM Plex Mono",ui-monospace,monospace; }
-.grid figcaption b { color:var(--ink); font-weight:600; }
-.grid figure.ref canvas { outline:2px solid var(--accent); outline-offset:-2px; }
+.wall .target canvas { outline:2px solid var(--accent); outline-offset:-2px; }
+.wall .head { grid-column:1/-1; font-size:11px; color:var(--muted);
+  border-top:1px solid var(--line); padding-top:8px; margin-top:2px; }
 .chips { display:flex; gap:6px; flex-wrap:wrap; margin:0 0 10px; }
 .chip { font:inherit; font-size:12px; padding:3px 8px; border-radius:11px;
   border:1px solid var(--line); background:var(--sunk); color:var(--muted);
@@ -65,17 +72,19 @@ input[type=range] { accent-color:var(--accent); }
 .chip.rel.on { background:var(--s2); border-color:var(--s2); }
 .chip .n { font-family:"IBM Plex Mono",ui-monospace,monospace; opacity:.75;
   margin-left:5px; }
-.pane figcaption { font-size:11px; color:var(--muted); margin-top:5px;
-  font-family:"IBM Plex Mono",ui-monospace,monospace; }
 canvas { width:100%; height:auto; display:block; border-radius:3px;
   image-rendering:pixelated; background:var(--sunk); }
-/* swipe comparator: the two images stack, the top one is clipped by the handle */
-.swipe { position:relative; user-select:none; touch-action:none; }
-.swipe canvas { position:absolute; inset:0; }
-.swipe canvas:first-child { position:relative; }
-.swipe .handle { position:absolute; top:0; bottom:0; width:2px;
+/* Swipe comparator: target underneath, prediction clipped on top. Every row
+   carries one and they all read the same SPLIT, so dragging any row moves every
+   line at once -- the point being to cut all the models at the same column of
+   the image. The under canvas stays in flow and gives the row its height; the
+   over canvas is pinned to it. */
+.swipe { position:relative; user-select:none; touch-action:none; cursor:ew-resize; }
+.swipe .under { position:relative; display:block; }
+.swipe .over { position:absolute; left:0; top:0; width:100%; height:100%; }
+.swipe .handle { position:absolute; top:0; bottom:0; width:2px; margin-left:-1px;
   background:var(--s2); pointer-events:none; }
-.swipe .handle::after { content:""; position:absolute; top:50%; left:-7px;
+.swipe.anchor .handle::after { content:""; position:absolute; top:50%; left:-7px;
   width:16px; height:16px; margin-top:-8px; border-radius:50%;
   background:var(--s2); border:2px solid var(--surface); }
 table { width:100%; border-collapse:collapse; }
@@ -123,16 +132,7 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
           </h2>
 
           <div class="chips" id="chips"></div>
-          <div class="grid" id="grid"></div>
-
-          <figure class="pane hidden" id="paneSwipe" style="margin:0">
-            <div class="swipe" id="swipe">
-              <canvas id="cS1"></canvas><canvas id="cS2"></canvas>
-              <div class="handle" id="handle" style="left:50%"></div>
-            </div>
-            <figcaption id="capSwipe">drag to compare</figcaption>
-          </figure>
-
+          <div class="wall" id="wall"></div>
           <p class="note" id="errNote"></p>
         </div>
       </div>
@@ -150,6 +150,14 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
           <table id="scores"></table>
           <p class="note" id="itNote"></p>
           <p class="note" id="relNote"></p>
+        </div>
+        <div class="card" style="margin-top:14px" id="visCard">
+          <h2>the room from here</h2>
+          <canvas id="cVis"></canvas>
+          <p class="note">The stage-1 visual model rendered at <em>this receiver&rsquo;s</em>
+          pose through the same 300&times;200 f=150 camera (90&deg;&times;67.4&deg;), so it is
+          aligned with the spectra pixel for pixel in direction &mdash; whatever sits at
+          (u,&nbsp;v) of a spectrum is the surface at (u,&nbsp;v) here.</p>
         </div>
         <div class="card" style="margin-top:14px">
           <h2>floor plan</h2>
@@ -386,14 +394,96 @@ function drawChips() {
   }
 }
 
-function figure(cls, cap) {
-  const f = document.createElement("figure");
-  if (cls) f.className = cls;
-  const cv = document.createElement("canvas");
-  const fc = document.createElement("figcaption");
-  fc.innerHTML = cap;
-  f.append(cv, fc);
-  return { f, cv, fc };
+// ---------------------------------------------------------------- jet fit
+// The error map decodes a colour back to a value through the jet palette, which
+// is only meaningful if the dataset was WRITTEN with that palette. Four of the
+// six were: sampling a target and measuring the distance from each pixel to the
+// nearest of the 256 jet colours gives 0.5-0.7 for CBF, MVDR and TCBF and 3.1
+// for MPC -- but 69.7 for Delay and 117.5 for AoD, whose spectra are near
+// greyscale (channel spread 9 on AoD). Decoding those produces arbitrary
+// levels, so the error map is withheld rather than drawn wrong.
+const JETFIT = {};
+const JET_TOL = 12;
+
+function jetFit(name, d, w, h) {
+  if (JETFIT[name] != null) return JETFIT[name];
+  const lut = IDX.jet, n = w * h, step = Math.max(1, Math.floor(n / 1500));
+  let sum = 0, cnt = 0;
+  for (let i = 0; i < n; i += step) {
+    const j = i * 4;
+    let best = Infinity;
+    for (let k = 0; k < lut.length; k++) {
+      const dr = d[j] - lut[k][0], dg2 = d[j + 1] - lut[k][1], db = d[j + 2] - lut[k][2];
+      const q = dr * dr + dg2 * dg2 + db * db;
+      if (q < best) best = q;
+    }
+    sum += Math.sqrt(best); cnt++;
+  }
+  return (JETFIT[name] = sum / cnt);
+}
+
+// ---------------------------------------------------------------- swipe
+// One split position shared by every row. Dragging any row moves all of them,
+// so the models are always cut at the same column of the image -- comparing
+// them at different columns would be comparing different parts of the scene.
+let SPLIT = 50;
+
+function applySplit() {
+  for (const el of document.querySelectorAll("#wall .swipe")) {
+    el.querySelector(".over").style.clipPath = `inset(0 ${100 - SPLIT}% 0 0)`;
+    el.querySelector(".handle").style.left = `${SPLIT}%`;
+  }
+}
+
+function bindSwipe(el) {
+  const move = e => {
+    const r = el.getBoundingClientRect();
+    if (!r.width) return;
+    SPLIT = Math.max(0, Math.min(100, (e.clientX - r.left) / r.width * 100));
+    applySplit();
+  };
+  el.addEventListener("pointerdown", e => {
+    el.setPointerCapture(e.pointerId);
+    move(e);
+    e.preventDefault();                      // or the canvas starts a drag-image
+  });
+  el.addEventListener("pointermove", e => { if (e.buttons) move(e); });
+}
+
+// ---------------------------------------------------------------- wall
+function el(tag, cls, html) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (html != null) n.innerHTML = html;
+  return n;
+}
+
+function labelCell(p) {
+  const tag = p.kind === "released"
+    ? `<span class="rel">RF-3DGS released</span>` : "ours";
+  return el("div", "lab",
+    `<b>${p.label}</b>${tag} · ${kIt(p)}<br>PSNR ${fmt(p.psnr[VIEW])}`);
+}
+
+function imgCell(im, cap, cls) {
+  const c = el("div", "cell" + (cls ? " " + cls : ""));
+  const cv = el("canvas");
+  c.appendChild(cv);
+  toCanvas(cv, im);
+  if (cap) c.appendChild(el("div", "cap", cap));
+  return c;
+}
+
+function swipeCell(under, over, cap, anchor) {
+  const c = el("div", "cell");
+  const sw = el("div", "swipe" + (anchor ? " anchor" : ""));
+  const cu = el("canvas", "under"), co = el("canvas", "over");
+  sw.append(cu, co, el("div", "handle"));
+  c.append(sw, el("div", "cap", cap));
+  toCanvas(cu, under);
+  toCanvas(co, over);
+  bindSwipe(sw);
+  return c;
 }
 
 async function show() {
@@ -405,7 +495,6 @@ async function show() {
 
   const preds = MODEL.preds.filter(p => SEL.has(p.id));
 
-  // the per-prediction score table, this view over the whole held-out set
   const span = MODEL.preds.map(iters);
   const mixed = Math.min(...span) !== Math.max(...span);
   $("#scores").innerHTML = MODEL.preds.map(p =>
@@ -423,7 +512,6 @@ async function show() {
     : `No released RF-3DGS model for ${MODEL.name} — the paper ships five, and ` +
       `${MODEL.name} is not one of them. The released row is MISSING, not zero.`;
 
-  // load everything for this view at once: target, the room, every prediction
   let ig, iv = null, ips;
   try {
     [ig, ...ips] = await Promise.all([
@@ -437,76 +525,81 @@ async function show() {
   }
   const w = ig.naturalWidth, h = ig.naturalHeight;
 
-  const ref = refPred();
-  const iref = ips[preds.indexOf(ref)] ?? ips[0];
+  // the room sits with the floor plan, not in the wall: it is context for where
+  // the receiver is, not another thing being scored
+  $("#visCard").classList.toggle("hidden", !iv);
+  if (iv) toCanvas($("#cVis"), iv);
+
+  const dg = toCanvas(document.createElement("canvas"), ig).getImageData(0, 0, w, h).data;
+  const fit = jetFit(MODEL.name, dg, w, h);
+  const jetOK = fit < JET_TOL;
+  const showErr = MODE.err && jetOK && !MODE.swipe;
+
+  const wall = $("#wall");
+  wall.innerHTML = "";
+  // in swipe mode the target is inside every widget, so there is no error
+  // column and no separate target row
+  wall.classList.toggle("noerr", !showErr);
 
   if (MODE.swipe) {
-    toCanvas($("#cS1"), ig);                 // target underneath
-    toCanvas($("#cS2"), iref);               // prediction on top, clipped
-    clipSwipe();
-    $("#capSwipe").innerHTML =
-      `left: <b>${ref ? ref.label : "prediction"}</b> &middot; right: target &mdash; drag to compare`;
-    $("#grid").classList.add("hidden");
-  } else {
-    $("#grid").classList.remove("hidden");
+    wall.appendChild(el("div", "head",
+      "Each row cuts the target against one model at the same column. " +
+      "Drag any row — they all follow."));
+    preds.forEach((p, k) => {
+      wall.appendChild(labelCell(p));
+      wall.appendChild(swipeCell(ig, ips[k],
+        `left: ${p.label} · right: target`, k === 0));
+    });
+    applySplit();
+    drawPlan();
+    $("#errNote").textContent = "";
+    return;
   }
 
-  const grid = $("#grid");
-  grid.innerHTML = "";
-  if (MODE.swipe) { drawPlan(); return; }
+  // target first, in the same column every prediction will use
+  wall.appendChild(el("div", "lab", "<b>target</b>the dataset spectrum"));
+  wall.appendChild(imgCell(ig, `${w}×${h}`, "target"));
+  if (showErr) wall.appendChild(el("div", "cell"));   // keeps the grid on-column
 
-  // the room first: same receiver, same 90x67.4 deg camera, so it is aligned
-  // with the spectra pixel for pixel in direction
-  if (iv) {
-    const { f, cv } = figure("", "the room from here <b>(stage-1 visual)</b>");
-    toCanvas(cv, iv); grid.appendChild(f);
-  }
-  {
-    const { f, cv } = figure("ref", "<b>target</b> &mdash; the dataset spectrum");
-    toCanvas(cv, ig); grid.appendChild(f);
-  }
-
-  const cg = toCanvas(document.createElement("canvas"), ig);
-  const dg = cg.getImageData(0, 0, w, h).data;
   let worst = null;
 
   preds.forEach((p, k) => {
-    const im = ips[k];
-    const tag = p.kind === "released" ? "RF-3DGS released" : "ours";
-    const { f, cv } = figure("", `<b>${p.label}</b> · ${tag} · ${kIt(p)} it<br>PSNR ${fmt(p.psnr[VIEW])}`);
-    toCanvas(cv, im); grid.appendChild(f);
-
-    if (MODE.err) {
-      const dp = toCanvas(document.createElement("canvas"), im).getImageData(0, 0, w, h).data;
-      const e = figure("", "");
-      const st = drawError(e.cv, dp, dg, w, h);
-      e.fc.innerHTML = `error · ${p.label}<br>peak ${st.maxAbs} levels · mean ` +
-        `${st.mean >= 0 ? "+" : ""}${st.mean.toFixed(2)}`;
-      grid.appendChild(e.f);
+    wall.appendChild(labelCell(p));
+    wall.appendChild(imgCell(ips[k], "prediction"));
+    if (showErr) {
+      const c = el("div", "cell");
+      const cv = el("canvas");
+      c.appendChild(cv);
+      const dp = toCanvas(document.createElement("canvas"), ips[k]).getImageData(0, 0, w, h).data;
+      const st = drawError(cv, dp, dg, w, h);
+      c.appendChild(el("div", "cap",
+        `signed error · peak ${st.maxAbs} levels · mean ` +
+        `${st.mean >= 0 ? "+" : ""}${st.mean.toFixed(2)}`));
+      wall.appendChild(c);
       if (!worst || st.maxAbs > worst.maxAbs) worst = { ...st, label: p.label };
     }
   });
 
-  $("#errNote").innerHTML = MODE.err
-    ? "Error is the difference of the jet-decoded 8-bit levels, orange = predicted too high. " +
-      "Decoded through a 32³ reverse table, so it is worth about ±1 level — " +
-      "enough to see <em>where</em> a model is wrong, not a substitute for scoring " +
-      "against <span class='mono'>spectra_float</span>." +
-      (worst ? ` Largest excursion here: <b>${worst.label}</b>, ${worst.maxAbs} levels.` : "")
-    : "";
+  $("#errNote").innerHTML =
+    !MODE.err ? ""
+    : !jetOK
+      ? `<span class="warn">Error map withheld for ${MODEL.name}.</span> Its pixels sit ` +
+        `${fit.toFixed(0)} away from the nearest jet colour on average (the jet-encoded ` +
+        `spectra score under 4), so this dataset was not written through that palette and ` +
+        `decoding a colour back to a value would return an arbitrary level. The ` +
+        `predictions above are still the real renders — only the difference is MISSING.`
+      : "Error is the difference of the jet-decoded 8-bit levels, orange = predicted too high. " +
+        "Decoded through a 32³ reverse table, so it is worth about ±1 level — " +
+        "enough to see <em>where</em> a model is wrong, not a substitute for scoring " +
+        "against <span class='mono'>spectra_float</span>." +
+        (worst ? ` Largest excursion here: <b>${worst.label}</b>, ${worst.maxAbs} levels.` : "");
   drawPlan();
 }
 
-function clipSwipe() {
-  const pct = parseFloat($("#handle").style.left) || 50;
-  $("#cS2").style.clipPath = `inset(0 ${100 - pct}% 0 0)`;
-}
-
 function layout() {
-  // the panel wall is rebuilt by show(), so layout only flips the swipe
-  // comparator in and out and keeps the toggles lit
-  $("#paneSwipe").classList.toggle("hidden", !MODE.swipe);
-  $("#grid").classList.toggle("hidden", MODE.swipe);
+  // show() rebuilds the wall for whichever mode is on, so layout only keeps the
+  // toggles lit and disables the ones that have nothing to act on
+  $("#mErr").disabled = MODE.swipe;          // no error column in swipe mode
   $("#mSide").classList.toggle("on", !MODE.swipe);
   $("#mSwipe").classList.toggle("on", MODE.swipe);
   $("#mErr").classList.toggle("on", MODE.err);
@@ -548,18 +641,6 @@ $("#mSide").onclick = () => { MODE.swipe = false; layout(); show(); };
 $("#mSwipe").onclick = () => { MODE.swipe = true; layout(); show(); };
 $("#mErr").onclick = () => { MODE.err = !MODE.err; layout(); show(); };
 $("#mVis").onclick = () => { MODE.vis = !MODE.vis; layout(); show(); };
-
-(() => {                                        // swipe drag
-  const el = $("#swipe");
-  const move = e => {
-    const r = el.getBoundingClientRect();
-    const x = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
-    $("#handle").style.left = `${Math.max(0, Math.min(100, x / r.width * 100))}%`;
-    clipSwipe();
-  };
-  el.addEventListener("pointerdown", e => { el.setPointerCapture(e.pointerId); move(e); });
-  el.addEventListener("pointermove", e => { if (e.buttons) move(e); });
-})();
 
 const TABS = { tabCmp:"cmp", tabRuns:"runs", tab3d:"v3d" };
 for (const [btn, pane] of Object.entries(TABS)) {
@@ -719,8 +800,26 @@ $("#load3d").onclick = async () => {
       "no index.db — build it with: python rrf_gsplat/index_db.py";
     $("#runSql").disabled = true;
   }
+  // #<spectrum>/<view>/<mode,mode,...> deep-links a state, so a particular view
+  // of a particular model can be handed to someone else -- and so the page can
+  // be driven from a headless browser, which is the only way any of this gets
+  // verified without a person clicking.
+  const hash = decodeURIComponent(location.hash.slice(1)).split("/");
+  const want = IDX.spectra.find(m => m.name.toLowerCase() === (hash[0] || "").toLowerCase());
+  if (hash[2]) {
+    const f = hash[2].split(",");
+    MODE.swipe = f.includes("swipe");
+    if (f.includes("noerr")) MODE.err = false;
+    if (f.includes("novis")) MODE.vis = false;
+  }
   layout();
-  pickModel(IDX.spectra[0].name);
+  pickModel((want || IDX.spectra[0]).name);
+  sel.value = (want || IDX.spectra[0]).name;
+  if (hash[1] && MODEL.views > +hash[1]) {
+    VIEW = +hash[1];
+    $("#view").value = VIEW;
+    show();
+  }
 })();
 </script>
 </body>

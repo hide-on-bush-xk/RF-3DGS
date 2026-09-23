@@ -32,6 +32,7 @@ import json
 import math
 import os
 import re
+import struct
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -121,6 +122,24 @@ def _ply_for(model_dir):
         if m and os.path.isfile(p) and (best is None or int(m.group(1)) > best[0]):
             best = (int(m.group(1)), p)
     return best[1] if best else None
+
+
+def _png_size(path):
+    """(width, height) from a PNG header, or None.
+
+    IHDR is always the first chunk: 8 bytes of signature, a 4-byte length, the
+    tag, then width and height as big-endian uint32. Read directly so this file
+    keeps its no-Pillow, standard-library-only property.
+    """
+    try:
+        with open(path, "rb") as fid:
+            head = fid.read(24)
+        sig = bytes([137, 80, 78, 71, 13, 10, 26, 10])
+        if head[:8] != sig or head[12:16] != b"IHDR":
+            return None
+        return struct.unpack(">II", head[16:24])
+    except Exception:
+        return None
 
 
 def _newest_test(model_dir):
@@ -235,8 +254,6 @@ def discover():
     """
     spectra = []
     ours = _our_runs()
-    have_visual = os.path.isdir(VISUAL)
-
     for src_name in sorted(os.listdir(SOURCES)) if os.path.isdir(SOURCES) else []:
         m = re.match(r"3dgs_(.+)_100$", src_name)
         if not m:
@@ -249,6 +266,13 @@ def discover():
         names = sorted(l.strip() for l in open(idx_path) if l.strip())
         if not names:
             continue
+
+        # The datasets do not share an image size -- cameras.txt says 300x200
+        # everywhere, but AoD and Delay are 231x154 on disk -- and the visual
+        # renders are kept one directory per size, so the room shown beside a
+        # spectrum is sampled on the same grid as the spectrum.
+        size = _png_size(os.path.join(src, "images", f"{names[0]}.png"))
+        vdir = os.path.join(VISUAL, "%dx%d" % size) if size else None
 
         poses = {}
         imgs_txt = os.path.join(src, "sparse", "0", "images.txt")
@@ -304,7 +328,9 @@ def discover():
             "name": spectrum,
             "src": os.path.relpath(src, REPO).replace(os.sep, "/"),
             "views": len(names), "items": items, "preds": preds,
-            "visual": have_visual and os.path.isfile(os.path.join(VISUAL, f"{names[0]}.png")),
+            "size": list(size) if size else None,
+            "visual_dir": None if not vdir else os.path.relpath(vdir, REPO).replace(os.sep, "/"),
+            "visual": bool(vdir and os.path.isfile(os.path.join(vdir, f"{names[0]}.png"))),
             "released": any(p["kind"] == "released" for p in preds),
         })
     return spectra
@@ -336,7 +362,8 @@ def make_handler(spectra, page, db_path=None):
     for s in spectra:
         names = [it["name"] for it in s["items"]]
         gt_files[s["name"]] = [os.path.join(REPO, s["src"], "images", f"{n}.png") for n in names]
-        visual_files[s["name"]] = [os.path.join(VISUAL, f"{n}.png") for n in names]
+        vdir = os.path.join(REPO, s["visual_dir"]) if s["visual_dir"] else None
+        visual_files[s["name"]] = None if not vdir else             [os.path.join(vdir, f"{n}.png") for n in names]
         for p in s["preds"]:
             base = os.path.join(REPO, p["dir"])
             files = [f"{n}.png" for n in names] if p["naming"] == "name" \
@@ -481,8 +508,9 @@ def main():
         raise SystemExit(f"no rendered predictions found under {RELEASED} or {OURS}")
     for s in spectra:
         got = sum(1 for it in s["items"] if it["rx"] is not None)
-        vis = "visual" if s["visual"] else "NO VISUAL"
-        print(f"  {s['name']:6s} {s['views']:4d} views, {got} with a pose, {vis}")
+        sz = "%dx%d" % tuple(s["size"]) if s["size"] else "size unknown"
+        vis = f"visual {sz}" if s["visual"] else "NO VISUAL (MISSING)"
+        print(f"  {s['name']:6s} {s['views']:4d} views, {got} with a pose, {sz}, {vis}")
         for p in s["preds"]:
             # MISSING rather than a blank: a prediction with no comparable
             # aggregate is still a row, it just has no number yet
