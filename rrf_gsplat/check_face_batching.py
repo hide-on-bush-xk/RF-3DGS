@@ -5,7 +5,8 @@
   3. --sh-backend gsplat against the torch SH, rendered
   4. evaluate_multi with --eval-group against without, on 16 held-out views
 
-multi mode with the delay-depth term (the most involved render path) and db mode.
+multi mode with the delay-depth term (the most involved render path), db mode, and rgb mode on a released
+dataset (gsplat's SH over several cameras; 231 x 154 pictures under scaled intrinsics).
 Pass = every max |difference| below 1e-4 in normalised units (float32 summation-order noise is ~1e-6);
 the metrics of check 4 identical to 1e-6.
 
@@ -49,16 +50,20 @@ def main():
     ck = os.path.join(REPO, "RF-3DGS_dataset/blender_visual_trained/chkpnt30000.pth")
     report, ok = {}, True
     for mode, source in (("multi", "RF-3DGS_dataset/regenerated/3dgs_MULTI_24ghz_tut_cs"),
-                         ("db", "RF-3DGS_dataset/regenerated/3dgs_MVDR_100_gpct")):
+                         ("db", "RF-3DGS_dataset/regenerated/3dgs_MVDR_100_gpct"),
+                         # rgb on a released set: gsplat's own SH for several cameras, and the 231 x 154 pictures
+                         # under a 300 x 200 camera (scaled intrinsics)
+                         ("rgb", "RF-3DGS_dataset/training-rf-spectrum/3dgs_AoD_100")):
         src = os.path.join(REPO, source)
-        meta = json.load(open(os.path.join(src, "generation_meta.json")))
+        mp = os.path.join(src, "generation_meta.json")
+        meta = json.load(open(mp)) if os.path.exists(mp) else {"spec_min_db": 0.0, "spec_max_db": 1.0}
         views = new.read_colmap_text(os.path.join(src, "sparse", "0"))
         test_names = new.read_index(os.path.join(src, "test_index.txt"))
         # four whole positions spread over the list (all four faces each), not a [::k] slice
         pos = np.linspace(0, len(test_names) // 4 - 1, 4).round().astype(int)
         names = [test_names[p * 4 + k] for p in pos for k in range(4)]
         data = new.load_views(src, names, views, device, want_float=True)
-        ch = len(meta["channels"]) if mode == "multi" else 1
+        ch = len(meta["channels"]) if mode == "multi" else (3 if mode == "rgb" else 1)
         span = meta["spec_max_db"] - meta["spec_min_db"]
         models = {}
         for tag, mod in (("head", head), ("new", new)):
