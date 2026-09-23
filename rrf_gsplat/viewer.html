@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RRF model browser</title>
+<style>
+:root {
+  --bg:#f4f5f3; --surface:#ffffff; --sunk:#eceee9; --ink:#16181a;
+  --muted:#5b6166; --line:#dfe3de; --accent:#0b6e6b;
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100;
+}
+:root:not([data-theme="light"]) { }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#15171a; --surface:#1d2024; --sunk:#25292e; --ink:#e8eaec;
+    --muted:#9aa1a8; --line:#333940; --accent:#37b0aa;
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#15171a; --surface:#1d2024; --sunk:#25292e; --ink:#e8eaec;
+  --muted:#9aa1a8; --line:#333940; --accent:#37b0aa;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+.wrap { max-width:1400px; margin:0 auto; padding:16px; }
+h1 { font-size:17px; margin:0 0 2px; font-weight:600; }
+.sub { color:var(--muted); font-size:13px; margin:0 0 14px; }
+.bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+  background:var(--surface); border:1px solid var(--line); border-radius:6px;
+  padding:10px 12px; margin-bottom:14px; position:sticky; top:0; z-index:5; }
+select, button { font:inherit; color:var(--ink); background:var(--sunk);
+  border:1px solid var(--line); border-radius:4px; padding:5px 9px; cursor:pointer; }
+button:hover, select:hover { border-color:var(--accent); }
+button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+input[type=range] { accent-color:var(--accent); }
+.grow { flex:1; min-width:120px; }
+.mono { font-family:"IBM Plex Mono",ui-monospace,monospace; font-variant-numeric:tabular-nums; }
+.layout { display:grid; grid-template-columns:1fr 320px; gap:14px; align-items:start; }
+@media (max-width:1000px) { .layout { grid-template-columns:1fr; } }
+.card { background:var(--surface); border:1px solid var(--line);
+  border-radius:6px; padding:12px; }
+.card h2 { font-size:13px; margin:0 0 8px; font-weight:600; }
+.panes { display:grid; gap:10px; grid-template-columns:repeat(3,1fr); }
+.panes.two { grid-template-columns:repeat(2,1fr); }
+.pane { min-width:0; }
+.pane figcaption { font-size:11px; color:var(--muted); margin-top:5px;
+  font-family:"IBM Plex Mono",ui-monospace,monospace; }
+canvas { width:100%; height:auto; display:block; border-radius:3px;
+  image-rendering:pixelated; background:var(--sunk); }
+/* swipe comparator: the two images stack, the top one is clipped by the handle */
+.swipe { position:relative; user-select:none; touch-action:none; }
+.swipe canvas { position:absolute; inset:0; }
+.swipe canvas:first-child { position:relative; }
+.swipe .handle { position:absolute; top:0; bottom:0; width:2px;
+  background:var(--s2); pointer-events:none; }
+.swipe .handle::after { content:""; position:absolute; top:50%; left:-7px;
+  width:16px; height:16px; margin-top:-8px; border-radius:50%;
+  background:var(--s2); border:2px solid var(--surface); }
+table { width:100%; border-collapse:collapse; }
+th, td { text-align:left; padding:3px 0; font-size:12px; }
+th { color:var(--muted); font-weight:400; }
+td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
+.note { color:var(--muted); font-size:12px; margin:8px 0 0; }
+.warn { color:var(--s2); }
+#plan { width:100%; height:auto; }
+.hidden { display:none !important; }
+#three { width:100%; height:520px; border-radius:4px; background:var(--sunk);
+  display:block; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>RRF model browser</h1>
+  <p class="sub">Predicted spectrum against its target on the held-out views, per model.
+  Use <span class="mono">&larr;</span> / <span class="mono">&rarr;</span> to step views.</p>
+
+  <div class="bar">
+    <label>model <select id="model"></select></label>
+    <button id="prev">&larr;</button>
+    <input class="grow" type="range" id="view" min="0" value="0">
+    <button id="next">&rarr;</button>
+    <span class="mono" id="pos"></span>
+    <span class="grow"></span>
+    <button id="tabCmp" class="on">compare</button>
+    <button id="tab3d">3D</button>
+    <button id="theme" title="light / dark">&#9681;</button>
+  </div>
+
+  <!-- ---------------- compare tab ---------------- -->
+  <div id="cmp">
+    <div class="layout">
+      <div>
+        <div class="card">
+          <h2>
+            <button id="mSide" class="on">side by side</button>
+            <button id="mSwipe">swipe</button>
+            <button id="mErr" class="on">error map</button>
+          </h2>
+
+          <div class="panes" id="panes">
+            <figure class="pane" id="paneP" style="margin:0">
+              <canvas id="cP"></canvas><figcaption>prediction</figcaption>
+            </figure>
+            <figure class="pane" id="paneG" style="margin:0">
+              <canvas id="cG"></canvas><figcaption>target</figcaption>
+            </figure>
+            <figure class="pane" id="paneE" style="margin:0">
+              <canvas id="cE"></canvas>
+              <figcaption id="capE">signed error</figcaption>
+            </figure>
+          </div>
+
+          <figure class="pane hidden" id="paneSwipe" style="margin:0">
+            <div class="swipe" id="swipe">
+              <canvas id="cS1"></canvas><canvas id="cS2"></canvas>
+              <div class="handle" id="handle" style="left:50%"></div>
+            </div>
+            <figcaption>left: prediction &middot; right: target &mdash; drag to compare</figcaption>
+          </figure>
+
+          <p class="note" id="errNote"></p>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <h2>this view</h2>
+          <table>
+            <tr><th>name</th><td id="vName">&ndash;</td></tr>
+            <tr><th>PSNR</th><td id="vPsnr">&ndash;</td></tr>
+            <tr><th>SSIM</th><td id="vSsim">&ndash;</td></tr>
+            <tr><th>LPIPS</th><td id="vLpips">&ndash;</td></tr>
+            <tr><th>receiver</th><td id="vRx">&ndash;</td></tr>
+            <tr><th>facing</th><td id="vYaw">&ndash;</td></tr>
+          </table>
+          <h2 style="margin-top:12px">model</h2>
+          <table>
+            <tr><th>PSNR / SSIM / LPIPS</th><td id="mAgg">&ndash;</td></tr>
+            <tr><th>views</th><td id="mViews">&ndash;</td></tr>
+          </table>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <h2>floor plan</h2>
+          <svg id="plan" viewBox="0 0 300 300" role="img"
+               aria-label="held-out receiver positions"></svg>
+          <p class="note">Every held-out receiver, coloured by this view&rsquo;s metric
+          (blue low &rarr; orange high). Click a dot to jump. The ring marks the
+          current view and the spoke its facing.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ---------------- 3D tab ---------------- -->
+  <div id="v3d" class="hidden">
+    <div class="card">
+      <h2>geometry <button id="load3d">load this model&rsquo;s .ply</button></h2>
+      <p class="note">A free viewpoint has no ground truth beside it, so this shows
+      what the field looks like, not whether it is right &mdash; use the compare tab
+      for that. Each file is 240&nbsp;MB and streams on demand; load one at a time.
+      The renderer is fetched from a CDN, so this tab alone needs the network.</p>
+      <p class="note warn" id="err3d"></p>
+      <canvas id="three"></canvas>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+const $ = s => document.querySelector(s);
+let IDX = null, MODEL = null, VIEW = 0;
+let MODE = { swipe:false, err:true };
+let REV = null;                      // 32x32x32 RGB -> level, built from the jet LUT
+
+// ---------------------------------------------------------------- theme
+$("#theme").onclick = () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  const dark = cur ? cur === "dark"
+    : matchMedia("(prefers-color-scheme: dark)").matches;
+  document.documentElement.setAttribute("data-theme", dark ? "light" : "dark");
+  drawPlan();
+};
+
+// ---------------------------------------------------------------- jet inverse
+// The PNGs were written by mapping a value through jet at 256 levels, so the
+// exact palette is known. A 32^3 bin table over the RGB cube turns the reverse
+// lookup into one array index per pixel; bins are 8 levels wide, which costs
+// about 1 level of accuracy on the value. Good enough to SEE where a model is
+// wrong, not a substitute for scoring against spectra_float.
+function buildReverse(lut) {
+  const t = new Uint8Array(32 * 32 * 32);
+  for (let r = 0; r < 32; r++) for (let g = 0; g < 32; g++) for (let b = 0; b < 32; b++) {
+    const R = r * 8 + 4, G = g * 8 + 4, B = b * 8 + 4;
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < lut.length; i++) {
+      const dr = R - lut[i][0], dg = G - lut[i][1], db = B - lut[i][2];
+      const d = dr * dr + dg * dg + db * db;
+      if (d < bd) { bd = d; best = i; }
+    }
+    t[(r << 10) | (g << 5) | b] = best;
+  }
+  return t;
+}
+
+// ---------------------------------------------------------------- images
+function loadImage(src) {
+  return new Promise((res, rej) => {
+    const im = new Image();
+    im.onload = () => res(im);
+    im.onerror = () => rej(new Error(src));
+    im.src = src;
+  });
+}
+
+function toCanvas(cv, im) {
+  cv.width = im.naturalWidth; cv.height = im.naturalHeight;
+  const cx = cv.getContext("2d", { willReadFrequently: true });
+  cx.drawImage(im, 0, 0);
+  return cx;
+}
+
+// Signed difference of the decoded levels, on a diverging ramp.
+// Orange = the model predicts too high, blue = too low, grey = agrees.
+function drawError(cv, dp, dg, w, h) {
+  cv.width = w; cv.height = h;
+  const cx = cv.getContext("2d");
+  const out = cx.createImageData(w, h);
+  let maxAbs = 0;
+  const diff = new Int16Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const j = i * 4;
+    const lp = REV[((dp[j] >> 3) << 10) | ((dp[j + 1] >> 3) << 5) | (dp[j + 2] >> 3)];
+    const lg = REV[((dg[j] >> 3) << 10) | ((dg[j + 1] >> 3) << 5) | (dg[j + 2] >> 3)];
+    const d = lp - lg;
+    diff[i] = d;
+    if (Math.abs(d) > maxAbs) maxAbs = Math.abs(d);
+  }
+  const scale = Math.max(maxAbs, 1);
+  for (let i = 0; i < w * h; i++) {
+    const t = diff[i] / scale;                       // -1 .. 1
+    const a = Math.abs(t);
+    // grey at 0, orange for positive, blue for negative
+    const r = t > 0 ? 235 * a + 150 * (1 - a) : 150 * (1 - a) + 42 * a;
+    const g = t > 0 ? 104 * a + 150 * (1 - a) : 150 * (1 - a) + 120 * a;
+    const b = t > 0 ? 52 * a + 150 * (1 - a) : 150 * (1 - a) + 214 * a;
+    const j = i * 4;
+    out.data[j] = r; out.data[j + 1] = g; out.data[j + 2] = b; out.data[j + 3] = 255;
+  }
+  cx.putImageData(out, 0, 0);
+  return { maxAbs, mean: diff.reduce((s, v) => s + v, 0) / diff.length };
+}
+
+// ---------------------------------------------------------------- floor plan
+function drawPlan() {
+  if (!MODEL) return;
+  const pts = MODEL.items.filter(it => it.rx);
+  if (!pts.length) { $("#plan").innerHTML = ""; return; }
+  const xs = pts.map(p => p.rx[0]), ys = pts.map(p => p.rx[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const pad = 14, S = 300;
+  const span = Math.max(x1 - x0, y1 - y0) || 1;
+  const px = x => pad + (x - x0) / span * (S - 2 * pad);
+  const py = y => S - pad - (y - y0) / span * (S - 2 * pad);   // y up
+  const vals = pts.map(p => p.psnr).filter(v => v != null);
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const cur = MODEL.items[VIEW];
+  let s = "";
+  for (const p of pts) {
+    const t = p.psnr == null ? 0.5 : (p.psnr - lo) / ((hi - lo) || 1);
+    const col = `rgb(${Math.round(42 + t * 193)},${Math.round(120 + t * -16)},${Math.round(214 + t * -162)})`;
+    s += `<circle cx="${px(p.rx[0]).toFixed(1)}" cy="${py(p.rx[1]).toFixed(1)}" r="2.6"
+           fill="${col}" data-i="${p.i}" style="cursor:pointer">
+           <title>#${p.i} ${p.name ?? ""} PSNR ${p.psnr?.toFixed(2) ?? "?"}</title></circle>`;
+  }
+  if (cur && cur.rx) {
+    const cx = px(cur.rx[0]), cy = py(cur.rx[1]);
+    s += `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="7" fill="none"
+           stroke="var(--ink)" stroke-width="1.6"/>`;
+    if (cur.yaw != null) {
+      const a = -cur.yaw * Math.PI / 180;             // screen y is flipped
+      s += `<line x1="${cx.toFixed(1)}" y1="${cy.toFixed(1)}"
+             x2="${(cx + 15 * Math.cos(a)).toFixed(1)}" y2="${(cy + 15 * Math.sin(a)).toFixed(1)}"
+             stroke="var(--ink)" stroke-width="1.6"/>`;
+    }
+  }
+  const plan = $("#plan");
+  plan.innerHTML = s;
+  plan.querySelectorAll("circle[data-i]").forEach(c =>
+    c.onclick = () => { VIEW = +c.dataset.i; $("#view").value = VIEW; show(); });
+}
+
+// ---------------------------------------------------------------- render
+async function show() {
+  const it = MODEL.items[VIEW];
+  $("#pos").textContent = `${VIEW + 1} / ${MODEL.views}`;
+  $("#vName").textContent = it.name ?? it.file;
+  const f = (v, d = 3) => v == null ? "–" : v.toFixed(d);
+  $("#vPsnr").textContent = f(it.psnr, 2);
+  $("#vSsim").textContent = f(it.ssim);
+  $("#vLpips").textContent = f(it.lpips);
+  $("#vRx").textContent = it.rx ? it.rx.slice(0, 2).map(v => v.toFixed(2)).join(", ") : "–";
+  $("#vYaw").textContent = it.yaw == null ? "–" : `${it.yaw.toFixed(0)}°`;
+
+  const base = `/img/${MODEL.name}`;
+  let ip, ig;
+  try {
+    [ip, ig] = await Promise.all([
+      loadImage(`${base}/renders/${it.file}`),
+      loadImage(`${base}/gt/${it.file}`),
+    ]);
+  } catch (e) {
+    $("#errNote").textContent = "could not load " + e.message;
+    return;
+  }
+  const w = ip.naturalWidth, h = ip.naturalHeight;
+
+  if (MODE.swipe) {
+    toCanvas($("#cS1"), ig);                 // target underneath
+    toCanvas($("#cS2"), ip);                 // prediction on top, clipped
+    clipSwipe();
+  } else {
+    toCanvas($("#cP"), ip);
+    toCanvas($("#cG"), ig);
+  }
+
+  if (MODE.err) {
+    const cp = toCanvas(document.createElement("canvas"), ip);
+    const cg = toCanvas(document.createElement("canvas"), ig);
+    const dp = cp.getImageData(0, 0, w, h).data;
+    const dg = cg.getImageData(0, 0, w, h).data;
+    const st = drawError($("#cE"), dp, dg, w, h);
+    $("#capE").textContent =
+      `signed error · peak ${st.maxAbs} levels · mean ${st.mean >= 0 ? "+" : ""}${st.mean.toFixed(2)}`;
+    $("#errNote").innerHTML =
+      "Error is the difference of the jet-decoded 8-bit levels, orange = predicted too high. " +
+      "Decoded through a 32³ reverse table, so it is worth about ±1 level — " +
+      "enough to see <em>where</em> a model is wrong, not a substitute for scoring " +
+      "against <span class='mono'>spectra_float</span>.";
+  } else {
+    $("#errNote").textContent = "";
+  }
+  drawPlan();
+}
+
+function clipSwipe() {
+  const pct = parseFloat($("#handle").style.left) || 50;
+  $("#cS2").style.clipPath = `inset(0 ${100 - pct}% 0 0)`;
+}
+
+function layout() {
+  $("#paneSwipe").classList.toggle("hidden", !MODE.swipe);
+  $("#panes").classList.toggle("hidden", MODE.swipe);
+  $("#paneE").classList.toggle("hidden", !MODE.err);
+  $("#panes").classList.toggle("two", !MODE.err);
+  $("#mSide").classList.toggle("on", !MODE.swipe);
+  $("#mSwipe").classList.toggle("on", MODE.swipe);
+  $("#mErr").classList.toggle("on", MODE.err);
+}
+
+// ---------------------------------------------------------------- wiring
+function pickModel(name) {
+  MODEL = IDX.models.find(m => m.name === name);
+  VIEW = 0;
+  const g = MODEL.metrics || {};
+  $("#mAgg").textContent = [g.PSNR, g.SSIM, g.LPIPS]
+    .map(v => v == null ? "–" : v.toFixed(3)).join(" / ");
+  $("#mViews").textContent = MODEL.views;
+  const r = $("#view"); r.max = MODEL.views - 1; r.value = 0;
+  show();
+}
+
+$("#model").onchange = e => pickModel(e.target.value);
+$("#view").oninput = e => { VIEW = +e.target.value; show(); };
+$("#prev").onclick = () => { VIEW = (VIEW - 1 + MODEL.views) % MODEL.views; $("#view").value = VIEW; show(); };
+$("#next").onclick = () => { VIEW = (VIEW + 1) % MODEL.views; $("#view").value = VIEW; show(); };
+addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft") $("#prev").click();
+  else if (e.key === "ArrowRight") $("#next").click();
+});
+$("#mSide").onclick = () => { MODE.swipe = false; layout(); show(); };
+$("#mSwipe").onclick = () => { MODE.swipe = true; layout(); show(); };
+$("#mErr").onclick = () => { MODE.err = !MODE.err; layout(); show(); };
+
+(() => {                                        // swipe drag
+  const el = $("#swipe");
+  const move = e => {
+    const r = el.getBoundingClientRect();
+    const x = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+    $("#handle").style.left = `${Math.max(0, Math.min(100, x / r.width * 100))}%`;
+    clipSwipe();
+  };
+  el.addEventListener("pointerdown", e => { el.setPointerCapture(e.pointerId); move(e); });
+  el.addEventListener("pointermove", e => { if (e.buttons) move(e); });
+})();
+
+$("#tabCmp").onclick = () => {
+  $("#cmp").classList.remove("hidden"); $("#v3d").classList.add("hidden");
+  $("#tabCmp").classList.add("on"); $("#tab3d").classList.remove("on");
+};
+$("#tab3d").onclick = () => {
+  $("#cmp").classList.add("hidden"); $("#v3d").classList.remove("hidden");
+  $("#tab3d").classList.add("on"); $("#tabCmp").classList.remove("on");
+};
+
+// ---------------------------------------------------------------- 3D
+// PlayCanvas is the renderer here because it is the one that evaluates the
+// higher SH bands. That matters for these models specifically: the bands carry
+// the view dependence, which for an RF field IS the signal. A .splat-based
+// viewer keeps only the DC term and would show a field that cannot vary with
+// the receiver's facing at all.
+$("#load3d").onclick = async () => {
+  const note = $("#err3d");
+  note.textContent = "loading renderer…";
+  try {
+    const pc = await import("https://cdn.jsdelivr.net/npm/playcanvas@2.3.3/build/playcanvas.mjs");
+    const canvas = $("#three");
+    canvas.width = canvas.clientWidth; canvas.height = 520;
+    const app = new pc.Application(canvas, { graphicsDeviceOptions: { antialias: false } });
+    app.setCanvasFillMode(pc.FILLMODE_NONE);
+    app.start();
+
+    const cam = new pc.Entity("camera");
+    cam.addComponent("camera", { clearColor: new pc.Color(0.09, 0.1, 0.11) });
+    cam.setPosition(0, 0, 6);
+    app.root.addChild(cam);
+
+    note.textContent = `streaming ${MODEL.name}.ply (240 MB)…`;
+    const asset = new pc.Asset(MODEL.name, "gsplat", { url: `/ply/${MODEL.name}` });
+    asset.on("error", e => { note.textContent = "ply failed: " + e; });
+    app.assets.add(asset);
+    app.assets.load(asset);
+    asset.ready(() => {
+      const e = new pc.Entity(MODEL.name);
+      e.addComponent("gsplat", { asset });
+      app.root.addChild(e);
+      note.textContent = "loaded — drag to orbit, wheel to zoom";
+    });
+
+    // minimal orbit: no extra dependency, just enough to look around
+    let az = 0, el = 0, dist = 6, down = false, lx = 0, ly = 0;
+    const place = () => {
+      const ca = Math.cos(az), sa = Math.sin(az), ce = Math.cos(el), se = Math.sin(el);
+      cam.setPosition(dist * ce * sa, dist * se, dist * ce * ca);
+      cam.lookAt(0, 0, 0);
+    };
+    canvas.addEventListener("pointerdown", e => { down = true; lx = e.clientX; ly = e.clientY; });
+    addEventListener("pointerup", () => down = false);
+    addEventListener("pointermove", e => {
+      if (!down) return;
+      az -= (e.clientX - lx) * 0.005; el += (e.clientY - ly) * 0.005;
+      el = Math.max(-1.5, Math.min(1.5, el));
+      lx = e.clientX; ly = e.clientY; place();
+    });
+    canvas.addEventListener("wheel", e => {
+      e.preventDefault(); dist *= e.deltaY > 0 ? 1.1 : 0.9; place();
+    }, { passive: false });
+    place();
+  } catch (e) {
+    note.textContent =
+      "3D unavailable: " + e.message +
+      " — this tab needs the network for the renderer; the compare tab does not.";
+  }
+};
+
+// ---------------------------------------------------------------- boot
+(async () => {
+  IDX = await (await fetch("/api/index")).json();
+  REV = buildReverse(IDX.jet);
+  const sel = $("#model");
+  sel.innerHTML = IDX.models
+    .map(m => `<option value="${m.name}">${m.name}</option>`).join("");
+  layout();
+  pickModel(IDX.models[0].name);
+})();
+</script>
+</body>
+</html>
