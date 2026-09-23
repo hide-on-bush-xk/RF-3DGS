@@ -561,6 +561,8 @@ def main():
     ap.add_argument("--diagonal-loading", dest="diagonal_loading", type=float, default=0.0,
                     help="MVDR: regularise the covariance by this fraction of tr(R)/M^2 (needed when delay taps < M^2, e.g. M = 64)")
     ap.add_argument("--M", type=int, default=10, help="M x M UPA (the tutorial's 10; the paper headlines 64)")
+    ap.add_argument("--width", type=int, default=300, help="pinhole face width in pixels (90 degrees horizontal)")
+    ap.add_argument("--height", type=int, default=200)
     ap.add_argument("--num-positions", type=int, default=800)
     ap.add_argument("--max-depth", type=int, default=1)
     ap.add_argument("--diffraction", action="store_true")
