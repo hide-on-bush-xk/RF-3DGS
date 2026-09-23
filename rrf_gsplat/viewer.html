@@ -692,13 +692,17 @@ function pickModel(name) {
   VIEW = 0;
   // default selection: the released model plus the best of our runs by
   // aggregate PSNR, which is the comparison worth opening on. Where there is no
-  // released model (TCBF) the best two of ours stand in.
+  // released model (TCBF) the best two of ours stand in. The newest of our runs
+  // joins them: a new scheme that scores a little below the best would otherwise
+  // never be on screen unless someone knew to click its chip.
   SEL = new Set();
   const rel = MODEL.preds.find(p => p.kind === "released");
   if (rel) SEL.add(rel.id);
   const mine = MODEL.preds.filter(p => p.kind === "ours")
     .sort((a, b) => (b.metrics.PSNR ?? -Infinity) - (a.metrics.PSNR ?? -Infinity));
   for (const p of mine.slice(0, rel ? 1 : 2)) SEL.add(p.id);
+  const newest = mine.filter(p => p.mtime != null).sort((a, b) => b.mtime - a.mtime)[0];
+  if (newest) SEL.add(newest.id);
   if (!SEL.size && MODEL.preds.length) SEL.add(MODEL.preds[0].id);
 
   $("#mViews").textContent = MODEL.views;

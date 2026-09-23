@@ -313,6 +313,9 @@ def discover():
                 "metrics": _agg(mdir, test),
                 "psnr": [pv.get(k) for k in keys],
                 "ply": _ply_for(mdir) is not None,
+                # when the run finished, so the page can open on the newest run as well as the best one
+                "mtime": os.path.getmtime(os.path.join(mdir, "results.json"))
+                         if kind == "ours" and os.path.isfile(os.path.join(mdir, "results.json")) else None,
             })
         if not preds:
             continue
