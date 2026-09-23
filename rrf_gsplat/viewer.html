@@ -309,11 +309,13 @@ function toCanvas(cv, im) {
 
 // Signed difference of the decoded levels, on a diverging ramp.
 // Orange = the model predicts too high, blue = too low, grey = agrees.
-function drawError(cv, dp, dg, w, h) {
-  cv.width = w; cv.height = h;
-  const cx = cv.getContext("2d");
-  const out = cx.createImageData(w, h);
-  let maxAbs = 0;
+// Signed difference of the decoded levels, split in two so that every error map
+// on screen can share one colour scale. Normalising each map to its own peak --
+// which is what this did while only one model was ever shown -- makes the same
+// orange mean a different amount in the cell next to it, which is precisely the
+// comparison the wall exists to support.
+function diffLevels(dp, dg, w, h) {
+  let maxAbs = 0, sum = 0;
   const diff = new Int16Array(w * h);
   for (let i = 0; i < w * h; i++) {
     const j = i * 4;
@@ -321,13 +323,20 @@ function drawError(cv, dp, dg, w, h) {
     const lg = REV[((dg[j] >> 3) << 10) | ((dg[j + 1] >> 3) << 5) | (dg[j + 2] >> 3)];
     const d = lp - lg;
     diff[i] = d;
+    sum += d;
     if (Math.abs(d) > maxAbs) maxAbs = Math.abs(d);
   }
-  const scale = Math.max(maxAbs, 1);
+  return { diff, maxAbs, mean: sum / (w * h) };
+}
+
+// Orange = the model predicts too high, blue = too low, grey = agrees.
+function paintError(cv, diff, w, h, scale) {
+  cv.width = w; cv.height = h;
+  const cx = cv.getContext("2d");
+  const out = cx.createImageData(w, h);
   for (let i = 0; i < w * h; i++) {
     const t = diff[i] / scale;                       // -1 .. 1
     const a = Math.abs(t);
-    // grey at 0, orange for positive, blue for negative
     const r = t > 0 ? 235 * a + 150 * (1 - a) : 150 * (1 - a) + 42 * a;
     const g = t > 0 ? 104 * a + 150 * (1 - a) : 150 * (1 - a) + 120 * a;
     const b = t > 0 ? 52 * a + 150 * (1 - a) : 150 * (1 - a) + 214 * a;
@@ -335,7 +344,6 @@ function drawError(cv, dp, dg, w, h) {
     out.data[j] = r; out.data[j + 1] = g; out.data[j + 2] = b; out.data[j + 3] = 255;
   }
   cx.putImageData(out, 0, 0);
-  return { maxAbs, mean: diff.reduce((s, v) => s + v, 0) / diff.length };
 }
 
 // ---------------------------------------------------------------- floor plan
@@ -619,20 +627,31 @@ async function show() {
   tc.classList.add("target");
   wall.appendChild(tc);
 
-  let worst = null;
+  // the maps are measured first and painted afterwards, so they can share a
+  // scale; see diffLevels
+  const errs = [];
   preds.forEach((p, k) => {
     wall.appendChild(cellFor(labelHtml(p), c => {
       addCanvas(c, ips[k], "prediction");
       if (!showErr) return;
       const dp = toCanvas(document.createElement("canvas"), ips[k]).getImageData(0, 0, w, h).data;
       const cv = el("canvas");
-      c.appendChild(cv);
-      const st = drawError(cv, dp, dg, w, h);
-      c.appendChild(el("div", "cap",
-        `error · peak ${st.maxAbs} · mean ${st.mean >= 0 ? "+" : ""}${st.mean.toFixed(2)}`));
-      if (!worst || st.maxAbs > worst.maxAbs) worst = { ...st, label: p.label };
+      const cap = el("div", "cap", "");
+      c.append(cv, cap);
+      errs.push(Object.assign({ p, cv, cap }, diffLevels(dp, dg, w, h)));
     }));
   });
+
+  let worst = null, shared = 0;
+  if (errs.length) {
+    shared = Math.max(1, ...errs.map(e => e.maxAbs));
+    for (const e of errs) {
+      paintError(e.cv, e.diff, w, h, shared);
+      e.cap.textContent = `error · peak ${e.maxAbs} · mean ` +
+        `${e.mean >= 0 ? "+" : ""}${e.mean.toFixed(2)}`;
+      if (!worst || e.maxAbs > worst.maxAbs) worst = { maxAbs: e.maxAbs, label: e.p.label };
+    }
+  }
 
   $("#errNote").innerHTML =
     !MODE.err ? ""
@@ -642,11 +661,17 @@ async function show() {
         `spectra score under 4), so this dataset was not written through that palette and ` +
         `decoding a colour back to a value would return an arbitrary level. The ` +
         `predictions above are still the real renders — only the difference is MISSING.`
-      : "Error is the difference of the jet-decoded 8-bit levels, orange = predicted too high. " +
-        "Decoded through a 32³ reverse table, so it is worth about ±1 level — " +
-        "enough to see <em>where</em> a model is wrong, not a substitute for scoring " +
-        "against <span class='mono'>spectra_float</span>." +
-        (worst ? ` Largest excursion here: <b>${worst.label}</b>, ${worst.maxAbs} levels.` : "");
+      : `Signed difference of the jet-decoded levels: orange = predicted too high, ` +
+        `blue = too low, grey = agrees. All maps on screen share one colour scale, ` +
+        `saturating at <b>±${shared} levels</b>, so the same orange means the same ` +
+        `amount in every cell` +
+        (worst ? ` — set here by <b>${worst.label}</b>` : "") + `. A level is 1/255 of ` +
+        `whatever range each spectrum was normalised to, and the released datasets do ` +
+        `not record that constant (<span class='mono'>db_range</span> is a [0,1] ` +
+        `placeholder), so levels do <b>not</b> convert to dB. Decoding goes through a ` +
+        `32³ reverse table and is worth about ±1 level. This shows <em>where</em> a ` +
+        `model is wrong; it is not a substitute for scoring against ` +
+        `<span class='mono'>spectra_float</span>.`;
   drawPlan();
 }
 
