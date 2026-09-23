@@ -46,7 +46,9 @@ rasterises four faces in one call and takes one Adam step. With `--sh-backend gs
 | + parallel load, background render writes | 101 s | 129 s | (same config) |
 
 db on MVDR: 167 s → 52 s at 18.75 → 18.77 dB PSNR(jet); over three seeds each the main peak's
-direction is within seed noise but its power is ~0.5 dB lower (`mvdr_peaks.py`), a real cost. The planner's "Retrain RRF here" training stage
+direction is within seed noise but its power is ~0.5 dB lower (`mvdr_peaks.py`), a real cost.
+With the geometry unfrozen (the best MVDR rows): 302 → 97 s at 21.53 → 21.45 dB, same 2.85 dB RMSE
+(one seed). Per view the four-face step is 2.5–2.9× faster at 150×100, 300×200 and 600×400 alike. The planner's "Retrain RRF here" training stage
 went from 56 s to 21 s at the recorded live transmitter (data + training 104 → 69 s, data generation
 now 70 % of it); clicked through the page at (8.2, −5.05, 2) the whole job takes 77 s.
 
