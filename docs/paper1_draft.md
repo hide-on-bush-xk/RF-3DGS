@@ -1,6 +1,6 @@
 # What Determines the Quality of a Radio Radiance Field? A Controlled Measurement Anchored on RF-3DGS
 
-*Draft v0.9, 2026-09-22: section 8 adds the NeRF² row and the decoded-angle metric on the released poses (rounds 22 and 22b); v0.7 added the table (round 21); the controlled-measurement sections are unchanged since d359dc9. Every number is taken from `docs/stage2_notes.md` and `output/rrf/*`; `[MISSING: …]` marks a number the experiments have not produced yet. All numbers are on one scene (the NIST lobby of RF-3DGS) unless a scene-2 row is given. Timings follow the reporting contract in `CLAUDE.md` (full chain, GPU model and exclusivity, medians after warm-up, two resolutions).*
+*Draft v1.0, 2026-09-22: section 9 adds the two-scene transmitter-placement benchmark (rounds 23 and 23b); section 8 adds the NeRF² row and the decoded-angle metric on the released poses (rounds 22 and 22b); v0.7 added the table (round 21); the controlled-measurement sections are unchanged since d359dc9. Every number is taken from `docs/stage2_notes.md` and `output/rrf/*`; `[MISSING: …]` marks a number the experiments have not produced yet. All numbers are on one scene (the NIST lobby of RF-3DGS) unless a scene-2 row is given. Timings follow the reporting contract in `CLAUDE.md` (full chain, GPU model and exclusivity, medians after warm-up, two resolutions).*
 
 ## Abstract
 
@@ -287,6 +287,19 @@ The physical metric on this benchmark is Track D of the plan: the released AoD m
 | this work, 160 positions (10k steps there cost −0.06 dB PSNR), trained to 17 dB | 33 s | 32 s (to 17 dB; 10k steps 184 s) | 35 s | ≈ 1.7 min |
 
 Rasteriser step (render + L1 + backward to SH and opacity, 1.01M Gaussians, median of 30): INRIA against gsplat 5.6 vs 4.4 ms at 300 × 200, 12.0 vs 5.1 at 600 × 400, 31.3 vs 9.5 at 1200 × 800, 113.2 vs 25.5 ms at 2400 × 1600. The single-face 300 × 200 number is not extrapolated (kernel launch and Python dominate there); at the two large resolutions the ratio is 3.3× and 4.4×. The speed-up of the chain decomposes as: engineering (Sionna 2.1 on the GPU instead of 0.19 on the CPU) takes the chain from ≈ 1 h to ≈ 8.2 min (≈ 7×); method contributes 272 → 168 s at equal step count (gsplat with the dB target, 1.6×), 17 dB reached in 19 s instead of 69 s, and a dataset of 160 instead of 800 positions at −0.06 dB (generation 311 → 33 s), which together take the chain to ≈ 1.7 min at the 17 dB quality point (≈ 5× more). The two rows are not at equal quality and are not added into one factor. RF-PGS reports 3 min 53 s on the same lobby for a different data size; a Gaussian ray tracer needs no training at all.
+
+**Table 21. Transmitter placement on two scenes: coverage of the indoor receivers (1 m candidate grid, −85 dB threshold, 20k samples in the search and 200k in the evaluation, exclusive RTX 3060). Solves and seconds are the search cost.**
+
+| scene | K | exhaustive / greedy | random, 150 solves | Nelder–Mead | gradient, 30 solves |
+| --- | --- | --- | --- | --- | --- |
+| lobby, 239 receivers, 128 cells | 1 | 0.469 (128 solves, 6 s) | 0.490 (30 s) | 0.477 (29 solves) | **0.510** (13 s) |
+| lobby | 2 | 0.661 | 0.644 | 0.669 | **0.686** (30 s) |
+| lobby | 3 | 0.762 | **0.791** (46 s) | 0.766 (62 solves) | N/A (see below) |
+| corridor, 306 receivers, 253 cells | 1 | **0.307** (253 solves, 7 s) | 0.301 | 0.297 | 0.301 |
+| corridor | 2 | 0.490 | 0.451 | 0.493 | **0.507** (36 s) |
+| corridor | 3 | 0.608 | 0.546 | **0.611** (113 solves) | N/A |
+
+Placement is where a differentiable tracer should pay for itself, and at one and two transmitters it does: thirty gradient solves beat an exhaustive sweep of 128 or 253 candidate cells in both scenes (+0.041 and +0.025 coverage in the lobby), because the optimum lies between grid cells. The corridor at K = 1 is the counter-example the geometry predicts: a quasi-one-dimensional room puts the optimum on the grid, so the exhaustive sweep is best and continuous refinement has nothing to add; two random-start gradient runs there fall into side rooms at 0.114 coverage, which is the local-optimum failure kept in the table rather than removed. At three transmitters the gradient is not available at all: Sionna's path solver falls back to a symbolic Dr.Jit loop with three or more sources, and reverse mode then demands an iteration bound the library does not supply, so the cell is N/A with that reason rather than omitted. The derivative-free searches need no gradient and do run there, and greedy selection stops being a good approximation: random search beats it in the lobby (0.791 against 0.762). Edge rate at the fifth percentile is 0.00 bit/s/Hz in every row of both scenes, so it separates no method and the table reports coverage, mean rate and the quartiles instead.
 
 The many-receiver planner solve used for transmitter placement was found to be truncated by the solver's default path cap (1e6 paths per source): with 59 receivers its coverage fell from 0.593 to 0.441 as the sample budget rose from 20k to 400k; with the cap at 1e7 it is 0.593 at every budget and depth. Coverage of 239 receivers at 50k samples takes 0.084 s (median of 5); five optimisation steps 1.75 s.
 
