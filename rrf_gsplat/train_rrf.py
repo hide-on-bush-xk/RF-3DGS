@@ -191,6 +191,8 @@ def load_views(source, names, views, device, want_float):
 # --------------------------------------------------------------------------
 # model
 # --------------------------------------------------------------------------
+# channel counts gsplat's rasteriser is compiled for (gsplat/cuda/csrc/Config.h, GSPLAT_NUM_CHANNELS; depth counts)
+GSPLAT_CHANNELS = (1, 2, 3, 4, 5, 6, 8, 9, 16, 17, 21, 23, 24, 32, 33, 64, 65, 128, 129, 256, 257, 512, 513)
 def sh_basis(deg, dirs):
     """Real SH basis up to degree 3 for unit directions [N,3] -> [N,(deg+1)^2].
 
@@ -254,6 +256,10 @@ class RRF(torch.nn.Module):
         self.visual_iteration = it
         self.last_info = None
         self.sh_backend = "torch"            # --sh-backend gsplat: the same SH in gsplat's CUDA kernel (frozen geometry only)
+        self.head = None                     # --head cnn: an image-space residual network after the rasteriser
+        self.head_cfg = None                 # its guide buffers, latent width, strip layout, bound (attach_head)
+        self._normals = None                 # the Gaussians' shortest axes, cached while the geometry is frozen
+        self.res_stats = None                # [sum res^2, sum (out - mean)^2, count], channel 0, while evaluating
 
     # The activated views of the raw parameters. Same convention as INRIA's
     # GaussianModel: parameters are stored unconstrained (log scale, logit
@@ -345,13 +351,53 @@ class RRF(torch.nn.Module):
             # value in [0,1] is dB above the floor as a fraction of the span;
             # composite linear powers, read back in dB
             col = torch.pow(10.0, col.clamp(0.0, 1.0) * span_db / 10.0)
+        hc = self.head_cfg
+        n_col = col.shape[-1]
+        if hc is not None and (hc["normals"] or hc["latent"]):
+            # the head's per-Gaussian inputs ride along in the same rasterisation: the normal, turned towards the
+            # (shared) camera centre so that compositing does not cancel opposite signs, and the learned feature
+            extras = []
+            if hc["normals"]:
+                if self._normals is None or self.params["means"].requires_grad:
+                    from neural_shading import gaussian_normals
+                    self._normals = gaussian_normals(self.params["quats"], self.params["scales"])
+                def side(c):
+                    return torch.where(((c[None] - self.means) * self._normals).sum(-1, keepdim=True) < 0, -1.0, 1.0)
+                extras.append(self._normals * side(centres[0]) if col.dim() == 2
+                              else torch.stack([self._normals * side(c) for c in centres]))
+            if hc["latent"]:
+                lat = self.params["latent"]
+                extras.append(lat if col.dim() == 2 else lat[None].expand(B, -1, -1))
+            col = torch.cat([col] + extras, -1)
+        n_real = col.shape[-1]                             # colour + the head's extras, before any padding
+        want_depth = self.delay_channel is not None or (hc is not None and hc["depth"])
+        depth_mode = self.delay_depth_mode if self.delay_channel is not None else "ED"
+        # gsplat's kernels are compiled for a fixed set of channel counts (depth included): multi's 5 + normal 3
+        # + latent 4 + depth = 13 is not one of them, so the colour vector is padded with zeros up to the next
+        # one. Only ever triggered by the head's extras: every earlier configuration already fits.
+        total = n_real + (1 if want_depth else 0)
+        if total not in GSPLAT_CHANNELS:
+            pad = min(c for c in GSPLAT_CHANNELS if c >= total) - total
+            col = torch.cat([col, col.new_zeros(col.shape[:-1] + (pad,))], -1)
         img, alpha, info = rasterization(
             self.means, self.quats, self.scales, self.opacities, col,
             viewmats, Ks, width, height, sh_degree=None,
-            backgrounds=torch.zeros(B, self.channels, device=device),
-            render_mode=("RGB+" + self.delay_depth_mode) if self.delay_channel is not None else "RGB")
+            backgrounds=torch.zeros(B, col.shape[-1], device=device),
+            render_mode=("RGB+" + depth_mode) if want_depth else "RGB")
         self.last_info = info
-        img = img.permute(0, 3, 1, 2)                      # [B,C(+1),H,W]
+        img = img.permute(0, 3, 1, 2)                      # [B,C(+extras)(+1),H,W]
+        head_in = None
+        if hc is not None:
+            depth_ed = None
+            if want_depth:
+                depth_ed = img[:, col.shape[-1]]
+                if depth_mode == "D":                      # accumulated depth -> expected depth of the surface
+                    depth_ed = depth_ed / alpha[..., 0].clamp_min(1e-4)
+            head_in = (img[:, n_col:n_real], depth_ed)
+        if col.shape[-1] > n_col:
+            # drop the head's extras and any padding: the colour channels, then the depth, where the code below
+            # expects them
+            img = torch.cat([img[:, :n_col], img[:, col.shape[-1]:]], 1)
         if self.delay_channel is not None:
             # tau = tau_scatter + |p - mu| / c: the second term is the alpha-composited
             # depth gsplat renders natively (sum_i w_i d_i, metres); the learned channel
@@ -372,11 +418,49 @@ class RRF(torch.nn.Module):
             img[:, self.delay_channel] = img[:, self.delay_channel] + depth_m / (0.299792458 * self.delay_span_ns)
         if self.mode == "power":
             img = torch.log10(img + 1e-12) * 10.0 / span_db
+        if hc is not None:
+            img = self._apply_head(img[:, :self.channels], head_in[0], head_in[1], viewmats, Ks, width, height)
         return img
+
+    def _apply_head(self, base, extra, depth, viewmats, Ks, width, height):
+        """base [B, C, H, W] in normalised units -> base + bounded residual, from base + guide buffers + latent."""
+        from neural_shading import geometry_guides, physics_guides, world_rays
+        hc = self.head_cfg
+        B = base.shape[0]
+        parts = [base]
+        normal = extra[:, :3] if hc["normals"] else None
+        if hc["guides"]:
+            rays, centres, cam_plane = world_rays(viewmats, Ks[0], height, width)
+            if "geo" in hc["guides"]:
+                parts.append(geometry_guides(depth, normal, rays, cam_plane, centres, hc["scene_scale"]))
+            if "phys" in hc["guides"]:
+                parts.append(physics_guides(depth, normal, rays, cam_plane, centres, viewmats, hc["tx"], hc["span_m"]))
+        if hc["latent"]:
+            parts.append(extra[:, 3 if hc["normals"] else 0:])
+        x = torch.cat(parts, 1)
+        if hc["strip"] and B == 4:
+            # the four faces of one position laid side by side in azimuth order: a ring, padded circularly, so the
+            # network sees across the seams the way the field runs across them
+            order = hc["order"]
+            ring = self.head(torch.cat([x[i] for i in order], -1)[None], pad="strip")[0]
+            res = torch.stack([ring[..., order.index(i) * width:(order.index(i) + 1) * width] for i in range(B)])
+        else:
+            res = self.head(x, pad="replicate")
+        out = base + res
+        if self.res_stats is not None:
+            r0, o0 = res[:, 0].detach(), out[:, 0].detach()
+            self.res_stats[0] += float((r0 ** 2).sum())
+            self.res_stats[1] += float(((o0 - o0.mean(dim=(1, 2), keepdim=True)) ** 2).sum())
+            self.res_stats[2] += r0.numel()
+        return out
 
     def load_state(self, st):
         """rrf_state.pt of another run; accepts the earlier layouts too."""
         p = self.params
+        if "head" in st and self.head is not None:
+            self.head.load_state_dict(st["head"])
+        if "latent" in st and "latent" in p:
+            p["latent"].data.copy_(st["latent"])
         if "sh0" in st:
             p["sh0"].data.copy_(st["sh0"]); p["shN"].data.copy_(st["shN"])
             p["opacities"].data.copy_(st["opacities"].reshape(-1))
@@ -394,7 +478,39 @@ class RRF(torch.nn.Module):
     def state(self):
         """Everything rrf_state.pt holds: the raw parameters plus the two fields
         needed to reconstruct the model that produced them."""
-        return {k: v.data for k, v in self.params.items()} | {"mode": self.mode, "sh_degree": self.sh_degree}
+        st = {k: v.data for k, v in self.params.items()} | {"mode": self.mode, "sh_degree": self.sh_degree}
+        if self.head is not None:
+            st["head"] = self.head.state_dict()
+            st["head_cfg"] = {k: v for k, v in self.head_cfg.items() if k != "tx"}
+        return st
+
+
+def attach_head(model, head="cnn", guides="", latent=0, strip=False, max_db=6.0, width=32, span_db=1.0, tx=None,
+                device="cuda"):
+    """Give the model a deferred shading head (neural_shading.py): a residual CNN shared by every view.
+
+    guides   comma list of "geo" (depth, normal, world ray, receiver position: 10 channels) and "phys"
+             (direct-path alignment, mirror alignment, incidence, ranges to the transmitter: 5 channels)
+    latent   a learned per-Gaussian feature of this width, rasterised beside the colour (the materials we do
+             not know, in the place DLSS Ray Reconstruction takes albedo and roughness)
+    strip    run the head on the four faces of a position side by side, padded circularly
+    max_db   the residual's bound, in dB of the value (or power) channel; span_db converts it to value units
+    """
+    from neural_shading import ResidualCNN
+    g = [x for x in guides.split(",") if x]
+    if "phys" in g and tx is None:
+        raise SystemExit("--head-guides phys needs the transmitter position (generation_meta.json tx_loc)")
+    c = model.channels
+    c_in = c + (10 if "geo" in g else 0) + (5 if "phys" in g else 0) + latent
+    model.head = ResidualCNN(c_in, c, width=width, max_residual=max_db / span_db).to(device)
+    model.head_cfg = {"head": head, "guides": g, "latent": latent, "strip": strip, "normals": bool(g), "depth": bool(g),
+                      "tx": None if tx is None else torch.tensor(tx, dtype=torch.float32, device=device),
+                      "scene_scale": 10.0, "span_m": 10.0, "order": [0, 1, 2, 3], "max_db": max_db, "width": width}
+    if latent:
+        n = model.n_gaussians
+        g0 = torch.Generator(device="cpu").manual_seed(0)
+        model.params["latent"] = torch.nn.Parameter((0.1 * torch.randn(n, latent, generator=g0)).to(device))
+    return model.head
 
 
 # --------------------------------------------------------------------------
@@ -473,6 +589,8 @@ def evaluate(model, data, idx, span, vmin, save_dir=None, group=False):
     tot = {"psnr_rgb": 0.0, "ssim_rgb": 0.0, "rmse_db": 0.0, "mae_db": 0.0,
            "rmse_db_in_range": 0.0, "n": 0}
     have_float = "float" in data
+    if model.head is not None:
+        model.res_stats = [0.0, 0.0, 0]
     writer = RenderWriter() if save_dir is not None else None
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
@@ -511,7 +629,18 @@ def evaluate(model, data, idx, span, vmin, save_dir=None, group=False):
     if writer is not None:
         writer.close()
     n = max(tot.pop("n"), 1)
-    return {k: v / n for k, v in tot.items()}
+    out = {k: v / n for k, v in tot.items()}
+    return out | head_stats(model, span)
+
+
+def head_stats(model, span):
+    """The shading head's share of the output: RMS of its residual (in dB of channel 0) and its share of the
+    output's per-view variance. Read after an evaluation pass; empty without a head."""
+    if model.head is None or not model.res_stats or not model.res_stats[2]:
+        return {}
+    r2, var, n = model.res_stats
+    model.res_stats = None
+    return {"head_residual_rms_db": math.sqrt(r2 / n) * span, "head_residual_var_share": r2 / max(var, 1e-12)}
 
 
 @torch.no_grad()
@@ -528,6 +657,8 @@ def evaluate_multi(model, data, idx, ch_ranges, channel_names, save_dir=None, ma
             tot[f"rmse_{channel_names[c]}"] = 0.0
     if pair:
         tot["rmse_aod_az"] = 0.0; tot["median_aod_az"] = 0.0
+    if model.head is not None:
+        model.res_stats = [0.0, 0.0, 0]
     writer = RenderWriter() if save_dir is not None else None
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
@@ -566,7 +697,7 @@ def evaluate_multi(model, data, idx, ch_ranges, channel_names, save_dir=None, ma
     if writer is not None:
         writer.close()
     n = max(tot.pop("n"), 1)
-    return {k: v / n for k, v in tot.items()}
+    return {k: v / n for k, v in tot.items()} | head_stats(model, span0)
 
 
 # --------------------------------------------------------------------------
@@ -645,9 +776,28 @@ def main():
                     help="take the held-out views (poses, targets, render size) from this dataset instead: the same "
                          "positions and image names, e.g. rendered at another resolution or ray budget. The split and "
                          "the value ranges still come from --source.")
+    # DLSS-style deferred shading (rounds 39+): every piece is a switch, for the ablation
+    ap.add_argument("--head", choices=["none", "cnn"], default="none",
+                    help="cnn: a residual CNN after the rasteriser, shared by every view (neural_shading.py)")
+    ap.add_argument("--head-guides", default="", help="comma list: geo (depth, normal, ray, receiver), phys (transmitter terms)")
+    ap.add_argument("--head-latent", type=int, default=0, help="learned per-Gaussian feature channels for the head")
+    ap.add_argument("--head-strip", action="store_true", help="the head sees a position's four faces as one ring")
+    ap.add_argument("--head-max-db", type=float, default=6.0, help="bound of the head's residual, dB")
+    ap.add_argument("--head-width", type=int, default=32)
+    ap.add_argument("--head-lr", type=float, default=1e-3)
+    ap.add_argument("--peak-loss", type=float, default=0.0,
+                    help="extra L1 weight on the pixels within 10 dB of each view's true maximum (value / power channel)")
     cfg = ap.parse_args()
     if cfg.densify == "mcmc":
         cfg.train_geometry = True
+    if cfg.head != "none":
+        if cfg.mode == "rgb":
+            raise SystemExit("--head works on the value modes (db, power, multi), not on jet RGB")
+        if cfg.densify != "none":
+            raise SystemExit("--head is not wired into a densification strategy")
+        if cfg.head_strip and not cfg.eval_group:
+            cfg.eval_group = True
+            print("--head-strip: evaluation groups each position's faces (--eval-group), or the ring could not form")
     if cfg.faces_per_step > 1 and cfg.densify != "none":
         raise SystemExit("--faces-per-step > 1 is not wired into the densification strategy's per-view statistics")
 
@@ -723,6 +873,13 @@ def main():
     model = RRF(cfg.checkpoint, cfg.mode, channels, cfg.sh_degree, device,
                 train_opacity=not cfg.freeze_opacity, train_geometry=cfg.train_geometry)
     model.sh_backend = cfg.sh_backend
+    if cfg.head != "none":
+        # the bound is in dB of the value (db / power) or of the power channel (multi)
+        span_head = span if cfg.mode != "multi" else float(ch_ranges[cfg.mask_channel, 1] - ch_ranges[cfg.mask_channel, 0])
+        head = attach_head(model, cfg.head, cfg.head_guides, cfg.head_latent, cfg.head_strip, cfg.head_max_db,
+                           cfg.head_width, span_head, meta.get("tx_loc"), device)
+        print(f"shading head: {sum(p.numel() for p in head.parameters()):,} parameters, guides "
+              f"[{cfg.head_guides or 'none'}], latent {cfg.head_latent}, strip {cfg.head_strip}, bound {cfg.head_max_db} dB")
     if cfg.init_from:
         model.load_state(torch.load(cfg.init_from, map_location=device))
         if cfg.init_geometry_only:
@@ -739,10 +896,14 @@ def main():
     # the means at ten times INRIA's final position lr. One Adam per tensor,
     # which is what gsplat's strategies expect.
     lrs = {"sh0": cfg.feature_lr, "shN": cfg.feature_lr / 20.0, "opacities": cfg.opacity_lr,
-           "means": 1.6e-5 * model.spatial_lr_scale, "scales": 5e-3, "quats": 1e-3}
+           "means": 1.6e-5 * model.spatial_lr_scale, "scales": 5e-3, "quats": 1e-3, "latent": cfg.feature_lr}
     lrs = {k: v * cfg.lr_scale for k, v in lrs.items()}
     optimizers = {name: torch.optim.Adam([p], lr=lrs[name], eps=1e-15)
                   for name, p in model.params.items() if p.requires_grad}
+    if model.head is not None:
+        optimizers["head"] = torch.optim.Adam(model.head.parameters(), lr=cfg.head_lr)
+    n_params = sum(p.numel() for p in model.params.values() if p.requires_grad)
+    print(f"optimised per-Gaussian parameters: {n_params:,} (Adam state {2 * 4 * n_params / 2**20:.0f} MiB)")
     geom_mask = None
     if cfg.train_geometry and cfg.geometry_subset != "all":
         sc = torch.sort(torch.exp(model.params["scales"].detach()), dim=1).values      # min, mid, max
@@ -800,11 +961,22 @@ def main():
             l1 = l1 + ((img[others] - gt[others]).abs() * mask[None]).sum() / (mask.sum() * len(others) + 1)
         return (1 - cfg.lambda_dssim) * l1 + cfg.lambda_dssim * (1 - ssim(img[mc:mc+1][None], gt[mc:mc+1][None]))
 
+    peak_band = None
+    if cfg.peak_loss > 0:
+        # 10 dB in the normalised units of the value channel (db / power) or of the power channel (multi)
+        peak_band = 10.0 / (span if cfg.mode != "multi" else float(ch_ranges[cfg.mask_channel, 1] - ch_ranges[cfg.mask_channel, 0]))
+
     def view_loss(img, gt):
-        """The loss of one rendered view against its target."""
+        """The loss of one rendered view against its target (+ the peak-aware term when asked for)."""
         if cfg.mode == "multi":
-            return multi_loss(img, gt)
-        return (1 - cfg.lambda_dssim) * l1_loss(img, gt) + cfg.lambda_dssim * (1 - ssim(img[None], gt[None]))
+            loss = multi_loss(img, gt)
+        else:
+            loss = (1 - cfg.lambda_dssim) * l1_loss(img, gt) + cfg.lambda_dssim * (1 - ssim(img[None], gt[None]))
+        if peak_band is not None:
+            c = cfg.mask_channel if cfg.mode == "multi" else 0
+            top = gt[c] >= gt[c].max() - peak_band
+            loss = loss + cfg.peak_loss * ((img[c] - gt[c]).abs() * top).sum() / top.sum().clamp_min(1)
+        return loss
 
     n_train = len(train_names)
     groups = None
@@ -822,6 +994,28 @@ def main():
         sizes = np.bincount([len(g) for g in groups])
         print(f"faces per step {cfg.faces_per_step}: {len(groups)} receiver positions, "
               f"faces per position {{{', '.join(f'{s}: {int(n)}' for s, n in enumerate(sizes) if n)}}}")
+    strip_check = None
+    if model.head is not None and cfg.head_strip:
+        # Which way round do the faces join? Measured on the targets rather than assumed: for each candidate
+        # order, the mean jump from the right edge column of one face to the left edge column of the next
+        # (cyclically), over whole training positions spread along the list.
+        if groups is None:
+            raise SystemExit("--head-strip needs --faces-per-step 4, so every step holds a whole ring")
+        full = [g for g in groups if len(g) == 4]
+        pick = [full[k] for k in np.linspace(0, len(full) - 1, min(16, len(full))).round().astype(int)]
+        def seam(order):
+            e = []
+            for g in pick:
+                f = [target(i)[0] for i in g]
+                e += [float((f[order[k]][:, -1] - f[order[(k + 1) % 4]][:, 0]).abs().mean()) for k in range(4)]
+            return float(np.mean(e))
+        cands = {"dataset order": [0, 1, 2, 3], "reversed": [3, 2, 1, 0]}
+        errs = {k: seam(o) for k, o in cands.items()}
+        best = min(errs, key=errs.get)
+        model.head_cfg["order"] = cands[best]
+        interior = float(np.mean([float((target(g[0])[0][:, 1:] - target(g[0])[0][:, :-1]).abs().mean()) for g in pick]))
+        strip_check = {"seam_error": errs, "chosen": best, "adjacent_column_step_inside_a_face": interior}
+        print(f"ring order: seam jump {errs} (normalised), chosen {best}; a column step inside a face is {interior:.4f}")
     eval_idx = list(range(0, len(test_names), max(1, len(test_names) // cfg.eval_subset)))[:cfg.eval_subset]
     history = []
     running_eval_seconds = 0.0
@@ -904,6 +1098,9 @@ def main():
               "running_eval_seconds": running_eval_seconds,
               "train_seconds_excl_running_eval": train_seconds - running_eval_seconds,
               "views_seen": cfg.iterations * cfg.faces_per_step,
+              "optimised_gaussian_params": n_params, "adam_state_mib": 2 * 4 * n_params / 2**20,
+              "head_params": sum(p.numel() for p in model.head.parameters()) if model.head is not None else 0,
+              "strip_check": strip_check,
               "load_seconds": t_train - t_start, "eval_seconds": eval_seconds,
               "gpu": torch.cuda.get_device_name(0),
               "total_seconds": time.time() - t_start, "history": history, "final": final}

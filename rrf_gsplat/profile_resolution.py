@@ -57,6 +57,12 @@ def main():
                     help="4: the clean step renders one position's four faces with one colour evaluation and one Adam step "
                          "(train_rrf.py --faces-per-step 4); the per-part split is only timed for 1")
     ap.add_argument("--sh-backend", choices=["torch", "gsplat"], default="torch")
+    ap.add_argument("--sh-degree", type=int, default=3)
+    ap.add_argument("--head", choices=["none", "cnn"], default="none", help="train_rrf.py's shading head")
+    ap.add_argument("--head-guides", default="")
+    ap.add_argument("--head-latent", type=int, default=0)
+    ap.add_argument("--head-strip", action="store_true")
+    ap.add_argument("--head-width", type=int, default=32)
     cfg = ap.parse_args()
     device = torch.device("cuda")
     src = os.path.join(REPO, cfg.source)
@@ -74,15 +80,22 @@ def main():
     else:
         channels = 1
     vmin, vmax = meta["spec_min_db"], meta["spec_max_db"]; span = vmax - vmin
-    model = RRF(cfg.checkpoint, cfg.mode, channels, 3, device)
+    model = RRF(cfg.checkpoint, cfg.mode, channels, cfg.sh_degree, device)
     model.sh_backend = cfg.sh_backend
+    if cfg.head != "none":
+        from train_rrf import attach_head
+        span_h = (meta["spec_max_db"] - meta["spec_min_db"]) if cfg.mode != "multi" else float(meta["channel_ranges"][0][1] - meta["channel_ranges"][0][0])
+        attach_head(model, cfg.head, cfg.head_guides, cfg.head_latent, cfg.head_strip, 6.0, cfg.head_width, span_h, meta.get("tx_loc"), device)
+        model.head_cfg["order"] = [3, 2, 1, 0]                     # the ring's order does not change the work
     if cfg.delay_depth:
         names_ch = meta["channels"]
         model.delay_channel = names_ch.index("delay_ns")
         model.delay_span_ns = float(ch_ranges[model.delay_channel, 1] - ch_ranges[model.delay_channel, 0])
         model.delay_depth_mode, model.delay_range = "ED", "euclid"
-    lrs = {"sh0": 0.0025, "shN": 0.0025 / 20, "opacities": 0.05}
+    lrs = {"sh0": 0.0025, "shN": 0.0025 / 20, "opacities": 0.05, "latent": 0.0025}
     opts = {k: torch.optim.Adam([p], lr=lrs[k], eps=1e-15) for k, p in model.params.items() if p.requires_grad}
+    if model.head is not None:
+        opts["head"] = torch.optim.Adam(model.head.parameters(), lr=1e-3)
 
     def target(i, w, h):
         f = data["float"][i].float()
@@ -161,9 +174,16 @@ def main():
     out = {"mode": cfg.mode, "delay_depth": cfg.delay_depth, "channels": channels, "gaussians": model.n_gaussians,
            "gpu": torch.cuda.get_device_name(0), "gpu_util_before": util_before, "gpu_util_after": gpu_util(),
            "reps": cfg.reps, "warmup": cfg.warmup, "rows": rows,
+           "sh_degree": cfg.sh_degree, "faces": cfg.faces, "sh_backend": cfg.sh_backend, "head": cfg.head,
+           "head_guides": cfg.head_guides, "head_latent": cfg.head_latent, "head_strip": cfg.head_strip,
+           "optimised_gaussian_params": sum(p.numel() for p in model.params.values() if p.requires_grad),
+           "head_params": sum(p.numel() for p in model.head.parameters()) if model.head is not None else 0,
            "note": "render_fwd includes the colour evaluation; 'colours' is that evaluation timed alone. "
                    "clean_step = render + loss + backward + Adam, the train_rrf.py step."}
     tag = "" if (cfg.faces == 1 and cfg.sh_backend == "torch") else f"_f{cfg.faces}_{cfg.sh_backend}"
+    if cfg.sh_degree != 3 or cfg.head != "none":
+        tag += f"_sh{cfg.sh_degree}" + (f"_head-{cfg.head_guides.replace(',', '+') or 'base'}-l{cfg.head_latent}"
+                                          + ("-strip" if cfg.head_strip else "") + (f"-w{cfg.head_width}" if cfg.head_width != 32 else "") if cfg.head != "none" else "")
     path = os.path.join(REPO, "output", "rrf", f"profile_resolution_{cfg.mode}{tag}.json")
     json.dump(out, open(path, "w"), indent=1)
     print(f"GPU before: {util_before}; wrote {path}")
