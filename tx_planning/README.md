@@ -17,6 +17,7 @@ pictures.
 | 2 | `optimize_tx.py` — gradient ascent on a coverage objective, Tx position from Sionna's own gradient | verified |
 | 3 | `fit_materials.py` — fit every material's scattering coefficient to PDPs observed from Tx A, score at held-out Tx B | verified |
 | 3b | `active_measurement.py` — pick the second transmitter position by the twin's own sensitivity, before measuring | verified |
+| 3c | `guided_placement.py` — placement by coarse solves plus an analytic line-of-sight guide on the fine grid (DLSS-style reconstruction), `guided_refine.py` — the gradient from its cell | verified (lobby, corridor) |
 | 4 | real scenes: geometry from gsplat / 2DGS instead of the Blender model | later |
 
 ## Running
@@ -171,3 +172,39 @@ receivers overflow it and are dropped, so the path count saturates near
 the cap at 1e7 the coverage is 0.593 at every budget and depth. Every
 many-receiver solve here now passes `max_num_paths_per_src=10_000_000`;
 the optimiser's own runs (20k samples) never reached the cap and stand.
+
+## Guided placement: coarse solves + a free line-of-sight G-buffer (2026-09-23, `guided_placement.py`)
+
+The DLSS structure, applied to the objective map over transmitter positions: the expensive "shading"
+(a full Sionna solve) runs on a coarse grid, and a guide that is exact and nearly free at full resolution
+reconstructs the fine map. The guide is the line-of-sight term: both ends of the planning scene are single
+isotropic V-polarised elements, so a visible pair's LoS power is (λ/4πd)², and visibility for every
+(candidate, receiver) pair is one batched Mitsuba `ray_test`. Real-time denoisers' demodulation does the rest:
+P_full = P_LoS + P_mp, the multipath remainder P_mp is interpolated from the coarse solves (inverse distance,
+in dB), the exact fine-grid P_LoS is added back, and the top 5 cells of the reconstructed map are verified with
+full solves.
+
+- The analytic guide matches Sionna's own LoS term on 100.000 % of the lobby's (Tx, Rx) pairs (dB difference
+  < 6e-6) and 99.995 % of the corridor's, and costs 0.011 ms per cell against 56 ms for a full solve. A LoS-only
+  Sionna solve is not a cheap guide (10 ms, fixed overhead).
+- Lobby, 0.5 m fine grid (480 cells), coverage re-scored at 200k samples:
+
+| method | full solves | K = 1 | K = 2 | K = 3 |
+| --- | --- | --- | --- | --- |
+| fine exhaustive | 480 | 0.485 | 0.678 | 0.770 |
+| 1 m exhaustive (the benchmark's) | 128 | 0.469 | 0.661 | 0.762 |
+| **guided, 2 m coarse** | **37** | **0.485** | **0.678** | 0.766 |
+| plain interpolation, 2 m, no guide | 37 | 0.485 | 0.611 | 0.695 |
+| LoS map alone | 5 | 0.460 | 0.665 | 0.757 |
+| benchmark gradient (from the 1 m cell) | 128 + 30 | 0.510 | 0.686 | N/A |
+| gradient from the guided cell (`guided_refine.py`) | 37 + 30 | 0.502 | 0.674 | N/A |
+
+- The LoS map alone ranks the cells with a rank correlation of 0.98: at 60 GHz coverage is a line-of-sight
+  question, which is why the guide works. Greedy K = 3 is not an optimum (plain 1 m interpolation reached 0.791),
+  so the K = 3 column is noise-level.
+- Corridor (1020 fine cells): fine exhaustive 0.307 / 0.516 / 0.621 (K = 1 / 2 / 3); the benchmark's 1 m sweep
+  (253 solves) 0.307 / 0.490 / 0.608; guided 2 m (69 solves) 0.307 / 0.510 / 0.614; plain interpolation 2 m
+  0.307 / 0.487 / 0.592; LoS map alone (5 solves) 0.301 / 0.510 / 0.621. Gradient from the guided cell: 0.301 / 0.513
+  in 99 solves, against the benchmark gradient's 0.301 / 0.507 in 283. At 8 of the corridor's 312,120 pairs the
+  analytic guide sees a grazing ray Sionna does not (0.005 %), so the remainder is clipped at zero there. The
+  fine sweep needs Dr.Jit's pool freed every 5 solves (`--flush-every`), or the card runs out of memory.
