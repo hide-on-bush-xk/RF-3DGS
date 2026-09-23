@@ -38,6 +38,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 RELEASED = os.path.join(REPO, "RF-3DGS_dataset", "RF-3DGS_trained_RRF")
 SOURCES = os.path.join(REPO, "RF-3DGS_dataset", "training-rf-spectrum")
 OURS = os.path.join(REPO, "output", "rrf")
+VISUAL = os.path.join(REPO, "output", "visual_at_rf")
 
 # matplotlib's jet at the 256 levels the datasets were quantised to. The page
 # builds a reverse lookup from this so it can turn a rendered colour back into a
@@ -106,7 +107,10 @@ def read_poses(images_txt):
 # model discovery
 # --------------------------------------------------------------------------
 def _ply_for(model_dir):
-    """The highest-iteration point_cloud.ply under a model directory, or None."""
+    """The highest-iteration point_cloud.ply under a model directory, or None.
+
+    Compared numerically: sorted as strings, iteration_7000 beats iteration_30000.
+    """
     pc = os.path.join(model_dir, "point_cloud")
     if not os.path.isdir(pc):
         return None
@@ -119,75 +123,193 @@ def _ply_for(model_dir):
     return best[1] if best else None
 
 
-def discover():
-    """Every model that has a rendered held-out set, with its per-view metadata.
+def _newest_test(model_dir):
+    """The newest <model>/test/ours_<it> that actually holds renders, or None."""
+    tdir = os.path.join(model_dir, "test")
+    if not os.path.isdir(tdir):
+        return None
+    cands = [d for d in os.listdir(tdir)
+             if re.match(r"ours_\d+$", d) and os.path.isdir(os.path.join(tdir, d, "renders"))]
+    if not cands:
+        return None
+    return sorted(cands, key=lambda d: int(d.split("_")[-1]))[-1]
 
-    Only the released layout (<model>/test/ours_<it>/{renders,gt}) is handled
-    here; our own runs write a flat renders/ directory with no gt beside it, so
-    they need the source dataset to supply the target and are left out until
-    that pairing is needed.
+
+def _naming(renders, names):
+    """How a renders/ directory names its files: 'name' or 'index', else None.
+
+    The released models number their renders by position in the camera list,
+    which Scene sorts by image name, so file i is the i-th held-out name. Our
+    own runs keep the original name instead. Both index the same view list, and
+    telling them apart is the whole of what makes the two comparable.
     """
-    models = []
-    if not os.path.isdir(RELEASED):
-        return models
-    for name in sorted(os.listdir(RELEASED)):
-        m = re.match(r"3dgs_(.+)_100$", name)
+    got = {os.path.splitext(f)[0] for f in renders}
+    if got == set(names):
+        return "name"
+    if got == {f"{i:05d}" for i in range(len(names))}:
+        return "index"
+    return None
+
+
+def _per_view(model_dir, test, key="PSNR"):
+    """{filename: value} from per_view.json for the given ours_<it>, or {}."""
+    p = os.path.join(model_dir, "per_view.json")
+    if not os.path.isfile(p):
+        return {}
+    try:
+        d = json.load(open(p))
+    except Exception:
+        return {}
+    block = d.get(test) or next(iter(d.values()), {})
+    return block.get(key, {}) if isinstance(block, dict) else {}
+
+
+def _agg(model_dir, test):
+    """Aggregate PSNR/SSIM/LPIPS for a model, from whichever file carries them.
+
+    The released models put them in results.json under the ours_<it> key. Our
+    runs' results.json is a different shape entirely (config, db_range, ...),
+    and the comparable numbers live in inria_metrics.json instead -- computed by
+    the upstream metrics.py so that they mean the same thing as the released
+    ones.
+    """
+    p = os.path.join(model_dir, "results.json")
+    if os.path.isfile(p):
+        try:
+            d = json.load(open(p))
+            block = d.get(test)
+            if isinstance(block, dict) and "PSNR" in block:
+                return {k: block[k] for k in ("PSNR", "SSIM", "LPIPS") if k in block}
+        except Exception:
+            pass
+    p = os.path.join(model_dir, "inria_metrics.json")
+    if os.path.isfile(p):
+        try:
+            d = json.load(open(p))
+            if "PSNR" in d:
+                return {k: d[k] for k in ("PSNR", "SSIM", "LPIPS") if k in d}
+        except Exception:
+            pass
+    return {}
+
+
+def _our_runs():
+    """{spectrum: [(run name, run dir)]} for our runs trained on a released set.
+
+    A run qualifies only if results.json says its source is one of the six
+    released datasets; runs on regenerated or ablation data render different
+    targets and cannot share a panel with the released models.
+    """
+    out = {}
+    if not os.path.isdir(OURS):
+        return out
+    for name in sorted(os.listdir(OURS)):
+        rdir = os.path.join(OURS, name)
+        rp = os.path.join(rdir, "results.json")
+        if not os.path.isfile(rp):
+            continue
+        try:
+            src = (json.load(open(rp)).get("config") or {}).get("source", "")
+        except Exception:
+            continue
+        m = re.search(r"training-rf-spectrum[/\\]3dgs_(.+?)_100", str(src).replace("\\", "/"))
+        if m:
+            out.setdefault(m.group(1), []).append((name, rdir))
+    return out
+
+
+def discover():
+    """The six spectra, each with every prediction that can be shown against it.
+
+    A "spectrum" is the unit here rather than a model, because the released
+    RF-3DGS model and our own runs predict the *same* held-out views of the
+    *same* dataset -- identical poses, identical split -- and the useful view is
+    all of them beside one target, not each on its own.
+
+    The target comes from the source dataset's images/, not from any model's
+    gt/, so it is the same bytes for every prediction and exists even where no
+    model does (TCBF has a dataset and our runs but no released model).
+
+    Per-view metrics are resolved into arrays indexed by view here, so the page
+    never has to know that the two layouts name their files differently.
+    """
+    spectra = []
+    ours = _our_runs()
+    have_visual = os.path.isdir(VISUAL)
+
+    for src_name in sorted(os.listdir(SOURCES)) if os.path.isdir(SOURCES) else []:
+        m = re.match(r"3dgs_(.+)_100$", src_name)
         if not m:
             continue
         spectrum = m.group(1)
-        mdir = os.path.join(RELEASED, name)
-        # the newest ours_<it> that actually holds both sides
-        tests = [d for d in os.listdir(os.path.join(mdir, "test"))
-                 if os.path.isdir(os.path.join(mdir, "test", d, "renders"))] \
-            if os.path.isdir(os.path.join(mdir, "test")) else []
-        if not tests:
-            continue
-        test = sorted(tests, key=lambda d: int(d.split("_")[-1]))[-1]
-        tdir = os.path.join(mdir, "test", test)
-        renders = sorted(f for f in os.listdir(os.path.join(tdir, "renders")) if f.endswith(".png"))
-        if not renders:
-            continue
-
-        # render index -> original name: render.py numbers by position in the
-        # camera list, and Scene sorts cameras by image name, so the i-th render
-        # is the i-th name of the sorted held-out split.
-        src = os.path.join(SOURCES, name)
-        names, poses = [], {}
+        src = os.path.join(SOURCES, src_name)
         idx_path = os.path.join(src, "test_index.txt")
-        if os.path.isfile(idx_path):
-            names = sorted(l.strip() for l in open(idx_path) if l.strip())
-            imgs = os.path.join(src, "sparse", "0", "images.txt")
-            if os.path.isfile(imgs):
-                poses = read_poses(imgs)
+        if not os.path.isfile(idx_path):
+            continue
+        names = sorted(l.strip() for l in open(idx_path) if l.strip())
+        if not names:
+            continue
 
-        pv = {}
-        pvp = os.path.join(mdir, "per_view.json")
-        if os.path.isfile(pvp):
-            d = json.load(open(pvp))
-            pv = d.get(test, next(iter(d.values()), {}))
-        agg = {}
-        rp = os.path.join(mdir, "results.json")
-        if os.path.isfile(rp):
-            d = json.load(open(rp))
-            agg = d.get(test, next(iter(d.values()), {}))
+        poses = {}
+        imgs_txt = os.path.join(src, "sparse", "0", "images.txt")
+        if os.path.isfile(imgs_txt):
+            poses = read_poses(imgs_txt)
+
+        # every candidate prediction: the released model first, then our runs
+        cands = []
+        rel_dir = os.path.join(RELEASED, src_name)
+        if os.path.isdir(rel_dir):
+            cands.append(("released", "RF-3DGS (released)", rel_dir, "released"))
+        for run_name, run_dir in ours.get(spectrum, []):
+            # drop the spectrum TOKEN, not a prefix of that length: sota_Delay_db
+            # sliced by len("Delay")+1 would read "elay_db"
+            label = "_".join(t for t in run_name.split("_") if t != spectrum) or run_name
+            cands.append((run_name, label, run_dir, "ours"))
+
+        preds = []
+        for pid, label, mdir, kind in cands:
+            test = _newest_test(mdir)
+            if not test:
+                continue
+            rdir = os.path.join(mdir, "test", test, "renders")
+            files = sorted(f for f in os.listdir(rdir) if f.endswith(".png"))
+            naming = _naming(files, names)
+            if naming is None:
+                # a partial render, or a split this spectrum does not share;
+                # skipped rather than shown against the wrong target
+                continue
+            pv = _per_view(mdir, test)
+            keys = [f"{n}.png" for n in names] if naming == "name" \
+                else [f"{i:05d}.png" for i in range(len(names))]
+            preds.append({
+                "id": pid, "label": label, "kind": kind, "test": test,
+                "naming": naming,
+                "dir": os.path.relpath(rdir, REPO).replace(os.sep, "/"),
+                "metrics": _agg(mdir, test),
+                "psnr": [pv.get(k) for k in keys],
+                "ply": _ply_for(mdir) is not None,
+            })
+        if not preds:
+            continue
 
         items = []
-        for i, f in enumerate(renders):
-            orig = names[i] if i < len(names) else None
-            rx, yaw = poses.get(orig, (None, None))
+        for i, n in enumerate(names):
+            rx, yaw = poses.get(n, (None, None))
             items.append({
-                "i": i, "file": f, "name": orig,
-                "psnr": pv.get("PSNR", {}).get(f), "ssim": pv.get("SSIM", {}).get(f),
-                "lpips": pv.get("LPIPS", {}).get(f),
+                "i": i, "name": n,
                 "rx": None if rx is None else [round(rx[0], 3), round(rx[1], 3), round(rx[2], 3)],
                 "yaw": None if yaw is None else round(yaw, 1),
             })
-        models.append({
-            "name": spectrum, "dir": os.path.relpath(tdir, REPO).replace(os.sep, "/"),
-            "test": test, "views": len(items), "metrics": agg,
-            "ply": _ply_for(mdir) is not None, "items": items,
+        spectra.append({
+            "name": spectrum,
+            "src": os.path.relpath(src, REPO).replace(os.sep, "/"),
+            "views": len(names), "items": items, "preds": preds,
+            "visual": have_visual and os.path.isfile(os.path.join(VISUAL, f"{names[0]}.png")),
+            "released": any(p["kind"] == "released" for p in preds),
         })
-    return models
+    return spectra
+
+
 
 
 # --------------------------------------------------------------------------
@@ -204,9 +326,24 @@ FROM runs r LEFT JOIN metrics m ON m.run = r.name
 GROUP BY r.name ORDER BY r.mtime DESC"""
 
 
-def make_handler(models, page, db_path=None):
-    by_name = {m["name"]: m for m in models}
-    index = {"models": [{k: v for k, v in m.items()} for m in models], "jet": jet_lut(),
+def make_handler(spectra, page, db_path=None):
+    by_name = {s["name"]: s for s in spectra}
+
+    # Resolve every servable image to an absolute path once, indexed by view, so
+    # a request is a list lookup and the two file-naming conventions stop
+    # mattering past this point.
+    pred_files, gt_files, visual_files = {}, {}, {}
+    for s in spectra:
+        names = [it["name"] for it in s["items"]]
+        gt_files[s["name"]] = [os.path.join(REPO, s["src"], "images", f"{n}.png") for n in names]
+        visual_files[s["name"]] = [os.path.join(VISUAL, f"{n}.png") for n in names]
+        for p in s["preds"]:
+            base = os.path.join(REPO, p["dir"])
+            files = [f"{n}.png" for n in names] if p["naming"] == "name" \
+                else [f"{i:05d}.png" for i in range(len(names))]
+            pred_files[(s["name"], p["id"])] = [os.path.join(base, f) for f in files]
+
+    index = {"spectra": spectra, "jet": jet_lut(),
              "db": bool(db_path), "default_sql": DEFAULT_RUNS_SQL}
     index_bytes = json.dumps(index).encode()
 
@@ -270,12 +407,18 @@ def make_handler(models, page, db_path=None):
                 self._send(index_bytes, "application/json"); return
             if p == "/api/sql":
                 self._sql(); return
-            # /img/<model>/<renders|gt>/<file>
-            m = re.match(r"^/img/([^/]+)/(renders|gt)/([0-9]+\.png)$", p)
-            if m and m.group(1) in by_name:
-                self._file(os.path.join(REPO, by_name[m.group(1)]["dir"], m.group(2), m.group(3)),
-                           "image/png")
-                return
+            # every image is addressed by VIEW INDEX, never by filename, so the
+            # page can ask for "view 137 of MVDR" without knowing which of the
+            # two naming conventions the prediction on disk happens to use
+            m = re.match(r"^/gt/([^/]+)/(\d+)$", p)
+            if m:
+                self._by_index(gt_files.get(m.group(1)), m.group(2)); return
+            m = re.match(r"^/visual/([^/]+)/(\d+)$", p)
+            if m:
+                self._by_index(visual_files.get(m.group(1)), m.group(2)); return
+            m = re.match(r"^/pred/([^/]+)/([^/]+)/(\d+)$", p)
+            if m:
+                self._by_index(pred_files.get((m.group(1), m.group(2))), m.group(3)); return
             m = re.match(r"^/ply/([^/]+)$", p)
             if m and m.group(1) in by_name:
                 mdir = os.path.join(RELEASED, f"3dgs_{m.group(1)}_100")
@@ -283,6 +426,15 @@ def make_handler(models, page, db_path=None):
                 if ply:
                     self._file(ply, "application/octet-stream"); return
             self._send(b"not found", "text/plain", 404)
+
+        def _by_index(self, files, raw):
+            """Serve files[int(raw)], or 404 if the list or the index is absent."""
+            if files is None:
+                self._send(b"not found", "text/plain", 404); return
+            i = int(raw)
+            if not 0 <= i < len(files):
+                self._send(b"view out of range", "text/plain", 404); return
+            self._file(files[i], "image/png")
 
         def _sql(self):
             """Run one query against the read-only index and return columns + rows.
@@ -324,13 +476,20 @@ def main():
     ap.add_argument("--print-index", action="store_true",
                     help="dump the discovered index and exit, for checking the mapping")
     cfg = ap.parse_args()
-    models = discover()
-    if not models:
-        raise SystemExit(f"no rendered models found under {RELEASED}")
-    for m in models:
-        got = sum(1 for it in m["items"] if it["rx"] is not None)
-        print(f"  {m['name']:6s} {m['views']:4d} views, {got} with a pose, "
-              f"PSNR {m['metrics'].get('PSNR', float('nan')):.2f}, ply {'yes' if m['ply'] else 'no'}")
+    spectra = discover()
+    if not spectra:
+        raise SystemExit(f"no rendered predictions found under {RELEASED} or {OURS}")
+    for s in spectra:
+        got = sum(1 for it in s["items"] if it["rx"] is not None)
+        vis = "visual" if s["visual"] else "NO VISUAL"
+        print(f"  {s['name']:6s} {s['views']:4d} views, {got} with a pose, {vis}")
+        for p in s["preds"]:
+            # MISSING rather than a blank: a prediction with no comparable
+            # aggregate is still a row, it just has no number yet
+            psnr = p["metrics"].get("PSNR")
+            print(f"      {p['kind']:8s} {p['label']:16s} {p['test']:11s} "
+                  f"by {p['naming']:5s}  PSNR "
+                  f"{'MISSING' if psnr is None else format(psnr, '.2f')}")
     if cfg.print_index:
         return
     here = os.path.dirname(os.path.abspath(__file__))
@@ -346,7 +505,7 @@ def main():
         print(f"  no index.db (build it with {os.path.join('rrf_gsplat', 'index_db.py')})")
         db = None
     print(f"\nserving on http://localhost:{cfg.port}")
-    HTTPServer(("127.0.0.1", cfg.port), make_handler(models, page, db)).serve_forever()
+    HTTPServer(("127.0.0.1", cfg.port), make_handler(spectra, page, db)).serve_forever()
 
 
 if __name__ == "__main__":

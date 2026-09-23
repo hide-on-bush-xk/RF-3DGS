@@ -47,6 +47,24 @@ input[type=range] { accent-color:var(--accent); }
 .panes { display:grid; gap:10px; grid-template-columns:repeat(3,1fr); }
 .panes.two { grid-template-columns:repeat(2,1fr); }
 .pane { min-width:0; }
+/* the panel wall: one column per thing being shown, wrapping rather than
+   shrinking past the point where 300x200 is still readable */
+.grid { display:grid; gap:10px;
+  grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); }
+.grid figure { margin:0; min-width:0; }
+.grid figcaption { font-size:11px; color:var(--muted); margin-top:5px;
+  font-family:"IBM Plex Mono",ui-monospace,monospace; }
+.grid figcaption b { color:var(--ink); font-weight:600; }
+.grid figure.ref canvas { outline:2px solid var(--accent); outline-offset:-2px; }
+.chips { display:flex; gap:6px; flex-wrap:wrap; margin:0 0 10px; }
+.chip { font:inherit; font-size:12px; padding:3px 8px; border-radius:11px;
+  border:1px solid var(--line); background:var(--sunk); color:var(--muted);
+  cursor:pointer; }
+.chip:hover { border-color:var(--accent); }
+.chip.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+.chip.rel.on { background:var(--s2); border-color:var(--s2); }
+.chip .n { font-family:"IBM Plex Mono",ui-monospace,monospace; opacity:.75;
+  margin-left:5px; }
 .pane figcaption { font-size:11px; color:var(--muted); margin-top:5px;
   font-family:"IBM Plex Mono",ui-monospace,monospace; }
 canvas { width:100%; height:auto; display:block; border-radius:3px;
@@ -75,11 +93,12 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
 <body>
 <div class="wrap">
   <h1>RRF model browser</h1>
-  <p class="sub">Predicted spectrum against its target on the held-out views, per model.
-  Use <span class="mono">&larr;</span> / <span class="mono">&rarr;</span> to step views.</p>
+  <p class="sub">One held-out view at a time: the room, the target spectrum, and every
+  model that predicted it &mdash; RF-3DGS as released beside our own runs, on the same
+  pixels. Use <span class="mono">&larr;</span> / <span class="mono">&rarr;</span> to step views.</p>
 
   <div class="bar">
-    <label>model <select id="model"></select></label>
+    <label>spectrum <select id="model"></select></label>
     <button id="prev">&larr;</button>
     <input class="grow" type="range" id="view" min="0" value="0">
     <button id="next">&rarr;</button>
@@ -100,27 +119,18 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
             <button id="mSide" class="on">side by side</button>
             <button id="mSwipe">swipe</button>
             <button id="mErr" class="on">error map</button>
+            <button id="mVis" class="on">visual</button>
           </h2>
 
-          <div class="panes" id="panes">
-            <figure class="pane" id="paneP" style="margin:0">
-              <canvas id="cP"></canvas><figcaption>prediction</figcaption>
-            </figure>
-            <figure class="pane" id="paneG" style="margin:0">
-              <canvas id="cG"></canvas><figcaption>target</figcaption>
-            </figure>
-            <figure class="pane" id="paneE" style="margin:0">
-              <canvas id="cE"></canvas>
-              <figcaption id="capE">signed error</figcaption>
-            </figure>
-          </div>
+          <div class="chips" id="chips"></div>
+          <div class="grid" id="grid"></div>
 
           <figure class="pane hidden" id="paneSwipe" style="margin:0">
             <div class="swipe" id="swipe">
               <canvas id="cS1"></canvas><canvas id="cS2"></canvas>
               <div class="handle" id="handle" style="left:50%"></div>
             </div>
-            <figcaption>left: prediction &middot; right: target &mdash; drag to compare</figcaption>
+            <figcaption id="capSwipe">drag to compare</figcaption>
           </figure>
 
           <p class="note" id="errNote"></p>
@@ -132,17 +142,14 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
           <h2>this view</h2>
           <table>
             <tr><th>name</th><td id="vName">&ndash;</td></tr>
-            <tr><th>PSNR</th><td id="vPsnr">&ndash;</td></tr>
-            <tr><th>SSIM</th><td id="vSsim">&ndash;</td></tr>
-            <tr><th>LPIPS</th><td id="vLpips">&ndash;</td></tr>
             <tr><th>receiver</th><td id="vRx">&ndash;</td></tr>
             <tr><th>facing</th><td id="vYaw">&ndash;</td></tr>
-          </table>
-          <h2 style="margin-top:12px">model</h2>
-          <table>
-            <tr><th>PSNR / SSIM / LPIPS</th><td id="mAgg">&ndash;</td></tr>
             <tr><th>views</th><td id="mViews">&ndash;</td></tr>
           </table>
+          <h2 style="margin-top:12px">PSNR &mdash; this view / all 640</h2>
+          <table id="scores"></table>
+          <p class="note" id="itNote"></p>
+          <p class="note" id="relNote"></p>
         </div>
         <div class="card" style="margin-top:14px">
           <h2>floor plan</h2>
@@ -211,7 +218,8 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
 <script type="module">
 const $ = s => document.querySelector(s);
 let IDX = null, MODEL = null, VIEW = 0;
-let MODE = { swipe:false, err:true };
+let SEL = new Set();                 // prediction ids on show, insertion-ordered
+let MODE = { swipe:false, err:true, vis:true };
 let REV = null;                      // 32x32x32 RGB -> level, built from the jet LUT
 
 // ---------------------------------------------------------------- theme
@@ -295,7 +303,11 @@ function drawError(cv, dp, dg, w, h) {
 // ---------------------------------------------------------------- floor plan
 function drawPlan() {
   if (!MODEL) return;
-  const pts = MODEL.items.filter(it => it.rx);
+  // the dots are coloured by ONE prediction's per-view PSNR -- the reference,
+  // i.e. the first chip selected -- because "where is this model weak" is a
+  // question about one model at a time
+  const PS = (refPred() || {}).psnr || [];
+  const pts = MODEL.items.filter(it => it.rx).map(it => ({ ...it, psnr: PS[it.i] }));
   if (!pts.length) { $("#plan").innerHTML = ""; return; }
   const xs = pts.map(p => p.rx[0]), ys = pts.map(p => p.rx[1]);
   const x0 = Math.min(...xs), x1 = Math.max(...xs);
@@ -333,55 +345,155 @@ function drawPlan() {
 }
 
 // ---------------------------------------------------------------- render
+// ---------------------------------------------------------------- panels
+// SEL is the set of prediction ids on show, in the order they were turned on.
+// The first of them is the "reference": the one the floor plan colours by, the
+// one the swipe comparator uses, and the one the error map is drawn against
+// when several are up.
+function refPred() {
+  if (!MODEL) return null;
+  for (const id of SEL) {
+    const p = MODEL.preds.find(q => q.id === id);
+    if (p) return p;
+  }
+  return null;
+}
+
+const fmt = (v, d = 2) => v == null ? "MISSING" : v.toFixed(d);
+// "ours_40000" -> 40000. Shown everywhere a score is, because the released
+// models are trained to 40k and most of our runs stop at 10k: side by side
+// without the iteration count reads as a like-for-like comparison and is not one.
+const iters = p => +(p.test.split("_")[1] || 0);
+const kIt = p => `${Math.round(iters(p) / 1000)}k`;
+
+function drawChips() {
+  const host = $("#chips");
+  host.innerHTML = "";
+  for (const p of MODEL.preds) {
+    const b = document.createElement("button");
+    b.className = "chip" + (p.kind === "released" ? " rel" : "") +
+      (SEL.has(p.id) ? " on" : "");
+    b.title = `${p.id} · ${p.test} · renders named by ${p.naming}`;
+    b.innerHTML = `${p.label} <span class="n">${kIt(p)} · ${fmt(p.metrics.PSNR)}</span>`;
+    b.onclick = () => {
+      // never let the wall go empty -- with nothing selected there is no
+      // reference and the floor plan has nothing to colour by
+      if (SEL.has(p.id)) { if (SEL.size > 1) SEL.delete(p.id); }
+      else SEL.add(p.id);
+      drawChips(); show();
+    };
+    host.appendChild(b);
+  }
+}
+
+function figure(cls, cap) {
+  const f = document.createElement("figure");
+  if (cls) f.className = cls;
+  const cv = document.createElement("canvas");
+  const fc = document.createElement("figcaption");
+  fc.innerHTML = cap;
+  f.append(cv, fc);
+  return { f, cv, fc };
+}
+
 async function show() {
   const it = MODEL.items[VIEW];
   $("#pos").textContent = `${VIEW + 1} / ${MODEL.views}`;
-  $("#vName").textContent = it.name ?? it.file;
-  const f = (v, d = 3) => v == null ? "–" : v.toFixed(d);
-  $("#vPsnr").textContent = f(it.psnr, 2);
-  $("#vSsim").textContent = f(it.ssim);
-  $("#vLpips").textContent = f(it.lpips);
+  $("#vName").textContent = it.name ?? `#${it.i}`;
   $("#vRx").textContent = it.rx ? it.rx.slice(0, 2).map(v => v.toFixed(2)).join(", ") : "–";
   $("#vYaw").textContent = it.yaw == null ? "–" : `${it.yaw.toFixed(0)}°`;
 
-  const base = `/img/${MODEL.name}`;
-  let ip, ig;
+  const preds = MODEL.preds.filter(p => SEL.has(p.id));
+
+  // the per-prediction score table, this view over the whole held-out set
+  const span = MODEL.preds.map(iters);
+  const mixed = Math.min(...span) !== Math.max(...span);
+  $("#scores").innerHTML = MODEL.preds.map(p =>
+    `<tr${SEL.has(p.id) ? "" : ' style="opacity:.45"'}>
+       <th>${p.kind === "released" ? "★ " : ""}${p.label}
+         <span class="mono" style="opacity:.6">${kIt(p)}</span></th>
+       <td>${fmt(p.psnr[VIEW])} / ${fmt(p.metrics.PSNR)}</td></tr>`).join("");
+  $("#itNote").innerHTML = mixed
+    ? "Iteration counts differ across these rows, so the aggregates are " +
+      "<b>not</b> a like-for-like comparison: the released models train to 40k " +
+      "and most of our runs stop at 10k. Compare within one count, or read the " +
+      "difference as including the budget."
+    : "";
+  $("#relNote").textContent = MODEL.released ? ""
+    : `No released RF-3DGS model for ${MODEL.name} — the paper ships five, and ` +
+      `${MODEL.name} is not one of them. The released row is MISSING, not zero.`;
+
+  // load everything for this view at once: target, the room, every prediction
+  let ig, iv = null, ips;
   try {
-    [ip, ig] = await Promise.all([
-      loadImage(`${base}/renders/${it.file}`),
-      loadImage(`${base}/gt/${it.file}`),
+    [ig, ...ips] = await Promise.all([
+      loadImage(`/gt/${MODEL.name}/${VIEW}`),
+      ...preds.map(p => loadImage(`/pred/${MODEL.name}/${p.id}/${VIEW}`)),
     ]);
+    if (MODE.vis && MODEL.visual) iv = await loadImage(`/visual/${MODEL.name}/${VIEW}`);
   } catch (e) {
     $("#errNote").textContent = "could not load " + e.message;
     return;
   }
-  const w = ip.naturalWidth, h = ip.naturalHeight;
+  const w = ig.naturalWidth, h = ig.naturalHeight;
+
+  const ref = refPred();
+  const iref = ips[preds.indexOf(ref)] ?? ips[0];
 
   if (MODE.swipe) {
     toCanvas($("#cS1"), ig);                 // target underneath
-    toCanvas($("#cS2"), ip);                 // prediction on top, clipped
+    toCanvas($("#cS2"), iref);               // prediction on top, clipped
     clipSwipe();
+    $("#capSwipe").innerHTML =
+      `left: <b>${ref ? ref.label : "prediction"}</b> &middot; right: target &mdash; drag to compare`;
+    $("#grid").classList.add("hidden");
   } else {
-    toCanvas($("#cP"), ip);
-    toCanvas($("#cG"), ig);
+    $("#grid").classList.remove("hidden");
   }
 
-  if (MODE.err) {
-    const cp = toCanvas(document.createElement("canvas"), ip);
-    const cg = toCanvas(document.createElement("canvas"), ig);
-    const dp = cp.getImageData(0, 0, w, h).data;
-    const dg = cg.getImageData(0, 0, w, h).data;
-    const st = drawError($("#cE"), dp, dg, w, h);
-    $("#capE").textContent =
-      `signed error · peak ${st.maxAbs} levels · mean ${st.mean >= 0 ? "+" : ""}${st.mean.toFixed(2)}`;
-    $("#errNote").innerHTML =
-      "Error is the difference of the jet-decoded 8-bit levels, orange = predicted too high. " +
+  const grid = $("#grid");
+  grid.innerHTML = "";
+  if (MODE.swipe) { drawPlan(); return; }
+
+  // the room first: same receiver, same 90x67.4 deg camera, so it is aligned
+  // with the spectra pixel for pixel in direction
+  if (iv) {
+    const { f, cv } = figure("", "the room from here <b>(stage-1 visual)</b>");
+    toCanvas(cv, iv); grid.appendChild(f);
+  }
+  {
+    const { f, cv } = figure("ref", "<b>target</b> &mdash; the dataset spectrum");
+    toCanvas(cv, ig); grid.appendChild(f);
+  }
+
+  const cg = toCanvas(document.createElement("canvas"), ig);
+  const dg = cg.getImageData(0, 0, w, h).data;
+  let worst = null;
+
+  preds.forEach((p, k) => {
+    const im = ips[k];
+    const tag = p.kind === "released" ? "RF-3DGS released" : "ours";
+    const { f, cv } = figure("", `<b>${p.label}</b> · ${tag} · ${kIt(p)} it<br>PSNR ${fmt(p.psnr[VIEW])}`);
+    toCanvas(cv, im); grid.appendChild(f);
+
+    if (MODE.err) {
+      const dp = toCanvas(document.createElement("canvas"), im).getImageData(0, 0, w, h).data;
+      const e = figure("", "");
+      const st = drawError(e.cv, dp, dg, w, h);
+      e.fc.innerHTML = `error · ${p.label}<br>peak ${st.maxAbs} levels · mean ` +
+        `${st.mean >= 0 ? "+" : ""}${st.mean.toFixed(2)}`;
+      grid.appendChild(e.f);
+      if (!worst || st.maxAbs > worst.maxAbs) worst = { ...st, label: p.label };
+    }
+  });
+
+  $("#errNote").innerHTML = MODE.err
+    ? "Error is the difference of the jet-decoded 8-bit levels, orange = predicted too high. " +
       "Decoded through a 32³ reverse table, so it is worth about ±1 level — " +
       "enough to see <em>where</em> a model is wrong, not a substitute for scoring " +
-      "against <span class='mono'>spectra_float</span>.";
-  } else {
-    $("#errNote").textContent = "";
-  }
+      "against <span class='mono'>spectra_float</span>." +
+      (worst ? ` Largest excursion here: <b>${worst.label}</b>, ${worst.maxAbs} levels.` : "")
+    : "";
   drawPlan();
 }
 
@@ -391,24 +503,36 @@ function clipSwipe() {
 }
 
 function layout() {
+  // the panel wall is rebuilt by show(), so layout only flips the swipe
+  // comparator in and out and keeps the toggles lit
   $("#paneSwipe").classList.toggle("hidden", !MODE.swipe);
-  $("#panes").classList.toggle("hidden", MODE.swipe);
-  $("#paneE").classList.toggle("hidden", !MODE.err);
-  $("#panes").classList.toggle("two", !MODE.err);
+  $("#grid").classList.toggle("hidden", MODE.swipe);
   $("#mSide").classList.toggle("on", !MODE.swipe);
   $("#mSwipe").classList.toggle("on", MODE.swipe);
   $("#mErr").classList.toggle("on", MODE.err);
+  $("#mVis").classList.toggle("on", MODE.vis);
+  $("#mVis").disabled = !(MODEL && MODEL.visual);
 }
 
 // ---------------------------------------------------------------- wiring
 function pickModel(name) {
-  MODEL = IDX.models.find(m => m.name === name);
+  MODEL = IDX.spectra.find(m => m.name === name);
   VIEW = 0;
-  const g = MODEL.metrics || {};
-  $("#mAgg").textContent = [g.PSNR, g.SSIM, g.LPIPS]
-    .map(v => v == null ? "–" : v.toFixed(3)).join(" / ");
+  // default selection: the released model plus the best of our runs by
+  // aggregate PSNR, which is the comparison worth opening on. Where there is no
+  // released model (TCBF) the best two of ours stand in.
+  SEL = new Set();
+  const rel = MODEL.preds.find(p => p.kind === "released");
+  if (rel) SEL.add(rel.id);
+  const mine = MODEL.preds.filter(p => p.kind === "ours")
+    .sort((a, b) => (b.metrics.PSNR ?? -Infinity) - (a.metrics.PSNR ?? -Infinity));
+  for (const p of mine.slice(0, rel ? 1 : 2)) SEL.add(p.id);
+  if (!SEL.size && MODEL.preds.length) SEL.add(MODEL.preds[0].id);
+
   $("#mViews").textContent = MODEL.views;
   const r = $("#view"); r.max = MODEL.views - 1; r.value = 0;
+  drawChips();
+  layout();
   show();
 }
 
@@ -423,6 +547,7 @@ addEventListener("keydown", e => {
 $("#mSide").onclick = () => { MODE.swipe = false; layout(); show(); };
 $("#mSwipe").onclick = () => { MODE.swipe = true; layout(); show(); };
 $("#mErr").onclick = () => { MODE.err = !MODE.err; layout(); show(); };
+$("#mVis").onclick = () => { MODE.vis = !MODE.vis; layout(); show(); };
 
 (() => {                                        // swipe drag
   const el = $("#swipe");
@@ -536,6 +661,12 @@ $("#load3d").onclick = async () => {
     cam.setPosition(0, 0, 6);
     app.root.addChild(cam);
 
+    if (!MODEL.released) {
+      // /ply/<spectrum> resolves to the released model; our runs keep their
+      // gaussians in rrf_state.pt, which this loader cannot read
+      note.textContent = `no released .ply for ${MODEL.name} — MISSING, not empty`;
+      return;
+    }
     note.textContent = `streaming ${MODEL.name}.ply (240 MB)…`;
     const asset = new pc.Asset(MODEL.name, "gsplat", { url: `/ply/${MODEL.name}` });
     asset.on("error", e => { note.textContent = "ply failed: " + e; });
@@ -579,7 +710,7 @@ $("#load3d").onclick = async () => {
   IDX = await (await fetch("/api/index")).json();
   REV = buildReverse(IDX.jet);
   const sel = $("#model");
-  sel.innerHTML = IDX.models
+  sel.innerHTML = IDX.spectra
     .map(m => `<option value="${m.name}">${m.name}</option>`).join("");
   PRESETS.default = IDX.default_sql;
   $("#sql").value = IDX.default_sql;
@@ -589,7 +720,7 @@ $("#load3d").onclick = async () => {
     $("#runSql").disabled = true;
   }
   layout();
-  pickModel(IDX.models[0].name);
+  pickModel(IDX.spectra[0].name);
 })();
 </script>
 </body>
