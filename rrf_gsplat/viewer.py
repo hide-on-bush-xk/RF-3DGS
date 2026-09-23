@@ -5,9 +5,12 @@ pick one of the trained models, walk its held-out views, and see the prediction,
 the target and their difference side by side with that view's own metrics and
 the receiver's position on the floor plan.
 
-A 3D tab loads the model's .ply for a free look at the geometry. It is the
-secondary feature: a free viewpoint has no ground truth to compare against, so
-it shows what the field looks like, not whether it is right.
+A 3D tab loads the released model's .ply. Its camera stands at the current
+held-out view's receiver pose with the dataset's own camera, so there the render
+is that view's prediction (shown beside it); the arrow keys step views as on the
+compare tab and move the camera with them, and walking or turning away from a
+pose leaves the ground truth behind -- it then shows what the field looks like,
+not whether it is right.
 
 A runs tab queries index_db.py's SQLite index over everything under output/rrf
 -- 192 runs at the time of writing, past what grep answers comfortably. The
@@ -83,11 +86,13 @@ def _qvec2rotmat(w, x, y, z):
 
 
 def read_poses(images_txt):
-    """{image name without extension: (rx [3], boresight azimuth in degrees)}.
+    """{image name without extension: (rx [3], boresight azimuth in degrees, forward [3], down [3])}.
 
     COLMAP stores the world-to-camera rotation R and t = -R(rx), so rx = -R^T t.
     The receiver's look direction is the camera's +z axis in world coordinates,
     i.e. the third column of R^T; its azimuth is what the floor plan draws.
+    Forward and down (the camera's +z and +y in world coordinates) are what the
+    3D tab needs to put its camera exactly where the held-out view was taken.
     """
     poses = {}
     with open(images_txt) as fid:
@@ -101,7 +106,8 @@ def read_poses(images_txt):
             rx = [-sum(R[k][i] * t[k] for k in range(3)) for i in range(3)]
             # look direction = R^T [0,0,1] = third row of R read down the columns
             d = [R[2][i] for i in range(3)]
-            poses[os.path.splitext(p[9])[0]] = (rx, math.degrees(math.atan2(d[1], d[0])))
+            down = [R[1][i] for i in range(3)]
+            poses[os.path.splitext(p[9])[0]] = (rx, math.degrees(math.atan2(d[1], d[0])), d, down)
     return poses
 
 
@@ -322,11 +328,14 @@ def discover():
 
         items = []
         for i, n in enumerate(names):
-            rx, yaw = poses.get(n, (None, None))
+            rx, yaw, fwd, down = poses.get(n, (None, None, None, None))
             items.append({
                 "i": i, "name": n,
                 "rx": None if rx is None else [round(rx[0], 3), round(rx[1], 3), round(rx[2], 3)],
                 "yaw": None if yaw is None else round(yaw, 1),
+                # the camera's +z and +y in world coordinates, for the 3D tab
+                "fwd": None if fwd is None else [round(v, 5) for v in fwd],
+                "down": None if down is None else [round(v, 5) for v in down],
             })
         spectra.append({
             "name": spectrum,

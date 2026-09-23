@@ -105,8 +105,17 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
 .warn { color:var(--s2); }
 #plan { width:100%; height:auto; }
 .hidden { display:none !important; }
-#three { width:100%; height:520px; border-radius:4px; background:var(--sunk);
-  display:block; }
+/* 3D tab: the render at the held-out view's pose beside that view's prediction and target, all 3:2 */
+.row3d { display:grid; grid-template-columns:2fr 1fr; gap:10px; margin-top:10px; }
+.row3d .side { display:grid; gap:10px; align-content:start; }
+.row3d .cap { font-size:11px; color:var(--muted); margin-bottom:3px; }
+#three, .row3d img { width:100%; aspect-ratio:3/2; height:auto; border-radius:4px;
+  background:var(--sunk); display:block; }
+#three { outline:none; }
+#three:focus-visible { box-shadow:0 0 0 2px var(--accent); }
+.keys kbd { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; border:1px solid var(--line);
+  border-radius:3px; padding:0 4px; background:var(--sunk); }
+@media (max-width:760px) { .row3d { grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
@@ -230,12 +239,25 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
   <div id="v3d" class="hidden">
     <div class="card">
       <h2>geometry <button id="load3d">load this model&rsquo;s .ply</button></h2>
-      <p class="note">A free viewpoint has no ground truth beside it, so this shows
-      what the field looks like, not whether it is right &mdash; use the compare tab
-      for that. Each file is 240&nbsp;MB and streams on demand; load one at a time.
-      The renderer is fetched from a CDN, so this tab alone needs the network.</p>
+      <p class="note">The camera starts at the held-out view&rsquo;s receiver pose with the
+      dataset&rsquo;s own camera (90&deg;&times;67.4&deg;), so at the pose the render should
+      match the released model&rsquo;s prediction beside it; once you move away there is no
+      ground truth, and the render shows what the field looks like, not whether it is
+      right. Each file is 240&nbsp;MB and streams on demand. The renderer is fetched from
+      a CDN, so this tab alone needs the network.</p>
+      <p class="note keys"><kbd>&larr;</kbd> <kbd>&rarr;</kbd> previous / next held-out view
+      &middot; <kbd>&uarr;</kbd> <kbd>&darr;</kbd> step forward / back &middot;
+      <kbd>A</kbd> <kbd>D</kbd> turn &middot; <kbd>W</kbd> <kbd>S</kbd> look up / down &middot;
+      <kbd>R</kbd> back to the view&rsquo;s pose &middot; drag to look around, wheel to step</p>
       <p class="note warn" id="err3d"></p>
-      <canvas id="three"></canvas>
+      <div class="row3d">
+        <div><div class="cap" id="cap3d">3D render</div><canvas id="three" tabindex="0"></canvas></div>
+        <div class="side">
+          <div><div class="cap">RF-3DGS released &middot; this view (compare tab)</div><img id="pred3d" alt=""></div>
+          <div><div class="cap">target &middot; this view</div><img id="gt3d" alt=""></div>
+        </div>
+      </div>
+      <p class="note mono" id="pose3d"></p>
     </div>
   </div>
 </div>
@@ -710,15 +732,19 @@ function pickModel(name) {
   drawChips();
   layout();
   show();
+  if (typeof V3 !== "undefined" && vis3d()) load3d();
 }
 
 $("#model").onchange = e => pickModel(e.target.value);
-$("#view").oninput = e => { VIEW = +e.target.value; show(); };
-$("#prev").onclick = () => { VIEW = (VIEW - 1 + MODEL.views) % MODEL.views; $("#view").value = VIEW; show(); };
-$("#next").onclick = () => { VIEW = (VIEW + 1) % MODEL.views; $("#view").value = VIEW; show(); };
+// a view change moves the 3D camera too, when that tab is the one on screen
+$("#view").oninput = e => { VIEW = +e.target.value; show(); if (vis3d()) sync3d(); };
+$("#prev").onclick = () => { VIEW = (VIEW - 1 + MODEL.views) % MODEL.views; $("#view").value = VIEW; show(); if (vis3d()) sync3d(); };
+$("#next").onclick = () => { VIEW = (VIEW + 1) % MODEL.views; $("#view").value = VIEW; show(); if (vis3d()) sync3d(); };
 addEventListener("keydown", e => {
-  if (e.key === "ArrowLeft") $("#prev").click();
-  else if (e.key === "ArrowRight") $("#next").click();
+  // not while typing a query: the SQL box has arrow keys of its own
+  if (e.target.closest && e.target.closest("input, textarea, select")) return;
+  if (e.key === "ArrowLeft") { e.preventDefault(); $("#prev").click(); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); $("#next").click(); }
 });
 $("#mSide").onclick = () => { MODE.swipe = false; layout(); show(); };
 $("#mSwipe").onclick = () => { MODE.swipe = true; layout(); show(); };
@@ -734,6 +760,7 @@ for (const [btn, pane] of Object.entries(TABS)) {
       $("#" + b).classList.toggle("on", b === btn);
     }
     if (pane === "runs" && !$("#sqlTable").rows.length) runSql();
+    if (pane === "v3d") load3d();
   };
 }
 
@@ -810,65 +837,156 @@ document.querySelectorAll("[data-preset]").forEach(b => b.onclick = () => {
 // the view dependence, which for an RF field IS the signal. A .splat-based
 // viewer keeps only the DC term and would show a field that cannot vary with
 // the receiver's facing at all.
-$("#load3d").onclick = async () => {
-  const note = $("#err3d");
-  note.textContent = "loading renderer…";
-  try {
-    const pc = await import("https://cdn.jsdelivr.net/npm/playcanvas@2.3.3/build/playcanvas.mjs");
-    const canvas = $("#three");
-    canvas.width = canvas.clientWidth; canvas.height = 520;
-    const app = new pc.Application(canvas, { graphicsDeviceOptions: { antialias: false } });
-    app.setCanvasFillMode(pc.FILLMODE_NONE);
-    app.start();
-
-    const cam = new pc.Entity("camera");
-    cam.addComponent("camera", { clearColor: new pc.Color(0.09, 0.1, 0.11) });
-    cam.setPosition(0, 0, 6);
-    app.root.addChild(cam);
-
-    if (!MODEL.released) {
-      // /ply/<spectrum> resolves to the released model; our runs keep their
-      // gaussians in rrf_state.pt, which this loader cannot read
-      note.textContent = `no released .ply for ${MODEL.name} — MISSING, not empty`;
-      return;
-    }
-    note.textContent = `streaming ${MODEL.name}.ply (240 MB)…`;
-    const asset = new pc.Asset(MODEL.name, "gsplat", { url: `/ply/${MODEL.name}` });
-    asset.on("error", e => { note.textContent = "ply failed: " + e; });
-    app.assets.add(asset);
-    app.assets.load(asset);
-    asset.ready(() => {
-      const e = new pc.Entity(MODEL.name);
-      e.addComponent("gsplat", { asset });
-      app.root.addChild(e);
-      note.textContent = "loaded — drag to orbit, wheel to zoom";
-    });
-
-    // minimal orbit: no extra dependency, just enough to look around
-    let az = 0, el = 0, dist = 6, down = false, lx = 0, ly = 0;
-    const place = () => {
-      const ca = Math.cos(az), sa = Math.sin(az), ce = Math.cos(el), se = Math.sin(el);
-      cam.setPosition(dist * ce * sa, dist * se, dist * ce * ca);
-      cam.lookAt(0, 0, 0);
-    };
-    canvas.addEventListener("pointerdown", e => { down = true; lx = e.clientX; ly = e.clientY; });
-    addEventListener("pointerup", () => down = false);
-    addEventListener("pointermove", e => {
-      if (!down) return;
-      az -= (e.clientX - lx) * 0.005; el += (e.clientY - ly) * 0.005;
-      el = Math.max(-1.5, Math.min(1.5, el));
-      lx = e.clientX; ly = e.clientY; place();
-    });
-    canvas.addEventListener("wheel", e => {
-      e.preventDefault(); dist *= e.deltaY > 0 ? 1.1 : 0.9; place();
-    }, { passive: false });
-    place();
-  } catch (e) {
-    note.textContent =
-      "3D unavailable: " + e.message +
-      " — this tab needs the network for the renderer; the compare tab does not.";
-  }
+//
+// The camera stands where the held-out view was taken. COLMAP's camera looks along +z with +y down; a
+// PlayCanvas camera looks along -z with +y up; so it goes at the receiver position, looking along the view's
+// forward, with up = -down. The splats are not transformed at all: they and the poses share the dataset's
+// world frame, and the dataset's camera (300x200, f = 150, 90 x 67.4 deg) sets the field of view -- at the
+// pose the render should be the released model's prediction for that view, which is shown beside it.
+const V3 = { pc: null, app: null, cam: null, splat: null, asset: null, name: null,
+             pos: null, fwd: null, up: null, view: -1, loading: false };
+const FOVY = 2 * Math.atan(100 / 150) * 180 / Math.PI;
+const vis3d = () => !$("#v3d").classList.contains("hidden");
+const add3 = (a, b, s = 1) => [a[0] + s * b[0], a[1] + s * b[1], a[2] + s * b[2]];
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm3 = a => { const n = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / n, a[1] / n, a[2] / n]; };
+// Rodrigues: v turned by ang (rad) about the unit axis k
+const rot3 = (v, k, ang) => {
+  const c = Math.cos(ang), s = Math.sin(ang), kv = cross3(k, v), kd = dot3(k, v) * (1 - c);
+  return [v[0] * c + kv[0] * s + k[0] * kd, v[1] * c + kv[1] * s + k[1] * kd, v[2] * c + kv[2] * s + k[2] * kd];
 };
+
+function apply3d() {
+  if (!V3.cam || !V3.pos) return;
+  V3.cam.setPosition(V3.pos[0], V3.pos[1], V3.pos[2]);
+  const t = add3(V3.pos, V3.fwd);
+  V3.cam.lookAt(t[0], t[1], t[2], V3.up[0], V3.up[1], V3.up[2]);
+  const it = MODEL.items[V3.view];
+  const off = it && it.rx ? Math.hypot(V3.pos[0] - it.rx[0], V3.pos[1] - it.rx[1], V3.pos[2] - it.rx[2]) : 0;
+  const turned = it && it.fwd ? Math.acos(Math.max(-1, Math.min(1, dot3(V3.fwd, it.fwd)))) * 180 / Math.PI : 0;
+  $("#cap3d").textContent = (off < 1e-6 && turned < 1e-3)
+    ? "3D render · at this view's pose (should match the prediction)"
+    : `3D render · ${off.toFixed(2)} m and ${turned.toFixed(0)}° away from the view's pose (no ground truth here)`;
+}
+
+// Put the camera back on the current held-out view, and show that view's prediction and target beside it.
+function sync3d() {
+  if (!MODEL) return;
+  const it = MODEL.items[VIEW];
+  $("#gt3d").src = `/gt/${MODEL.name}/${VIEW}`;
+  const rel = MODEL.preds.find(p => p.kind === "released");
+  $("#pred3d").src = rel ? `/pred/${MODEL.name}/${rel.id}/${VIEW}` : "";
+  $("#pose3d").textContent = it && it.rx
+    ? `view ${VIEW + 1} / ${MODEL.views} · ${it.name} · rx (${it.rx.join(", ")}) m · facing ${it.yaw}°`
+    : `view ${VIEW + 1} / ${MODEL.views} · no pose for this view`;
+  if (!it || !it.rx || !it.fwd || !it.down) return;
+  V3.view = VIEW;
+  V3.pos = it.rx.slice(); V3.fwd = norm3(it.fwd); V3.up = norm3(it.down.map(v => -v));
+  if (V3.fit) V3.fit();          // the window may have been resized while this tab was hidden
+  apply3d();
+}
+
+async function ensure3d() {
+  if (V3.app) return;
+  V3.pc = await import("https://cdn.jsdelivr.net/npm/playcanvas@2.3.3/build/playcanvas.mjs");
+  const pc = V3.pc, canvas = $("#three");
+  V3.app = new pc.Application(canvas, { graphicsDeviceOptions: { antialias: false } });
+  V3.app.setCanvasFillMode(pc.FILLMODE_NONE);
+  // The drawing buffer must be the canvas's displayed size: left alone it stays at the HTML default 300 x 150,
+  // the camera then renders at 2:1 and the 3:2 display squeezes it -- which reads as the wrong field of view.
+  // (Measured: resizeCanvas() under FILLMODE_NONE did not change it; a fixed resolution does.)
+  const fit = () => {
+    const w = Math.round(canvas.clientWidth * devicePixelRatio), h = Math.round(canvas.clientHeight * devicePixelRatio);
+    if (w > 0 && h > 0) V3.app.setCanvasResolution(pc.RESOLUTION_FIXED, w, h);
+  };
+  V3.fit = fit;
+  addEventListener("resize", fit);
+  V3.app.start();
+  fit();
+  V3.cam = new pc.Entity("camera");
+  V3.cam.addComponent("camera", { clearColor: new pc.Color(0.09, 0.1, 0.11), fov: FOVY,
+                                  nearClip: 0.01, farClip: 200 });
+  V3.app.root.addChild(V3.cam);
+  // drag = look around from where the camera stands (yaw about up, pitch about right); wheel = step
+  let down = false, lx = 0, ly = 0;
+  canvas.addEventListener("pointerdown", e => { down = true; lx = e.clientX; ly = e.clientY; canvas.focus(); });
+  addEventListener("pointerup", () => down = false);
+  addEventListener("pointermove", e => {
+    if (!down || !V3.pos) return;
+    turn3d(-(e.clientX - lx) * 0.004, -(e.clientY - ly) * 0.004);
+    lx = e.clientX; ly = e.clientY;
+  });
+  canvas.addEventListener("wheel", e => {
+    e.preventDefault();
+    if (V3.pos) { V3.pos = add3(V3.pos, V3.fwd, e.deltaY > 0 ? -0.15 : 0.15); apply3d(); }
+  }, { passive: false });
+}
+
+function turn3d(yaw, pitch) {
+  V3.fwd = norm3(rot3(V3.fwd, V3.up, yaw));
+  const right = norm3(cross3(V3.fwd, V3.up));
+  const f = norm3(rot3(V3.fwd, right, pitch));
+  // stop short of straight up / down, where lookAt's up vector would be parallel to the view
+  if (Math.abs(dot3(f, V3.up)) < 0.985) V3.fwd = f;
+  apply3d();
+}
+
+async function load3d() {
+  const note = $("#err3d");
+  sync3d();
+  if (V3.loading) return;
+  if (!MODEL.released) {
+    // /ply/<spectrum> resolves to the released model; our runs keep their gaussians in rrf_state.pt, which
+    // this loader cannot read
+    if (V3.splat) { V3.splat.destroy(); V3.splat = null; V3.name = null; }
+    note.textContent = `no released .ply for ${MODEL.name} — MISSING, not empty`;
+    return;
+  }
+  if (V3.name === MODEL.name && V3.splat) { note.textContent = ""; return; }
+  note.textContent = "loading renderer…";
+  V3.loading = true;
+  try {
+    await ensure3d();
+    const pc = V3.pc, name = MODEL.name;
+    if (V3.splat) { V3.splat.destroy(); V3.splat = null; }
+    if (V3.asset) { V3.app.assets.remove(V3.asset); V3.asset.unload(); V3.asset = null; }
+    note.textContent = `streaming ${name}.ply (240 MB)…`;
+    const asset = new pc.Asset(name, "gsplat", { url: `/ply/${name}` });
+    V3.asset = asset;
+    await new Promise((ok, bad) => {
+      asset.on("error", e => bad(new Error("ply failed: " + e)));
+      asset.ready(ok);
+      V3.app.assets.add(asset);
+      V3.app.assets.load(asset);
+    });
+    const e = new pc.Entity(name);
+    e.addComponent("gsplat", { asset });
+    V3.app.root.addChild(e);
+    V3.splat = e; V3.name = name;
+    note.textContent = "";
+    sync3d();
+  } catch (e) {
+    note.textContent = "3D unavailable: " + e.message +
+      " — this tab needs the network for the renderer; the compare tab does not.";
+  } finally {
+    V3.loading = false;
+    // the spectrum may have changed while this one streamed
+    if (vis3d() && MODEL.released && V3.name !== MODEL.name) load3d();
+  }
+}
+$("#load3d").onclick = () => load3d();
+
+addEventListener("keydown", e => {
+  if (!vis3d() || !V3.pos || (e.target.closest && e.target.closest("input, textarea, select"))) return;
+  const k = e.key.toLowerCase();
+  if (k === "arrowup" || k === "arrowdown") {
+    e.preventDefault();
+    V3.pos = add3(V3.pos, V3.fwd, k === "arrowup" ? 0.25 : -0.25); apply3d();
+  } else if (k === "a" || k === "d") turn3d((k === "a" ? 1 : -1) * 5 * Math.PI / 180, 0);
+  else if (k === "w" || k === "s") turn3d(0, (k === "w" ? 1 : -1) * 5 * Math.PI / 180);
+  else if (k === "r") sync3d();
+});
 
 // ---------------------------------------------------------------- boot
 (async () => {
@@ -889,6 +1007,9 @@ $("#load3d").onclick = async () => {
   // be driven from a headless browser, which is the only way any of this gets
   // verified without a person clicking.
   const hash = decodeURIComponent(location.hash.slice(1)).split("/");
+  // #3d/<spectrum>/<view> opens the 3D tab on that view
+  const want3d = (hash[0] || "").toLowerCase() === "3d";
+  if (want3d) hash.shift();
   const want = IDX.spectra.find(m => m.name.toLowerCase() === (hash[0] || "").toLowerCase());
   if (hash[2]) {
     const f = hash[2].split(",");
@@ -911,6 +1032,7 @@ $("#load3d").onclick = async () => {
   }
   // pickModel already drew once; redraw only if the hash changed what it drew
   if (hash[1] || hash[3]) show();
+  if (want3d) $("#tab3d").click();
 })();
 </script>
 </body>
