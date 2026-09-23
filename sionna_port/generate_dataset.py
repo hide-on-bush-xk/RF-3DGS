@@ -364,6 +364,16 @@ def generate(cfg: Config, shared=None):
     print(f"pass 1/2: {len(groups)} positions x {len(VIEW_YAWS)} views")
     specs, poses, per_view, cfr_curve = [], [], [], None
     t_start = time.time()
+    # Where a view's time goes: the ray-traced solve, the spectrum synthesis (response + beamformer, or splat +
+    # face cuts, including the copy back to the host) and pass 2's writes. Dr.Jit evaluates lazily, so the solve
+    # is synchronised before its clock stops; otherwise its work would be billed to the spectrum.
+    tsplit = {"solve": 0.0, "spectrum": 0.0, "write": 0.0}
+
+    def _sync():
+        import drjit as dr
+        dr.sync_thread()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
     projection = cfg.spectrum.upper() in PROJECTION_KINDS
     empty_views = 0
     for i, (rx_loc, yaws) in enumerate(groups):
@@ -374,6 +384,7 @@ def generate(cfg: Config, shared=None):
             if projection and eq is not None and not cfg.seed_per_view:
                 # same position, same paths: cut the next face from the sphere
                 from rf_spectra import equirect_to_perspective
+                t0 = time.perf_counter()
                 spec_db = equirect_to_perspective(eq, cfg.width, cfg.height, cfg.fov_deg, yaw_rad=yaw)
             else:
                 scene.remove("rx") if "rx" in scene.receivers else None
@@ -384,7 +395,11 @@ def generate(cfg: Config, shared=None):
                 # face boundary can exist in one face and be missing in the
                 # next. Randomising the lattice across positions still gives the
                 # multi-view fit independent residuals to average.
+                t0 = time.perf_counter()
                 paths = solve_paths(solver, scene, cfg, view_index=(i * len(yaws) + j) if cfg.seed_per_view else i)
+                _sync()
+                tsplit["solve"] += time.perf_counter() - t0
+                t0 = time.perf_counter()
                 if projection:
                     eq = projection_equirect(paths, cfg.spectrum.upper(), grid.theta.device, cfg.splat_sigma, cfg.power_floor_db)
                     from rf_spectra import equirect_to_perspective
@@ -398,6 +413,7 @@ def generate(cfg: Config, shared=None):
                         spec_db = torch.full(tuple(grid.theta.shape[-2:]), EMPTY_VIEW_DB, dtype=torch.float32)
                         empty_views += 1
             specs.append(spec_db.cpu().numpy().astype(np.float32))
+            tsplit["spectrum"] += time.perf_counter() - t0
             poses.append((rx_loc, yaw))
 
             if cfg.dashboard:
@@ -438,6 +454,7 @@ def generate(cfg: Config, shared=None):
     jet = colormaps["jet"]
     focal = cfg.width / (2 * math.tan(math.radians(cfg.fov_deg) / 2))
     images = {}
+    t_write = time.perf_counter()
     for n, (spec_db, (rx_loc, yaw)) in enumerate(zip(specs, poses), start=1):
         preview = spec_db[0] if multi else spec_db           # the PNG shows channel 0
         # One range for the whole dataset, not per image: this is the change
@@ -453,6 +470,7 @@ def generate(cfg: Config, shared=None):
         r_c2w, qvec = euler_to_quaternion([yaw, 0.0, 0.0])
         images[n] = (qvec, (-r_c2w.apply(rx_loc)).tolist(), 1, f"{n:05d}.png")
 
+    tsplit["write"] = time.perf_counter() - t_write
     write_cameras_txt(os.path.join(cfg.out_dir, "sparse", "0", "cameras.txt"),
                       1, cfg.width, cfg.height, focal, focal,
                       cfg.width / 2, cfg.height / 2)
@@ -464,7 +482,9 @@ def generate(cfg: Config, shared=None):
                           "normalization": "global",
                           "seconds": elapsed,
                           "views_per_second": len(images) / max(elapsed, 1e-9),
-                          "empty_views": empty_views, "empty_view_db": EMPTY_VIEW_DB}
+                          "empty_views": empty_views, "empty_view_db": EMPTY_VIEW_DB,
+                          "time_split_s": tsplit | {"other": elapsed - sum(tsplit.values())}}
+    print("time split: " + ", ".join(f"{k} {v:.1f} s" for k, v in meta["time_split_s"].items()))
     if empty_views:
         print(f"empty views (no paths at this receiver pose, written at {EMPTY_VIEW_DB:.0f} dB): {empty_views} of {len(images)}")
     if multi:
