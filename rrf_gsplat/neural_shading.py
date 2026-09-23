@@ -41,9 +41,18 @@ class ResidualCNN(nn.Module):
     max_residual bounds the output softly (m * tanh(o / m)): the head can move a pixel by at most m, so it can
     correct the field but not paint a new one. None leaves it unbounded (the label upsampler, where the target
     is the truth itself).
+
+    bound_units: the output layer works in units of the bound, m * tanh(o), instead of the image's units. Same
+    functions, different optimiser dynamics: in normalised dB m is small (6 dB of a 74 dB span is 0.081), so one
+    Adam step on the output layer moved o by a large part of m, a few same-signed early steps drove |o / m| past 3
+    everywhere, and Adam's second moment, still holding those early gradients, turned the vanishing tanh
+    gradient into steps of nothing for the rest of the run (round 41: 3 of 21 head runs sat at the bound from
+    step 250 on). In units of the bound a step is the same fraction of m whatever the dataset's span. Alone it
+    rescued one of the three (round 43 smoke); the head without guides still took the untrained field's global
+    offset at its bound, which train_rrf.py's --head-warmup addresses.
     """
 
-    def __init__(self, c_in, c_out, width=32, max_residual=None):
+    def __init__(self, c_in, c_out, width=32, max_residual=None, bound_units=False):
         super().__init__()
         self.enc1 = nn.Conv2d(c_in, width, 3)
         self.enc2 = nn.Conv2d(width, 2 * width, 3, stride=2)
@@ -52,6 +61,7 @@ class ResidualCNN(nn.Module):
         self.out = nn.Conv2d(width, c_out, 1)
         nn.init.zeros_(self.out.weight); nn.init.zeros_(self.out.bias)          # identity at the start
         self.max_residual = max_residual
+        self.bound_units = bound_units
 
     def forward(self, x, pad="replicate"):
         h1 = F.gelu(self.enc1(pad2d(x, 1, pad)))
@@ -61,7 +71,7 @@ class ResidualCNN(nn.Module):
         h = F.gelu(self.dec1(pad2d(torch.cat([u, h1], 1), 1, pad)))
         o = self.out(h)
         if self.max_residual is not None:
-            o = self.max_residual * torch.tanh(o / self.max_residual)
+            o = self.max_residual * torch.tanh(o if self.bound_units else o / self.max_residual)
         return o
 
 

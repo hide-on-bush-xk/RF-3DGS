@@ -1,7 +1,8 @@
 """Controls for the shading head (--head cnn), before any of its runs count. Criteria written first:
 
   1. identity at the start: with every feature on (geo + phys guides, 4 latent channels, the four-face ring),
-     the untrained model renders what the model without a head renders, to 1e-6 (the output layer is zero)
+     the untrained model renders what the model without a head renders, to 1e-6 (the output layer is zero),
+     with the output layer in image units and in units of the bound (--head-bound-units)
   2. guide buffers: finite, unit normals, and the direct-path alignment reaches >= 0.99 in a face that looks
      towards the transmitter
   3. gradients: on the first step only the head's output layer receives one (zero init); after one head
@@ -41,26 +42,30 @@ def main():
     W, H = data["width"], data["height"]
     ck = os.path.join(REPO, "RF-3DGS_dataset/blender_visual_trained/chkpnt30000.pth")
 
-    def model(with_head):
+    def model(with_head, bound_units=False):
         m = T.RRF(ck, "db", 1, 1, dev)
         m.sh_backend = "gsplat"
         g = torch.Generator().manual_seed(0)
         m.params["sh0"].data.copy_((torch.randn(m.params["sh0"].shape, generator=g) * 0.3).to(dev))
         m.params["shN"].data.copy_((torch.randn(m.params["shN"].shape, generator=g) * 0.05).to(dev))
         if with_head:
-            T.attach_head(m, "cnn", "geo,phys", 4, True, 6.0, 32, span, meta["tx_loc"], dev)
+            T.attach_head(m, "cnn", "geo,phys", 4, True, 6.0, 32, span, meta["tx_loc"], dev, bound_units)
             m.head_cfg["order"] = [3, 2, 1, 0]
         return m
 
     report, ok = {}, True
-    plain, full = model(False), model(True)
+    plain, full, full_bu = model(False), model(True), model(True, True)
     with torch.no_grad():
         a = torch.cat([plain.render_batch(data["viewmats"][4 * k:4 * k + 4], data["Ks"][4 * k:4 * k + 4], W, H, span) for k in range(4)])
         b = torch.cat([full.render_batch(data["viewmats"][4 * k:4 * k + 4], data["Ks"][4 * k:4 * k + 4], W, H, span) for k in range(4)])
         b1 = torch.stack([full.render(data["viewmats"][i], data["Ks"][i], W, H, span) for i in range(16)])   # per face
+        bu = torch.cat([full_bu.render_batch(data["viewmats"][4 * k:4 * k + 4], data["Ks"][4 * k:4 * k + 4], W, H, span) for k in range(4)])
     report["identity_ring_max_diff"] = float((a - b).abs().max())
     report["identity_single_face_max_diff"] = float((a - b1).abs().max())
-    c1 = report["identity_ring_max_diff"] < 1e-6 and report["identity_single_face_max_diff"] < 1e-6
+    report["identity_bound_units_max_diff"] = float((a - bu).abs().max())
+    c1 = (report["identity_ring_max_diff"] < 1e-6 and report["identity_single_face_max_diff"] < 1e-6
+          and report["identity_bound_units_max_diff"] < 1e-6)
+    del full_bu
 
     # 2. the guide buffers of one ring, rebuilt the way _apply_head builds them
     with torch.no_grad():

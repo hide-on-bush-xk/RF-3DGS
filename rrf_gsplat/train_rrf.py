@@ -258,7 +258,8 @@ class RRF(torch.nn.Module):
         self.sh_backend = "torch"            # --sh-backend gsplat: the same SH in gsplat's CUDA kernel (frozen geometry only)
         self.head = None                     # --head cnn: an image-space residual network after the rasteriser
         self.head_cfg = None                 # its guide buffers, latent width, strip layout, bound (attach_head)
-        self._normals = None                 # the Gaussians' shortest axes, cached while the geometry is frozen
+        self.head_on = True                  # False during --head-warmup: the Gaussians alone
+        self._normals = None                # the Gaussians' shortest axes, cached while the geometry is frozen
         self.res_stats = None                # [sum res^2, sum (out - mean)^2, count], channel 0, while evaluating
 
     # The activated views of the raw parameters. Same convention as INRIA's
@@ -419,7 +420,9 @@ class RRF(torch.nn.Module):
         if self.mode == "power":
             img = torch.log10(img + 1e-12) * 10.0 / span_db
         if hc is not None:
-            img = self._apply_head(img[:, :self.channels], head_in[0], head_in[1], viewmats, Ks, width, height)
+            img = img[:, :self.channels]                   # the depth rendered for the guides is not an output
+            if self.head_on:
+                img = self._apply_head(img, head_in[0], head_in[1], viewmats, Ks, width, height)
         return img
 
     def _apply_head(self, base, extra, depth, viewmats, Ks, width, height):
@@ -486,7 +489,7 @@ class RRF(torch.nn.Module):
 
 
 def attach_head(model, head="cnn", guides="", latent=0, strip=False, max_db=6.0, width=32, span_db=1.0, tx=None,
-                device="cuda"):
+                device="cuda", bound_units=False):
     """Give the model a deferred shading head (neural_shading.py): a residual CNN shared by every view.
 
     guides   comma list of "geo" (depth, normal, world ray, receiver position: 10 channels) and "phys"
@@ -495,6 +498,7 @@ def attach_head(model, head="cnn", guides="", latent=0, strip=False, max_db=6.0,
              not know, in the place DLSS Ray Reconstruction takes albedo and roughness)
     strip    run the head on the four faces of a position side by side, padded circularly
     max_db   the residual's bound, in dB of the value (or power) channel; span_db converts it to value units
+    bound_units   the output layer in units of the bound (ResidualCNN): off reproduces rounds 39-42
     """
     from neural_shading import ResidualCNN
     g = [x for x in guides.split(",") if x]
@@ -502,10 +506,11 @@ def attach_head(model, head="cnn", guides="", latent=0, strip=False, max_db=6.0,
         raise SystemExit("--head-guides phys needs the transmitter position (generation_meta.json tx_loc)")
     c = model.channels
     c_in = c + (10 if "geo" in g else 0) + (5 if "phys" in g else 0) + latent
-    model.head = ResidualCNN(c_in, c, width=width, max_residual=max_db / span_db).to(device)
+    model.head = ResidualCNN(c_in, c, width=width, max_residual=max_db / span_db, bound_units=bound_units).to(device)
     model.head_cfg = {"head": head, "guides": g, "latent": latent, "strip": strip, "normals": bool(g), "depth": bool(g),
                       "tx": None if tx is None else torch.tensor(tx, dtype=torch.float32, device=device),
-                      "scene_scale": 10.0, "span_m": 10.0, "order": [0, 1, 2, 3], "max_db": max_db, "width": width}
+                      "scene_scale": 10.0, "span_m": 10.0, "order": [0, 1, 2, 3], "max_db": max_db, "width": width,
+                      "bound_units": bound_units}
     if latent:
         n = model.n_gaussians
         g0 = torch.Generator(device="cpu").manual_seed(0)
@@ -783,6 +788,13 @@ def main():
     ap.add_argument("--head-latent", type=int, default=0, help="learned per-Gaussian feature channels for the head")
     ap.add_argument("--head-strip", action="store_true", help="the head sees a position's four faces as one ring")
     ap.add_argument("--head-max-db", type=float, default=6.0, help="bound of the head's residual, dB")
+    ap.add_argument("--head-bound-units", action="store_true",
+                    help="the head's output layer in units of the bound (m tanh(o), not m tanh(o/m)): the fix for the "
+                         "round-41 heads that saturated at the bound and stopped learning")
+    ap.add_argument("--head-warmup", type=int, default=0,
+                    help="steps with the head switched off (the Gaussians alone) before it starts: the untrained field "
+                         "renders above most of the truth, and a head that is on from step 1 takes that global offset "
+                         "at its bound, where tanh has no gradient left (round 43)")
     ap.add_argument("--head-width", type=int, default=32)
     ap.add_argument("--head-lr", type=float, default=1e-3)
     ap.add_argument("--peak-loss", type=float, default=0.0,
@@ -877,9 +889,11 @@ def main():
         # the bound is in dB of the value (db / power) or of the power channel (multi)
         span_head = span if cfg.mode != "multi" else float(ch_ranges[cfg.mask_channel, 1] - ch_ranges[cfg.mask_channel, 0])
         head = attach_head(model, cfg.head, cfg.head_guides, cfg.head_latent, cfg.head_strip, cfg.head_max_db,
-                           cfg.head_width, span_head, meta.get("tx_loc"), device)
+                           cfg.head_width, span_head, meta.get("tx_loc"), device, cfg.head_bound_units)
         print(f"shading head: {sum(p.numel() for p in head.parameters()):,} parameters, guides "
-              f"[{cfg.head_guides or 'none'}], latent {cfg.head_latent}, strip {cfg.head_strip}, bound {cfg.head_max_db} dB")
+              f"[{cfg.head_guides or 'none'}], latent {cfg.head_latent}, strip {cfg.head_strip}, bound {cfg.head_max_db} dB"
+              f"{' (output in units of the bound)' if cfg.head_bound_units else ''}"
+              f"{f', off for the first {cfg.head_warmup} steps' if cfg.head_warmup else ''}")
     if cfg.init_from:
         model.load_state(torch.load(cfg.init_from, map_location=device))
         if cfg.init_geometry_only:
@@ -1022,6 +1036,7 @@ def main():
     torch.cuda.synchronize(); t_train = time.time()
     rng = np.random.default_rng(cfg.seed)
     for it in range(1, cfg.iterations + 1):
+        model.head_on = it > cfg.head_warmup
         if groups is None:
             i = int(rng.integers(n_train))
             img = model.render(train["viewmats"][i], train["Ks"][i], train["width"], train["height"], span)
@@ -1067,6 +1082,7 @@ def main():
                   f"RMSE {m['rmse_db']:5.2f} dB  (subset {len(eval_idx)}"
                   + (f", {m['gaussians']:,} Gaussians" if strategy is not None else "") + ")")
     torch.cuda.synchronize(); train_seconds = time.time() - t_train
+    model.head_on = True
 
     os.makedirs(cfg.out, exist_ok=True)
     all_idx = list(range(len(test_names)))
