@@ -84,7 +84,12 @@ canvas { width:100%; height:auto; display:block; border-radius:3px;
    line at once -- the point being to cut all the models at the same column of
    the image. The under canvas stays in flow and gives the row its height; the
    over canvas is pinned to it. */
-.swipe { position:relative; user-select:none; touch-action:none; cursor:ew-resize; }
+.swipe { position:relative; user-select:none; touch-action:none; }
+/* The resize cursor appears only while a drag is actually in progress, not on
+   hover: hovering an image is how you read it, and changing anything then is
+   noise. It goes on <body> so it survives the pointer leaving the cell, which
+   pointer capture lets happen mid-drag. */
+body.dragging, body.dragging * { cursor:ew-resize !important; }
 .swipe .under { position:relative; display:block; }
 .swipe .over { position:absolute; left:0; top:0; width:100%; height:100%; }
 .swipe .handle { position:absolute; top:0; bottom:0; width:2px; margin-left:-1px;
@@ -454,12 +459,19 @@ function bindSwipe(el) {
     SPLIT = Math.max(0, Math.min(100, (e.clientX - r.left) / r.width * 100));
     applySplit();
   };
+  const end = () => document.body.classList.remove("dragging");
   el.addEventListener("pointerdown", e => {
     el.setPointerCapture(e.pointerId);
+    document.body.classList.add("dragging");
     move(e);
     e.preventDefault();                      // or the canvas starts a drag-image
   });
   el.addEventListener("pointermove", e => { if (e.buttons) move(e); });
+  // lostpointercapture covers the cases pointerup misses: the button released
+  // off-window, a touch cancelled, another element taking the capture
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+  el.addEventListener("lostpointercapture", end);
 }
 
 // ---------------------------------------------------------------- wall
