@@ -33,7 +33,8 @@ import math
 import os
 import re
 import struct
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 RELEASED = os.path.join(REPO, "RF-3DGS_dataset", "RF-3DGS_trained_RRF")
@@ -374,18 +375,28 @@ def make_handler(spectra, page, db_path=None):
              "db": bool(db_path), "default_sql": DEFAULT_RUNS_SQL}
     index_bytes = json.dumps(index).encode()
 
-    # One read-only connection for the process. HTTPServer here is
-    # single-threaded, so a single connection is safe; read-only is what makes
-    # an arbitrary query from the page harmless, without having to parse SQL
-    # looking for dangerous statements.
+    # One read-only connection for the process, shared across handler threads
+    # under a lock -- sqlite3 allows the sharing with check_same_thread=False but
+    # a cursor is not safe to interleave. Read-only is what makes an arbitrary
+    # query from the page harmless, without having to parse SQL looking for
+    # dangerous statements.
     con = None
+    con_lock = threading.Lock()
     if db_path:
         import sqlite3
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True,
                               check_same_thread=False)
 
     class H(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"          # needed for Range / keep-alive
+        # HTTP/1.1 is needed for Range, and it brings keep-alive with it: the
+        # browser holds the connection open after a response. That MUST be paired
+        # with a threading server. On a single-threaded one the first connection
+        # is served until the client closes it and every other connection sits in
+        # the accept backlog -- a browser opens up to six per origin, so the page
+        # loaded once and then any request that happened to go out on one of the
+        # idle connections hung forever. Images stopped arriving and every button
+        # looked dead, because each click re-entered the same stalled fetch.
+        protocol_version = "HTTP/1.1"
 
         def _send(self, body, ctype, code=200, extra=None):
             self.send_response(code)
@@ -480,10 +491,11 @@ def make_handler(spectra, page, db_path=None):
             if not q:
                 self._send(json.dumps({"error": "empty query"}).encode(), "application/json"); return
             try:
-                cur = con.execute(q)
-                cols = [c[0] for c in (cur.description or [])]
-                rows = cur.fetchmany(limit)
-                more = cur.fetchone() is not None
+                with con_lock:
+                    cur = con.execute(q)
+                    cols = [c[0] for c in (cur.description or [])]
+                    rows = cur.fetchmany(limit)
+                    more = cur.fetchone() is not None
                 body = {"cols": cols, "rows": rows, "truncated": more, "limit": limit}
             except Exception as exc:
                 body = {"error": f"{type(exc).__name__}: {exc}"}
@@ -533,7 +545,9 @@ def main():
         print(f"  no index.db (build it with {os.path.join('rrf_gsplat', 'index_db.py')})")
         db = None
     print(f"\nserving on http://localhost:{cfg.port}")
-    HTTPServer(("127.0.0.1", cfg.port), make_handler(spectra, page, db)).serve_forever()
+    # ThreadingHTTPServer, not HTTPServer: see protocol_version in the handler.
+    ThreadingHTTPServer(("127.0.0.1", cfg.port),
+                        make_handler(spectra, page, db)).serve_forever()
 
 
 if __name__ == "__main__":

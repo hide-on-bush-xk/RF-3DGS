@@ -116,6 +116,7 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
   model that predicted it &mdash; RF-3DGS as released beside our own runs, on the same
   pixels. Use <span class="mono">&larr;</span> / <span class="mono">&rarr;</span> to step views.</p>
 
+  <p class="note warn hidden" id="crash" style="border:1px solid var(--s2);border-radius:4px;padding:8px 10px;margin:0 0 10px"></p>
   <div class="bar">
     <label>spectrum <select id="model"></select></label>
     <button id="prev">&larr;</button>
@@ -241,6 +242,18 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
 
 <script type="module">
 const $ = s => document.querySelector(s);
+
+// A thrown error used to be silent: show() would die partway, the wall kept the
+// previous model's cells, and every button after that looked dead because each
+// click re-entered the same throw. Say so instead.
+function crash(what, err) {
+  const box = $("#crash");
+  box.classList.remove("hidden");
+  const detail = err && err.stack ? String(err.stack).slice(0, 300) : String(err);
+  box.textContent = what + ": " + detail;
+}
+addEventListener("error", e => crash("error", e.error || e.message));
+addEventListener("unhandledrejection", e => crash("unhandled rejection", e.reason));
 let IDX = null, MODEL = null, VIEW = 0;
 let SEL = new Set();                 // prediction ids on show, insertion-ordered
 let SHOWN = 0;                       // generation counter, see show()
