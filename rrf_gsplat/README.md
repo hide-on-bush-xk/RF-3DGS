@@ -26,6 +26,11 @@ check_face_batching.py controls for the speed flags: render() vs HEAD, batched f
 dlss_table.py         round-24 table: time split and decoded quality of every r24_* run
 mvdr_peaks.py         main-peak direction / power and top-3 peak detection of beamformed predictions
 upsample_renders.py   bilinear upsampling of a run's saved renders (the 2D upsampler of the SR comparison)
+neural_shading.py     the DLSS-style pieces: residual CNN, guide buffers (geometry, transmitter physics)
+label_sr.py           experiment A1: a learned upsampler for 150x100 labels, scored against the true 300x200
+check_shading_head.py controls for --head cnn: identity at the start, guide buffers, gradients
+head_share.py         how much of a head model's output is the head, on in-range and peak pixels
+dlss_ablation.py      rounds 41-43 tables: every head feature's gain (ladder, leave-one-out, seeds)
 ```
 
 **Speed (2026-09-23, rounds 24–35; details in `docs/stage2_notes.md`).** A step does not get
@@ -51,6 +56,23 @@ With the geometry unfrozen (the best MVDR rows): 302 → 97 s at 21.53 → 21.45
 (one seed). Per view the four-face step is 2.5–2.9× faster at 150×100, 300×200 and 600×400 alike. The planner's "Retrain RRF here" training stage
 went from 56 s to 21 s at the recorded live transmitter (data + training 104 → 69 s, data generation
 now 70 % of it); clicked through the page at (8.2, −5.05, 2) the whole job takes 77 s.
+
+**DLSS-5-style deferred shading (2026-09-23, rounds 39–43; `docs/stage2_notes.md`).** Labels at
+150×100 save only 11 % (MVDR) / 18 % (MULTI) of the data generation, and a learned label upsampler
+is no better than bilinear at the peaks, so label super-resolution is dropped. `--head cnn` puts a
+small residual CNN, shared by every view, after the rasteriser, with the residual bounded at
+±6 dB and fed by guide buffers rasterised alongside the colour (`--head-guides geo,phys`,
+`--head-latent 4`, `--head-strip`); `--peak-loss 1` adds L1 on each view's top 10 dB. Train it with
+`--head-bound-units --head-warmup 250`: without them 3 of 21 heads saturated at the bound in the
+first 250 steps and never recovered. On MVDR (3 seeds): SH3 + head 21.52 dB PSNR(jet) vs 18.72 without,
+main peak 1.2° closer and 1.0 dB stronger at the true peak, but no more views within 1°, and
+the step is 2.4× (300×200) to 5.5× (600×400) slower, so it is a quality option, not a speed-up. Per feature:
+the head itself +1.1 dB, the geometry guides +1.9 when added first but redundant with the rest,
+the learned latent the only piece that costs when removed (−0.4 dB), transmitter physics and the
+four-face ring nothing measurable; width 8 matches width 32. The Gaussians under a head are a worse
+field on their own (SH3: 3.5 dB mean error without the head vs 2.7 dB for SH3 trained alone; the head
+carries 17–28 % of the output variance), so nothing that renders the Gaussians without the head
+should use a head model's parameters.
 
 ## The three colour functions
 
