@@ -21,7 +21,34 @@ run_matrix.sh         the experiment matrix, skips finished runs
 wsl_run.sh            run one training in WSL with a log
 win_gpu_jobs.sh       Windows-side GPU jobs: Tx-B dataset, 2.4 GHz timing, INRIA rasteriser timing
 time_tutorial_019.py  the original tutorial pipeline (Sionna 0.19 + TF) timed on this machine
+profile_resolution.py one training step split into SH colour / raster / loss+backward / Adam, at six render sizes
+check_face_batching.py controls for the speed flags: render() vs HEAD, batched faces vs single, CUDA vs torch SH
+dlss_table.py         round-24 table: time split and decoded quality of every r24_* run
+mvdr_peaks.py         main-peak direction / power and top-3 peak detection of beamformed predictions
+upsample_renders.py   bilinear upsampling of a run's saved renders (the 2D upsampler of the SR comparison)
 ```
+
+**Speed (2026-09-23, rounds 24–35; details in `docs/stage2_notes.md`).** A step does not get
+cheaper below 600×400 (multi: 39–44 ms from 75×50 to 600×400, `profile_resolution.py`): the cost is
+the per-Gaussian SH colour (11 ms) and Adam over 81M parameters (18 ms), so rendering at a lower
+resolution and upsampling (DLSS super-resolution) cannot speed training here, and training on
+150×100 labels costs the strong paths accuracy (power-weighted azimuth median 1.16° → 1.9–2.1°).
+What does pay is DLSS's frame-generation idea: the four faces of one receiver position share their
+camera centre and hence their SH colour exactly, so `--faces-per-step 4 --lr-scale 2` shades once,
+rasterises four faces in one call and takes one Adam step. With `--sh-backend gsplat --eval-group`
+(same numbers, CUDA SH) and the parallel I/O now always on:
+
+| multi, 10k views, 640 held-out views | train | train stage wall | az / zen / delay median |
+| --- | --- | --- | --- |
+| before (1 view/step, torch SH) | 375 s | 511 s | 0.636° / 1.006° / 0.549 ns |
+| + engineering (CUDA SH, grouped eval) | 310 s | 426 s | 0.635° / 1.012° / 0.549 ns |
+| + 4 faces/step, lr ×2, 2.5k steps | 101 s | 218 s | 0.618° / 0.942° / 0.539 ns |
+| + parallel load, background render writes | 101 s | 129 s | (same config) |
+
+db on MVDR: 167 s → 52 s at 18.75 → 18.77 dB PSNR(jet); over three seeds each the main peak's
+direction is within seed noise but its power is ~0.5 dB lower (`mvdr_peaks.py`), a real cost. The planner's "Retrain RRF here" training stage
+went from 56 s to 21 s at the recorded live transmitter (data + training 104 → 69 s, data generation
+now 70 % of it); clicked through the page at (8.2, −5.05, 2) the whole job takes 77 s.
 
 ## The three colour functions
 
