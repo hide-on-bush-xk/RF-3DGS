@@ -138,12 +138,17 @@ class Planner:
             final = self.coverage(pos, threshold) if history else None
         return {"history": history, "final": final}
 
-    def retrain(self, tx, positions, iterations, mode):
+    def retrain(self, tx, positions, iterations, mode, faces=4):
         """Background job: dataset for this transmitter, then the RRF fine-tune in WSL.
 
         Runs in its own thread and reports through self.job, which /api/status
         polls. Every stage is a subprocess, so nothing here touches the GPU
         directly and the Dr.Jit per-thread flag problem does not arise.
+
+        `iterations` counts training VIEWS. With faces > 1 (the default, round 24/27) each step renders the
+        four faces of one receiver position with one colour evaluation and one Adam step at twice the
+        learning rate, so 2000 views are 500 steps: 14 s of training instead of 42 s at the same held-out
+        PSNR / dB RMSE (16.90 / 7.60 against 16.77 / 7.66 dB, round 27). faces=1 is the earlier command.
         """
         # The transmitter position becomes the run name, with the characters a
         # filesystem and a shell would object to replaced.
@@ -171,10 +176,13 @@ class Planner:
             t1 = time.time()
             # Stage 3: the trainer lives in WSL (gsplat does not build under VS 2026),
             # so it is invoked across the boundary with a Linux-side path.
+            steps = max(1, iterations // faces)
+            fast = (["--faces-per-step", str(faces), "--lr-scale", "2", "--sh-backend", "gsplat", "--eval-group"]
+                    if faces > 1 else [])
             wsl = ["wsl.exe", "-d", "Ubuntu-22.04", "-u", "ke", "--", "bash",
                    "/mnt/c/Users/Ke/Documents/GitHub/RF-3DGS/rrf_gsplat/wsl_run.sh", name,
                    "--source", f"RF-3DGS_dataset/regenerated/{name}_gpct", "--mode", mode,
-                   "--iterations", str(iterations), "--eval-every", "250", "--save-renders", "4"]
+                   "--iterations", str(steps), "--eval-every", str(max(1, 250 // faces)), "--save-renders", "4", *fast]
             # MSYS_NO_PATHCONV stops Git Bash rewriting the /mnt/... path into a Windows one.
             subprocess.run(wsl, env=dict(env, MSYS_NO_PATHCONV="1"), check=True, capture_output=True)
             out = os.path.join(REPO, "output", "rrf", name)
@@ -187,7 +195,7 @@ class Planner:
             for f in sorted(os.listdir(rdir))[:8]:
                 if f.endswith(".png"):
                     renders.append({"name": f, "pred": b64(os.path.join(rdir, f)), "truth": b64(os.path.join(src, f))})
-            log.append(f"training: {iterations} iterations in {res['train_seconds']:.0f} s")
+            log.append(f"training: {steps} steps x {faces} face(s) = {steps * faces} views in {res['train_seconds']:.0f} s")
             self.job.update(state="done", results={"final": res["final"], "history": res["history"],
                                                    "train_seconds": res["train_seconds"], "renders": renders},
                             train_seconds=time.time() - t1, total_seconds=time.time() - t0)
@@ -242,7 +250,8 @@ def make_handler(planner, sweep):
                 if planner.job.get("state") in ("generating", "training"):
                     self._json({"error": "a job is running"}, 409); return
                 t = threading.Thread(target=planner.retrain, args=(req["tx"], int(req.get("positions", 160)),
-                                                                     int(req.get("iterations", 2000)), req.get("mode", "db")), daemon=True)
+                                                                     int(req.get("iterations", 2000)), req.get("mode", "db"),
+                                                                     int(req.get("faces", 4))), daemon=True)
                 t.start(); self._json({"started": True})
             else:
                 self._json({"error": "unknown endpoint"}, 404)
