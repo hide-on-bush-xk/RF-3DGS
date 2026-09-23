@@ -80,7 +80,7 @@ class Evaluator:
         self.solves += 1; self.solve_seconds += time.time() - t0
         # Dr.Jit's allocator holds on to freed blocks; without this the benchmark
         # runs out of GPU memory partway through a long exhaustive sweep.
-        if self.solves % 25 == 0:
+        if self.cfg.flush_every and self.solves % self.cfg.flush_every == 0:
             gc.collect(); dr.flush_malloc_cache()
         if self.solves % 100 == 0:
             # A periodic memory report, so a slow leak is visible in the log.
@@ -132,6 +132,27 @@ class Evaluator:
             p = np.array([rng.uniform(*self.cfg.x_range), rng.uniform(*self.cfg.y_range), self.cfg.tx_z])
             if self.admissible(p):
                 return p
+
+    def soft_objective(self, positions):
+        """The same soft coverage, with no gradient taken.
+
+        Sionna's solver falls back to a symbolic Dr.Jit loop with three or more
+        transmitters, and reverse mode then refuses without a max_iterations
+        hint that Sionna does not pass; a derivative-free search does not need
+        the gradient, so it uses this instead and works at every K.
+        """
+        import drjit as dr
+        self.set_txs(positions)
+        paths = self.solve(self.cfg.samples)
+        a_re, a_im = paths.a
+        if a_re.shape[-1] == 0:
+            return None
+        p = dr.square(a_re) + dr.square(a_im)
+        p = dr.sum(dr.sum(dr.sum(p, axis=4), axis=3), axis=1)
+        best = p[:, 0] if len(positions) == 1 else dr.max(p, axis=1)
+        p_db = 10.0 * dr.log(best + self.noise_lin) / math.log(10.0)
+        soft = 1.0 / (1.0 + dr.exp(-(p_db - self.cfg.threshold_db) / self.cfg.width_db))
+        return float(np.asarray(dr.mean(soft)).reshape(-1)[0])
 
     def soft_objective_and_grad(self, positions):
         """Soft coverage of the per-Rx maximum over transmitters, and its gradient w.r.t. every Tx position."""
@@ -237,7 +258,7 @@ def nelder_mead(ev, start, budget):
         # raising, so Nelder-Mead simply contracts away from them.
         if not all(ev.admissible(p) for p in pts):
             return 1.0
-        obj, _, _ = ev.soft_objective_and_grad(pts)
+        obj = ev.soft_objective(pts)
         return 1.0 - (obj if obj is not None else 0.0)     # minimise 1 - coverage
     x0 = np.concatenate([[p[0], p[1]] for p in start])
     r = minimize(f, x0, method="Nelder-Mead", options={"maxfev": budget, "xatol": 0.05, "fatol": 1e-4, "initial_simplex": None})
@@ -259,6 +280,8 @@ def main():
     ap.add_argument("--variant", default="cuda_ad_mono_polarized"); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--control", type=float, nargs=3, default=None, help="known placement to evaluate first (e.g. the earlier optimum)")
     ap.add_argument("--resume", action="store_true", help="keep the methods already in --out and skip them")
+    ap.add_argument("--flush-every", type=int, default=25, help="free Dr.Jit's memory pool every N solves (0 = never)")
+    ap.add_argument("--only", default=None, help="comma-separated name_K list; run only those (one method per process keeps memory bounded)")
     cfg = ap.parse_args()
     rng = np.random.default_rng(cfg.seed)
     ev = Evaluator(cfg)
@@ -274,9 +297,11 @@ def main():
         prev = json.load(open(cfg.out)); results["methods"] = prev.get("methods", {}); results.setdefault("control", prev.get("control"))
         print(f"resuming: {sorted(results['methods'])} already in {cfg.out}")
 
+    _only = set(cfg.only.split(",")) if cfg.only else None
+
     def done(name, K):
         """Has this (method, K) already been recorded? Drives --resume."""
-        return f"{name}_K{K}" in results["methods"]
+        return f"{name}_K{K}" in results["methods"] or (_only is not None and f"{name}_K{K}" not in _only)
 
     def record(name, K, placement, solves, seconds):
         """Re-score a placement at --eval-samples and append it to the results.
