@@ -9,6 +9,12 @@ A 3D tab loads the model's .ply for a free look at the geometry. It is the
 secondary feature: a free viewpoint has no ground truth to compare against, so
 it shows what the field looks like, not whether it is right.
 
+A runs tab queries index_db.py's SQLite index over everything under output/rrf
+-- 192 runs at the time of writing, past what grep answers comfortably. The
+connection is opened read-only, so whatever query the page sends cannot modify
+the index; and the index is derived from the JSONs anyway, so the worst case is
+rebuilding it.
+
 Why a server rather than a file:// page: the error map reads pixels back out of
 a canvas, which a file:// image taints, and the .ply files are 240 MB each and
 have to stream.
@@ -187,10 +193,32 @@ def discover():
 # --------------------------------------------------------------------------
 # server
 # --------------------------------------------------------------------------
-def make_handler(models, page):
+DEFAULT_RUNS_SQL = """SELECT r.name, r.source, r.mode, r.geometry, r.opacity,
+       r.iterations, r.n_train, r.gaussians,
+       round(r.train_s) AS train_s, round(r.it_per_s, 1) AS it_per_s,
+       round(MAX(CASE WHEN m.key='psnr_rgb'         THEN m.value END), 2) AS psnr,
+       round(MAX(CASE WHEN m.key='ssim_rgb'         THEN m.value END), 3) AS ssim,
+       round(MAX(CASE WHEN m.key='rmse_db'          THEN m.value END), 2) AS rmse_db,
+       round(MAX(CASE WHEN m.key='rmse_db_in_range' THEN m.value END), 3) AS rmse_in_range
+FROM runs r LEFT JOIN metrics m ON m.run = r.name
+GROUP BY r.name ORDER BY r.mtime DESC"""
+
+
+def make_handler(models, page, db_path=None):
     by_name = {m["name"]: m for m in models}
-    index = {"models": [{k: v for k, v in m.items()} for m in models], "jet": jet_lut()}
+    index = {"models": [{k: v for k, v in m.items()} for m in models], "jet": jet_lut(),
+             "db": bool(db_path), "default_sql": DEFAULT_RUNS_SQL}
     index_bytes = json.dumps(index).encode()
+
+    # One read-only connection for the process. HTTPServer here is
+    # single-threaded, so a single connection is safe; read-only is what makes
+    # an arbitrary query from the page harmless, without having to parse SQL
+    # looking for dangerous statements.
+    con = None
+    if db_path:
+        import sqlite3
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True,
+                              check_same_thread=False)
 
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"          # needed for Range / keep-alive
@@ -240,6 +268,8 @@ def make_handler(models, page):
                 self._send(page.encode(), "text/html; charset=utf-8"); return
             if p == "/api/index":
                 self._send(index_bytes, "application/json"); return
+            if p == "/api/sql":
+                self._sql(); return
             # /img/<model>/<renders|gt>/<file>
             m = re.match(r"^/img/([^/]+)/(renders|gt)/([0-9]+\.png)$", p)
             if m and m.group(1) in by_name:
@@ -253,6 +283,32 @@ def make_handler(models, page):
                 if ply:
                     self._file(ply, "application/octet-stream"); return
             self._send(b"not found", "text/plain", 404)
+
+        def _sql(self):
+            """Run one query against the read-only index and return columns + rows.
+
+            A row cap is applied because the history table alone is 16k rows and
+            an accidental `SELECT * FROM history` would otherwise try to render
+            all of it. The error text is passed through verbatim: this is a
+            local tool and SQLite's messages say exactly what is wrong.
+            """
+            from urllib.parse import parse_qs, urlparse
+            if con is None:
+                self._send(json.dumps({"error": "no index.db; run rrf_gsplat/index_db.py"}).encode(),
+                           "application/json"); return
+            q = parse_qs(urlparse(self.path).query).get("q", [""])[0].strip()
+            limit = int(parse_qs(urlparse(self.path).query).get("limit", ["2000"])[0])
+            if not q:
+                self._send(json.dumps({"error": "empty query"}).encode(), "application/json"); return
+            try:
+                cur = con.execute(q)
+                cols = [c[0] for c in (cur.description or [])]
+                rows = cur.fetchmany(limit)
+                more = cur.fetchone() is not None
+                body = {"cols": cols, "rows": rows, "truncated": more, "limit": limit}
+            except Exception as exc:
+                body = {"error": f"{type(exc).__name__}: {exc}"}
+            self._send(json.dumps(body, default=str).encode(), "application/json")
 
         def log_message(self, fmt, *args):
             pass                                        # silence the access log
@@ -277,10 +333,20 @@ def main():
               f"PSNR {m['metrics'].get('PSNR', float('nan')):.2f}, ply {'yes' if m['ply'] else 'no'}")
     if cfg.print_index:
         return
-    page = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer.html"),
-                encoding="utf-8").read()
+    here = os.path.dirname(os.path.abspath(__file__))
+    page = open(os.path.join(here, "viewer.html"), encoding="utf-8").read()
+    # The index is optional: without it the runs tab says so and the rest works.
+    db = os.path.join(OURS, "index.db")
+    if os.path.isfile(db):
+        import sqlite3
+        n = sqlite3.connect(f"file:{db}?mode=ro", uri=True) \
+            .execute("SELECT count(*) FROM runs").fetchone()[0]
+        print(f"  index.db: {n} runs")
+    else:
+        print(f"  no index.db (build it with {os.path.join('rrf_gsplat', 'index_db.py')})")
+        db = None
     print(f"\nserving on http://localhost:{cfg.port}")
-    HTTPServer(("127.0.0.1", cfg.port), make_handler(models, page)).serve_forever()
+    HTTPServer(("127.0.0.1", cfg.port), make_handler(models, page, db)).serve_forever()
 
 
 if __name__ == "__main__":

@@ -86,6 +86,7 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
     <span class="mono" id="pos"></span>
     <span class="grow"></span>
     <button id="tabCmp" class="on">compare</button>
+    <button id="tabRuns">runs</button>
     <button id="tab3d">3D</button>
     <button id="theme" title="light / dark">&#9681;</button>
   </div>
@@ -151,6 +152,44 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
           (blue low &rarr; orange high). Click a dot to jump. The ring marks the
           current view and the spoke its facing.</p>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ---------------- runs tab ---------------- -->
+  <div id="runs" class="hidden">
+    <div class="card">
+      <h2>every run under output/rrf
+        <button data-preset="default">recent</button>
+        <button data-preset="best">best in-range RMSE</button>
+        <button data-preset="geom">geometry trained vs frozen</button>
+        <button data-preset="slow">slowest</button>
+        <button data-preset="nofinal">no final metrics</button>
+        <button data-preset="schema">schema</button>
+      </h2>
+      <p class="note">Read-only SQL over the index that
+      <span class="mono">rrf_gsplat/index_db.py</span> builds from the runs&rsquo;
+      own JSON. The index is derived: delete it and rebuild whenever the runs
+      change. Tables: <span class="mono">runs</span>,
+      <span class="mono">config(run,key,value,num)</span>,
+      <span class="mono">metrics(run,key,value)</span>,
+      <span class="mono">history(run,iteration,key,value)</span>,
+      <span class="mono">artifacts(run,kind,path,n,bytes)</span>.
+      Filter the result below with the box; it matches any cell.</p>
+      <textarea id="sql" spellcheck="false" style="width:100%;height:96px;
+        font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:12px;
+        background:var(--sunk);color:var(--ink);border:1px solid var(--line);
+        border-radius:4px;padding:8px"></textarea>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+        <button id="runSql">run <span class="mono">(Ctrl+Enter)</span></button>
+        <input id="filter" placeholder="filter rows…" style="flex:1;font:inherit;
+          padding:5px 9px;border:1px solid var(--line);border-radius:4px;
+          background:var(--sunk);color:var(--ink)">
+        <span class="mono" id="sqlInfo"></span>
+      </div>
+      <p class="note warn" id="sqlErr"></p>
+      <div style="overflow:auto;max-height:62vh;margin-top:10px">
+        <table id="sqlTable" class="mono" style="font-size:12px"></table>
       </div>
     </div>
   </div>
@@ -397,14 +436,83 @@ $("#mErr").onclick = () => { MODE.err = !MODE.err; layout(); show(); };
   el.addEventListener("pointermove", e => { if (e.buttons) move(e); });
 })();
 
-$("#tabCmp").onclick = () => {
-  $("#cmp").classList.remove("hidden"); $("#v3d").classList.add("hidden");
-  $("#tabCmp").classList.add("on"); $("#tab3d").classList.remove("on");
+const TABS = { tabCmp:"cmp", tabRuns:"runs", tab3d:"v3d" };
+for (const [btn, pane] of Object.entries(TABS)) {
+  $("#" + btn).onclick = () => {
+    for (const [b, p] of Object.entries(TABS)) {
+      $("#" + p).classList.toggle("hidden", p !== pane);
+      $("#" + b).classList.toggle("on", b === btn);
+    }
+    if (pane === "runs" && !$("#sqlTable").rows.length) runSql();
+  };
+}
+
+// ---------------------------------------------------------------- runs tab
+// The queries below are the ones worth having on a button: what changed
+// recently, what is best, whether unfreezing the geometry paid, what cost the
+// most time, and which runs never produced final metrics at all (a crashed or
+// --no-eval run looks identical to a finished one in the directory listing).
+const PRESETS = {
+  default: null,                                  // filled from /api/index
+  best: `SELECT r.name, r.source, r.mode, r.geometry, r.iterations,
+       round(m.value,3) AS rmse_in_range
+FROM runs r JOIN metrics m ON m.run=r.name AND m.key='rmse_db_in_range'
+ORDER BY m.value LIMIT 40`,
+  geom: `SELECT r.geometry, count(*) AS runs,
+       round(avg(m.value),3) AS mean_rmse_in_range,
+       round(min(m.value),3) AS best
+FROM runs r JOIN metrics m ON m.run=r.name AND m.key='rmse_db_in_range'
+GROUP BY r.geometry`,
+  slow: `SELECT name, source, mode, iterations, round(train_s) AS train_s,
+       round(it_per_s,1) AS it_per_s, gaussians
+FROM runs WHERE train_s IS NOT NULL ORDER BY train_s DESC LIMIT 30`,
+  nofinal: `SELECT r.name, r.kind, r.mode, r.iterations, r.train_s
+FROM runs r LEFT JOIN metrics m ON m.run=r.name
+WHERE m.run IS NULL ORDER BY r.name`,
+  schema: `SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name`,
 };
-$("#tab3d").onclick = () => {
-  $("#cmp").classList.add("hidden"); $("#v3d").classList.remove("hidden");
-  $("#tab3d").classList.add("on"); $("#tabCmp").classList.remove("on");
-};
+
+let LAST = null;
+async function runSql() {
+  const q = $("#sql").value.trim();
+  if (!q) return;
+  $("#sqlErr").textContent = ""; $("#sqlInfo").textContent = "…";
+  const r = await (await fetch("/api/sql?q=" + encodeURIComponent(q))).json();
+  if (r.error) {
+    $("#sqlErr").textContent = r.error; $("#sqlInfo").textContent = "";
+    $("#sqlTable").innerHTML = ""; LAST = null; return;
+  }
+  LAST = r;
+  $("#sqlInfo").textContent =
+    `${r.rows.length} rows${r.truncated ? ` (capped at ${r.limit})` : ""}`;
+  drawTable();
+}
+
+function drawTable() {
+  if (!LAST) return;
+  const f = $("#filter").value.trim().toLowerCase();
+  const rows = f ? LAST.rows.filter(row =>
+    row.some(v => String(v ?? "").toLowerCase().includes(f))) : LAST.rows;
+  const esc = s => String(s ?? "").replace(/[&<>]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
+  // The name column links straight into the compare tab when that run is one of
+  // the released models, so a row in the table is one click from its pixels.
+  const head = "<thead><tr>" + LAST.cols.map(c => `<th>${esc(c)}</th>`).join("") + "</tr></thead>";
+  const body = "<tbody>" + rows.map(row => "<tr>" + row.map((v, i) =>
+    `<td style="text-align:${typeof v === "number" ? "right" : "left"};
+      padding:2px 10px 2px 0;white-space:nowrap">${esc(v)}</td>`).join("") + "</tr>").join("") + "</tbody>";
+  $("#sqlTable").innerHTML = head + body;
+  if (f) $("#sqlInfo").textContent = `${rows.length} of ${LAST.rows.length} rows`;
+}
+
+$("#runSql").onclick = runSql;
+$("#filter").oninput = drawTable;
+$("#sql").addEventListener("keydown", e => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runSql(); }
+});
+document.querySelectorAll("[data-preset]").forEach(b => b.onclick = () => {
+  $("#sql").value = PRESETS[b.dataset.preset] ?? PRESETS.default;
+  runSql();
+});
 
 // ---------------------------------------------------------------- 3D
 // PlayCanvas is the renderer here because it is the one that evaluates the
@@ -473,6 +581,13 @@ $("#load3d").onclick = async () => {
   const sel = $("#model");
   sel.innerHTML = IDX.models
     .map(m => `<option value="${m.name}">${m.name}</option>`).join("");
+  PRESETS.default = IDX.default_sql;
+  $("#sql").value = IDX.default_sql;
+  if (!IDX.db) {
+    $("#sqlErr").textContent =
+      "no index.db — build it with: python rrf_gsplat/index_db.py";
+    $("#runSql").disabled = true;
+  }
   layout();
   pickModel(IDX.models[0].name);
 })();
