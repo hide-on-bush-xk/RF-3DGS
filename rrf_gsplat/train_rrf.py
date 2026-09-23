@@ -125,6 +125,29 @@ def ensure_split(source, test_fraction=0.2, seed=0, views_per_position=4):
     return train, test
 
 
+def check_jet_encoded(rgb, tol=12.0, sample=20000):
+    """Raise unless these images were written through the jet colormap.
+
+    rgb is [N, 3, H, W] uint8. Measures the distance from a sample of pixels to
+    the nearest of the 256 jet colours; a genuinely jet-encoded dataset scores
+    under 4, a dataset that merely happens to be colourful scores in the tens.
+    """
+    lut = jet_rgb(torch.linspace(0, 1, 256, device=rgb.device)).movedim(0, 1) * 255.0   # [256, 3]
+    flat = rgb.float().permute(0, 2, 3, 1).reshape(-1, 3)
+    if flat.shape[0] > sample:
+        idx = torch.randperm(flat.shape[0], device=flat.device)[:sample]
+        flat = flat[idx]
+    d = torch.cdist(flat, lut).min(dim=1).values
+    mean, within = float(d.mean()), float((d < tol).float().mean())
+    print(f"jet check: mean distance to the jet curve {mean:.1f}, {100 * within:.1f}% of pixels within {tol:g}")
+    if mean >= tol:
+        raise SystemExit(
+            f"this dataset was not written through the jet colormap (mean distance {mean:.1f}, "
+            f"only {100 * within:.1f}% of pixels within {tol:g}), so jet_inverse would return an "
+            f"arbitrary value per pixel. Use --mode rgb, or supply spectra_float/ with the real values."
+        )
+
+
 def load_views(source, names, views, device, want_float):
     """PNG targets as uint8 [n,3,H,W]; float spectra as float16 [n,H,W] if present."""
     from PIL import Image
@@ -558,6 +581,16 @@ def main():
     if cfg.mode in ("db", "power") and "float" not in train:
         # the released RF-3DGS data ship only the jet PNGs: invert the colormap (nearest LUT entry) and train on
         # that value in [0, 1]. The dB range is unknown, so every dB number of this run is in colour-range units.
+        #
+        # That inversion is only meaningful if the PNGs really were WRITTEN through jet, and two of the six
+        # released datasets were not: measured against the 256-entry jet curve, the mean distance of a pixel to
+        # the nearest jet colour is 0.5-3.1 for CBF/MVDR/TCBF/MPC but 69.5 for Delay and 117.5 for AoD -- 0.0% of
+        # their pixels lie within 12 of the curve. Delay has G == B in 22767360 of 22767360 held-out pixels, so it
+        # is a two-channel packing rather than a colormap lookup at all, and AoD is near-greyscale. Inverting
+        # those returns an arbitrary value per pixel, and the runs that did it scored 6.6 to 10.0 dB BELOW their
+        # rgb-mode counterparts while db mode beat rgb by about 1 dB on all four jet datasets. Refuse rather than
+        # train against a meaningless target again.
+        check_jet_encoded(train["rgb"])
         print("no spectra_float/: the value target is the jet-inverted PNG, in normalised units")
         for d in (train, test):
             d["float"] = torch.stack([jet_inverse(d["rgb"][i].float() / 255.0) for i in range(len(d["names"]))]).half()
