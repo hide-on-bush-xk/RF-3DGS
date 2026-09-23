@@ -150,16 +150,24 @@ def check_jet_encoded(rgb, tol=12.0, sample=20000):
 
 def load_views(source, names, views, device, want_float):
     """PNG targets as uint8 [n,3,H,W]; float spectra as float16 [n,H,W] if present."""
+    from concurrent.futures import ThreadPoolExecutor
     from PIL import Image
     rgb, flt, viewmats, Ks = [], [], [], []
     have_float = want_float and os.path.isdir(os.path.join(source, "spectra_float"))
     width = height = None
-    for n in names:
+
+    def read(n):
         img = np.array(Image.open(os.path.join(source, "images", n + ".png")).convert("RGB"))
+        f = np.load(os.path.join(source, "spectra_float", n + ".npy")).astype(np.float16) if have_float else None
+        return img, f
+    # Read in parallel, in order: from WSL every file crosses the 9p mount, whose per-file latency (not its
+    # bandwidth) made a 3200-view load 38 s sequentially; 16 threads read the same files in about a fifth of that.
+    with ThreadPoolExecutor(16) as ex:
+        loaded = list(ex.map(read, names))
+    for n, (img, f) in zip(names, loaded):
         rgb.append(torch.from_numpy(img).permute(2, 0, 1))
         if have_float:
-            flt.append(torch.from_numpy(np.load(os.path.join(source, "spectra_float", n + ".npy"))
-                                        .astype(np.float16)))
+            flt.append(torch.from_numpy(f))
         view, K, w, h = views[n + ".png"]
         ih, iw = img.shape[:2]
         if (iw, ih) != (w, h):
@@ -245,6 +253,7 @@ class RRF(torch.nn.Module):
         })
         self.visual_iteration = it
         self.last_info = None
+        self.sh_backend = "torch"            # --sh-backend gsplat: the same SH in gsplat's CUDA kernel (frozen geometry only)
 
     # The activated views of the raw parameters. Same convention as INRIA's
     # GaussianModel: parameters are stored unconstrained (log scale, logit
@@ -284,6 +293,13 @@ class RRF(torch.nn.Module):
         """
         if self.sh_degree == 0:
             return self.params["sh0"][:, 0, :] * 0.28209479177387814 + 0.5
+        if self.sh_backend == "gsplat" and not self.params["means"].requires_grad:
+            # gsplat's SH kernel takes any channel count and reads the camera position from a view
+            # matrix as -R^T t, so an identity rotation with t = -c places the camera at c. Same basis,
+            # same coefficients: 6e-8 from the torch path forward, and a third of its time with backward.
+            from gsplat import spherical_harmonics
+            vm = torch.eye(4, device=cam_center.device); vm[:3, 3] = -cam_center
+            return spherical_harmonics(self.sh_degree, self.means, vm[None], self.sh)[0] + 0.5
         ctx = torch.enable_grad() if self.params["means"].requires_grad else torch.no_grad()
         with ctx:
             dirs = F.normalize(self.means - cam_center[None], dim=-1)
@@ -291,22 +307,38 @@ class RRF(torch.nn.Module):
         return (self.sh * basis[:, :, None]).sum(dim=1) + 0.5
 
     def render(self, viewmat, K, width, height, span_db):
-        """One view, [C, H, W]. Three paths depending on mode, plus the optional
+        """One view, [C, H, W]: render_batch with a batch of one."""
+        return self.render_batch(viewmat[None], K[None], width, height, span_db)[0]
+
+    def render_batch(self, viewmats, Ks, width, height, span_db):
+        """B views, [B, C, H, W]. Three paths depending on mode, plus the optional
         delay-depth decomposition; span_db is the dataset's dB range, needed only
-        by the power mode and the delay term."""
+        by the power mode and the delay term.
+
+        The per-Gaussian value depends on the camera only through its position
+        (the SH direction is mean - camera centre), so views that share a
+        centre -- the four faces of one receiver position -- share one colour
+        evaluation, and gsplat rasterises them in one batched call. That
+        evaluation, not the rasteriser, is the per-view cost at 300 x 200
+        (profile_resolution.py). Views at different centres get one each.
+        """
         from gsplat import rasterization
         device = self.means.device
+        B = viewmats.shape[0]
         if self.mode == "rgb" and self.sh_degree > 0:
             # gsplat evaluates 3-channel SH in CUDA (and adds INRIA's 0.5 and
             # clamps at 0 itself); its backward is a third of the torch path's
             img, alpha, info = rasterization(
                 self.means, self.quats, self.scales, self.opacities, self.sh,
-                viewmat[None], K[None], width, height, sh_degree=self.sh_degree,
-                backgrounds=torch.zeros(1, 3, device=device))
+                viewmats, Ks, width, height, sh_degree=self.sh_degree,
+                backgrounds=torch.zeros(B, 3, device=device))
             self.last_info = info
-            return img[0].permute(2, 0, 1)
-        cam_center = torch.linalg.inv(viewmat)[:3, 3]
-        col = self.colours(cam_center)
+            return img.permute(0, 3, 1, 2)
+        centres = torch.linalg.inv(viewmats)[:, :3, 3]                   # [B, 3]
+        if B == 1 or float((centres - centres[:1]).norm(dim=-1).max()) < 1e-4:
+            col = self.colours(centres[0])                               # [N, C], shared by every view
+        else:
+            col = torch.stack([self.colours(c) for c in centres])        # [B, N, C]
         if self.mode == "rgb":
             col = col.clamp_min(0.0)
         elif self.mode == "power":
@@ -315,16 +347,17 @@ class RRF(torch.nn.Module):
             col = torch.pow(10.0, col.clamp(0.0, 1.0) * span_db / 10.0)
         img, alpha, info = rasterization(
             self.means, self.quats, self.scales, self.opacities, col,
-            viewmat[None], K[None], width, height, sh_degree=None,
-            backgrounds=torch.zeros(1, self.channels, device=device),
+            viewmats, Ks, width, height, sh_degree=None,
+            backgrounds=torch.zeros(B, self.channels, device=device),
             render_mode=("RGB+" + self.delay_depth_mode) if self.delay_channel is not None else "RGB")
         self.last_info = info
-        img = img[0].permute(2, 0, 1)                      # [C(+1),H,W]
+        img = img.permute(0, 3, 1, 2)                      # [B,C(+1),H,W]
         if self.delay_channel is not None:
             # tau = tau_scatter + |p - mu| / c: the second term is the alpha-composited
             # depth gsplat renders natively (sum_i w_i d_i, metres); the learned channel
             # keeps only the view-independent part. In the channel's normalised units.
-            depth_m = img[self.channels]
+            K = Ks[0]                                      # one camera model per dataset (load_views checks the size)
+            depth_m = img[:, self.channels]
             if self.delay_range == "euclid":
                 # gsplat's depth is the camera z; the path length is z / cos(theta) along the pixel's ray
                 # (1.41 at the edge and 1.56 at the corner of a 90-degree face). Measured on the lobby: the
@@ -335,8 +368,8 @@ class RRF(torch.nn.Module):
                     v = (torch.arange(height, device=device, dtype=torch.float32) + 0.5 - key[3]) / key[1]
                     self._range_factor = (key, torch.sqrt(1.0 + u[None, :] ** 2 + v[:, None] ** 2))
                 depth_m = depth_m * self._range_factor[1]
-            img = img[:self.channels].clone()
-            img[self.delay_channel] = img[self.delay_channel] + depth_m / (0.299792458 * self.delay_span_ns)
+            img = img[:, :self.channels].clone()
+            img[:, self.delay_channel] = img[:, self.delay_channel] + depth_m / (0.299792458 * self.delay_span_ns)
         if self.mode == "power":
             img = torch.log10(img + 1e-12) * 10.0 / span_db
         return img
@@ -374,14 +407,76 @@ def psnr(a, b):
     return float(20 * torch.log10(1.0 / torch.sqrt(mse + 1e-12)))
 
 
+class RenderWriter:
+    """Writes the saved renders on background threads, each file serialised in memory and written in one call.
+
+    np.save straight to a file under /mnt/c took about 100 ms per 1.2 MB render inside the evaluation (its
+    ndarray.tofile path; the same call in a bare script takes 8 ms, and the cause was not isolated), which made
+    writing 640 renders a minute. One write() of the serialised bytes takes 16 ms, and eight threads overlap
+    it with the rendering. The file contents are the same bytes np.save would write.
+    """
+
+    def __init__(self, threads=8):
+        from concurrent.futures import ThreadPoolExecutor
+        self.ex, self.futs = ThreadPoolExecutor(threads), []
+
+    @staticmethod
+    def _write(path, data):
+        with open(path, "wb") as fid:
+            fid.write(data)
+
+    def npy(self, path, arr):
+        import io
+        buf = io.BytesIO(); np.save(buf, np.ascontiguousarray(arr))
+        self.futs.append(self.ex.submit(self._write, path, buf.getvalue()))
+
+    def png(self, path, rgb_uint8):
+        import io
+        from PIL import Image
+        buf = io.BytesIO(); Image.fromarray(rgb_uint8).save(buf, format="PNG")
+        self.futs.append(self.ex.submit(self._write, path, buf.getvalue()))
+
+    def close(self):
+        for f in self.futs:
+            f.result()                      # re-raises a failed write here rather than losing it
+        self.ex.shutdown()
+
+
+def render_views(model, data, idx, span, group=False, max_faces=4):
+    """(i, [C, H, W]) for every i in idx, in order.
+
+    With group, consecutive indices whose cameras share a centre (the faces of
+    one receiver position; images are position-major) render in one batched
+    call with one colour evaluation. The images are the same either way; only
+    the work differs.
+    """
+    if not group:
+        for i in idx:
+            yield i, model.render(data["viewmats"][i], data["Ks"][i], data["width"], data["height"], span)
+        return
+    if "centres" not in data:
+        data["centres"] = torch.linalg.inv(data["viewmats"])[:, :3, 3]
+    c = data["centres"]
+    run = []
+    for i in idx:
+        if run and (len(run) == max_faces or float((c[i] - c[run[0]]).norm()) > 1e-4):
+            yield from zip(run, model.render_batch(data["viewmats"][run], data["Ks"][run], data["width"], data["height"], span))
+            run = []
+        run.append(i)
+    if run:
+        yield from zip(run, model.render_batch(data["viewmats"][run], data["Ks"][run], data["width"], data["height"], span))
+
+
 @torch.no_grad()
-def evaluate(model, data, idx, span, vmin, save_dir=None):
+def evaluate(model, data, idx, span, vmin, save_dir=None, group=False):
     """dB RMSE against the float truth, and PSNR/SSIM on jet RGB for every mode."""
     tot = {"psnr_rgb": 0.0, "ssim_rgb": 0.0, "rmse_db": 0.0, "mae_db": 0.0,
            "rmse_db_in_range": 0.0, "n": 0}
     have_float = "float" in data
-    for i in idx:
-        img = model.render(data["viewmats"][i], data["Ks"][i], data["width"], data["height"], span)
+    writer = RenderWriter() if save_dir is not None else None
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+    for i, img in render_views(model, data, idx, span, group):
         gt_rgb = data["rgb"][i].float() / 255.0
         if model.mode == "rgb":
             pred_rgb = img.clamp(0, 1)
@@ -408,19 +503,19 @@ def evaluate(model, data, idx, span, vmin, save_dir=None):
             tot["rmse_db_in_range"] += e
             tot["mae_db"] += float((pred_norm - gt_norm).abs().mean()) * span
         tot["n"] += 1
-        if save_dir is not None:
-            from PIL import Image
-            os.makedirs(save_dir, exist_ok=True)
-            Image.fromarray((pred_rgb.permute(1, 2, 0).cpu().numpy() * 255).round().astype(np.uint8)
-                            ).save(os.path.join(save_dir, data["names"][i] + ".png"))
-            np.save(os.path.join(save_dir, data["names"][i] + ".npy"),
-                    (pred_norm * span + vmin).cpu().numpy().astype(np.float32))
+        if writer is not None:
+            writer.png(os.path.join(save_dir, data["names"][i] + ".png"),
+                       (pred_rgb.permute(1, 2, 0).cpu().numpy() * 255).round().astype(np.uint8))
+            writer.npy(os.path.join(save_dir, data["names"][i] + ".npy"),
+                       (pred_norm * span + vmin).cpu().numpy().astype(np.float32))
+    if writer is not None:
+        writer.close()
     n = max(tot.pop("n"), 1)
     return {k: v / n for k, v in tot.items()}
 
 
 @torch.no_grad()
-def evaluate_multi(model, data, idx, ch_ranges, channel_names, save_dir=None, mask_channel=0):
+def evaluate_multi(model, data, idx, ch_ranges, channel_names, save_dir=None, mask_channel=0, group=False):
     """Per-channel errors in native units on pixels the mask channel reaches;
     PSNR/SSIM of the mask channel (the power) after jet mapping."""
     lo, hi = ch_ranges[:, 0, None, None], ch_ranges[:, 1, None, None]
@@ -433,8 +528,11 @@ def evaluate_multi(model, data, idx, ch_ranges, channel_names, save_dir=None, ma
             tot[f"rmse_{channel_names[c]}"] = 0.0
     if pair:
         tot["rmse_aod_az"] = 0.0; tot["median_aod_az"] = 0.0
-    for i in idx:
-        img = model.render(data["viewmats"][i], data["Ks"][i], data["width"], data["height"], span0).clamp(0, 1)
+    writer = RenderWriter() if save_dir is not None else None
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+    for i, img in render_views(model, data, idx, span0, group):
+        img = img.clamp(0, 1)
         gt_f = data["float"][i].float()
         gt_n = ((gt_f - lo) / (hi - lo)).clamp(0, 1)
         pred_f = img * (hi - lo) + lo
@@ -463,9 +561,10 @@ def evaluate_multi(model, data, idx, ch_ranges, channel_names, save_dir=None, ma
                 d = d * 180.0
             tot[f"rmse_{name}"] += float(torch.sqrt((d[mask] ** 2).mean())) if mask.any() else 0.0
         tot["n"] += 1
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            np.save(os.path.join(save_dir, data["names"][i] + ".npy"), pred_f.cpu().numpy().astype(np.float32))
+        if writer is not None:
+            writer.npy(os.path.join(save_dir, data["names"][i] + ".npy"), pred_f.cpu().numpy().astype(np.float32))
+    if writer is not None:
+        writer.close()
     n = max(tot.pop("n"), 1)
     return {k: v / n for k, v in tot.items()}
 
@@ -530,9 +629,27 @@ def main():
                     help="multi mode: add the rendered depth / c to the delay channel (analytic range + learned residual)")
     ap.add_argument("--no-eval", action="store_true",
                     help="skip the final test pass (adaptation runs whose only product is the geometry)")
+    # speed: the first two change only the work, not the numbers; the third changes the optimisation
+    ap.add_argument("--sh-backend", choices=["torch", "gsplat"], default="torch",
+                    help="non-rgb modes, frozen geometry: evaluate the SH colour in gsplat's CUDA kernel "
+                         "(the same values; a third of the time with backward)")
+    ap.add_argument("--eval-group", action="store_true",
+                    help="render the faces of one receiver position together at evaluation (one colour "
+                         "evaluation per position; identical images)")
+    ap.add_argument("--faces-per-step", type=int, default=1,
+                    help="each step renders this many faces of ONE receiver position (they share the colour "
+                         "evaluation) and takes one Adam step on their mean loss; 1 = one random view per step")
+    ap.add_argument("--lr-scale", type=float, default=1.0,
+                    help="multiply every learning rate (e.g. sqrt(faces-per-step) for the batched step)")
+    ap.add_argument("--test-source", default=None,
+                    help="take the held-out views (poses, targets, render size) from this dataset instead: the same "
+                         "positions and image names, e.g. rendered at another resolution or ray budget. The split and "
+                         "the value ranges still come from --source.")
     cfg = ap.parse_args()
     if cfg.densify == "mcmc":
         cfg.train_geometry = True
+    if cfg.faces_per_step > 1 and cfg.densify != "none":
+        raise SystemExit("--faces-per-step > 1 is not wired into the densification strategy's per-view statistics")
 
     torch.manual_seed(cfg.seed)
     device = torch.device("cuda")
@@ -577,7 +694,12 @@ def main():
         train_names = [train_names[p * per_pos + k] for p in pos_idx for k in range(per_pos)]
     t0 = time.time()
     train = load_views(cfg.source, train_names, views, device, want_float=True)
-    test = load_views(cfg.source, test_names, views, device, want_float=True)
+    if cfg.test_source:
+        test = load_views(cfg.test_source, test_names, read_colmap_text(os.path.join(cfg.test_source, "sparse", "0")),
+                          device, want_float=True)
+        print(f"held-out views from {cfg.test_source}: {test['width']}x{test['height']} (training at {train['width']}x{train['height']})")
+    else:
+        test = load_views(cfg.source, test_names, views, device, want_float=True)
     if cfg.mode in ("db", "power") and "float" not in train:
         # the released RF-3DGS data ship only the jet PNGs: invert the colormap (nearest LUT entry) and train on
         # that value in [0, 1]. The dB range is unknown, so every dB number of this run is in colour-range units.
@@ -600,6 +722,7 @@ def main():
     channels = 3 if cfg.mode == "rgb" else (int(ch_ranges.shape[0]) if cfg.mode == "multi" else 1)
     model = RRF(cfg.checkpoint, cfg.mode, channels, cfg.sh_degree, device,
                 train_opacity=not cfg.freeze_opacity, train_geometry=cfg.train_geometry)
+    model.sh_backend = cfg.sh_backend
     if cfg.init_from:
         model.load_state(torch.load(cfg.init_from, map_location=device))
         if cfg.init_geometry_only:
@@ -617,6 +740,7 @@ def main():
     # which is what gsplat's strategies expect.
     lrs = {"sh0": cfg.feature_lr, "shN": cfg.feature_lr / 20.0, "opacities": cfg.opacity_lr,
            "means": 1.6e-5 * model.spatial_lr_scale, "scales": 5e-3, "quats": 1e-3}
+    lrs = {k: v * cfg.lr_scale for k, v in lrs.items()}
     optimizers = {name: torch.optim.Adam([p], lr=lrs[name], eps=1e-15)
                   for name, p in model.params.items() if p.requires_grad}
     geom_mask = None
@@ -676,19 +800,46 @@ def main():
             l1 = l1 + ((img[others] - gt[others]).abs() * mask[None]).sum() / (mask.sum() * len(others) + 1)
         return (1 - cfg.lambda_dssim) * l1 + cfg.lambda_dssim * (1 - ssim(img[mc:mc+1][None], gt[mc:mc+1][None]))
 
+    def view_loss(img, gt):
+        """The loss of one rendered view against its target."""
+        if cfg.mode == "multi":
+            return multi_loss(img, gt)
+        return (1 - cfg.lambda_dssim) * l1_loss(img, gt) + cfg.lambda_dssim * (1 - ssim(img[None], gt[None]))
+
     n_train = len(train_names)
+    groups = None
+    if cfg.faces_per_step > 1:
+        # receiver positions = runs of consecutive training views whose cameras share a centre (images are
+        # position-major and the split holds out whole positions, so a position's faces are adjacent)
+        c = torch.linalg.inv(train["viewmats"])[:, :3, 3].cpu()
+        groups, cur = [], [0]
+        for i in range(1, n_train):
+            if float((c[i] - c[cur[0]]).norm()) < 1e-4:
+                cur.append(i)
+            else:
+                groups.append(cur); cur = [i]
+        groups.append(cur)
+        sizes = np.bincount([len(g) for g in groups])
+        print(f"faces per step {cfg.faces_per_step}: {len(groups)} receiver positions, "
+              f"faces per position {{{', '.join(f'{s}: {int(n)}' for s, n in enumerate(sizes) if n)}}}")
     eval_idx = list(range(0, len(test_names), max(1, len(test_names) // cfg.eval_subset)))[:cfg.eval_subset]
     history = []
+    running_eval_seconds = 0.0
     torch.cuda.synchronize(); t_train = time.time()
     rng = np.random.default_rng(cfg.seed)
     for it in range(1, cfg.iterations + 1):
-        i = int(rng.integers(n_train))
-        img = model.render(train["viewmats"][i], train["Ks"][i], train["width"], train["height"], span)
-        gt = target(i)
-        if cfg.mode == "multi":
-            loss = multi_loss(img, gt)
+        if groups is None:
+            i = int(rng.integers(n_train))
+            img = model.render(train["viewmats"][i], train["Ks"][i], train["width"], train["height"], span)
+            loss = view_loss(img, target(i))
         else:
-            loss = (1 - cfg.lambda_dssim) * l1_loss(img, gt) + cfg.lambda_dssim * (1 - ssim(img[None], gt[None]))
+            # one receiver position per step: its faces share the colour evaluation, and one Adam
+            # step takes their mean loss
+            g = groups[int(rng.integers(len(groups)))]
+            if len(g) > cfg.faces_per_step:
+                g = sorted(rng.choice(g, cfg.faces_per_step, replace=False).tolist())
+            imgs = model.render_batch(train["viewmats"][g], train["Ks"][g], train["width"], train["height"], span)
+            loss = sum(view_loss(imgs[k], target(i)) for k, i in enumerate(g)) / len(g)
         if strategy is not None:
             # gsplat's MCMC regularisers, its defaults
             loss = loss + 0.01 * model.opacities.abs().mean() + 0.01 * model.scales.abs().mean()
@@ -707,12 +858,15 @@ def main():
             strategy.step_post_backward(model.params, optimizers, state, it, model.last_info,
                                         lr=lrs["means"])
         if it % cfg.eval_every == 0 or it == cfg.iterations:
-            torch.cuda.synchronize()
-            m = (evaluate_multi(model, test, eval_idx, ch_ranges, channel_names, mask_channel=cfg.mask_channel)
+            torch.cuda.synchronize(); t_ev = time.time()
+            m = (evaluate_multi(model, test, eval_idx, ch_ranges, channel_names, mask_channel=cfg.mask_channel,
+                                group=cfg.eval_group)
                  if cfg.mode == "multi"
-                 else evaluate(model, test, eval_idx, span, vmin))
+                 else evaluate(model, test, eval_idx, span, vmin, group=cfg.eval_group))
+            torch.cuda.synchronize(); running_eval_seconds += time.time() - t_ev
             m.update(iteration=it, seconds=time.time() - t_train, loss=float(loss.detach()),
-                     gaussians=model.n_gaussians)
+                     gaussians=model.n_gaussians, views_seen=it * cfg.faces_per_step,
+                     seconds_excl_eval=time.time() - t_train - running_eval_seconds)
             history.append(m)
             print(f"  it {it:6d}  {m['seconds']:6.0f} s  loss {m['loss']:.4f}  "
                   f"PSNR(jet) {m['psnr_rgb']:5.2f}  SSIM {m['ssim_rgb']:.3f}  "
@@ -722,24 +876,36 @@ def main():
 
     os.makedirs(cfg.out, exist_ok=True)
     all_idx = list(range(len(test_names)))
+    # One pass scores every held-out view and, when all of them are to be written, writes them too; a
+    # partial --save-renders still gets its own second pass. (Earlier versions always rendered twice.)
+    save_dir = os.path.join(cfg.out, "renders") if cfg.save_renders else None
+    save_all = cfg.save_renders < 0 or cfg.save_renders >= len(all_idx)
+    t_eval = time.time()
     if cfg.no_eval:
         # an adaptation run whose only product is its geometry: skip the test pass
         final = None
     elif cfg.mode == "multi":
-        final = evaluate_multi(model, test, all_idx, ch_ranges, channel_names, mask_channel=cfg.mask_channel)
-        if cfg.save_renders:
-            evaluate_multi(model, test, (all_idx if cfg.save_renders < 0 else all_idx[:cfg.save_renders]), ch_ranges, channel_names,
-                           save_dir=os.path.join(cfg.out, "renders"), mask_channel=cfg.mask_channel)
+        final = evaluate_multi(model, test, all_idx, ch_ranges, channel_names, mask_channel=cfg.mask_channel,
+                               save_dir=save_dir if save_all else None, group=cfg.eval_group)
+        if save_dir and not save_all:
+            evaluate_multi(model, test, all_idx[:cfg.save_renders], ch_ranges, channel_names,
+                           save_dir=save_dir, mask_channel=cfg.mask_channel, group=cfg.eval_group)
     else:
-        final = evaluate(model, test, all_idx, span, vmin)
-        if cfg.save_renders:
-            evaluate(model, test, (all_idx if cfg.save_renders < 0 else all_idx[:cfg.save_renders]), span, vmin,
-                     save_dir=os.path.join(cfg.out, "renders"))
+        final = evaluate(model, test, all_idx, span, vmin, save_dir=save_dir if save_all else None,
+                         group=cfg.eval_group)
+        if save_dir and not save_all:
+            evaluate(model, test, all_idx[:cfg.save_renders], span, vmin, save_dir=save_dir, group=cfg.eval_group)
+    torch.cuda.synchronize(); eval_seconds = time.time() - t_eval
     torch.save(model.state(), os.path.join(cfg.out, "rrf_state.pt"))
     result = {"config": vars(cfg), "db_range": [vmin, vmax], "n_train": n_train,
               "channels": channel_names, "channel_ranges": meta.get("channel_ranges"),
               "n_test": len(test_names), "gaussians": model.n_gaussians,
               "train_seconds": train_seconds, "iters_per_second": cfg.iterations / train_seconds,
+              "running_eval_seconds": running_eval_seconds,
+              "train_seconds_excl_running_eval": train_seconds - running_eval_seconds,
+              "views_seen": cfg.iterations * cfg.faces_per_step,
+              "load_seconds": t_train - t_start, "eval_seconds": eval_seconds,
+              "gpu": torch.cuda.get_device_name(0),
               "total_seconds": time.time() - t_start, "history": history, "final": final}
     with open(os.path.join(cfg.out, "results.json"), "w") as fid:
         json.dump(result, fid, indent=1)
