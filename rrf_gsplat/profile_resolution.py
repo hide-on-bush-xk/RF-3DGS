@@ -53,6 +53,10 @@ def main():
                     help="render size as a fraction of the dataset's 300x200")
     ap.add_argument("--reps", type=int, default=30)
     ap.add_argument("--warmup", type=int, default=5)
+    ap.add_argument("--faces", type=int, default=1, choices=[1, 4],
+                    help="4: the clean step renders one position's four faces with one colour evaluation and one Adam step "
+                         "(train_rrf.py --faces-per-step 4); the per-part split is only timed for 1")
+    ap.add_argument("--sh-backend", choices=["torch", "gsplat"], default="torch")
     cfg = ap.parse_args()
     device = torch.device("cuda")
     src = os.path.join(REPO, cfg.source)
@@ -71,6 +75,7 @@ def main():
         channels = 1
     vmin, vmax = meta["spec_min_db"], meta["spec_max_db"]; span = vmax - vmin
     model = RRF(cfg.checkpoint, cfg.mode, channels, 3, device)
+    model.sh_backend = cfg.sh_backend
     if cfg.delay_depth:
         names_ch = meta["channels"]
         model.delay_channel = names_ch.index("delay_ns")
@@ -108,7 +113,7 @@ def main():
         Ks = data["Ks"].clone(); Ks[:, :2, :] *= s
         tg = [target(i, w, h) for i in range(len(pick))]
         parts = {"colours": [], "render_fwd": [], "loss_bwd": [], "adam": [], "step": []}
-        for r in range(cfg.warmup + cfg.reps):
+        for r in range(cfg.warmup + cfg.reps if cfg.faces == 1 else 0):
             i = r % len(pick)
             vm, K = data["viewmats"][i], Ks[i]
             torch.cuda.synchronize(); t_all = time.perf_counter()
@@ -128,29 +133,38 @@ def main():
         for r in range(cfg.warmup + cfg.reps):
             i = r % len(pick)
             torch.cuda.synchronize(); t0 = time.perf_counter()
-            img = model.render(data["viewmats"][i], Ks[i], w, h, span)
+            if cfg.faces == 1:
+                img = model.render(data["viewmats"][i], Ks[i], w, h, span)
+                loss = loss_fn(img, tg[i])
+            else:
+                g = list(range(4 * (r % 4), 4 * (r % 4) + 4))              # the four faces of one position
+                imgs = model.render_batch(data["viewmats"][g], Ks[g], w, h, span)
+                loss = sum(loss_fn(imgs[k], tg[j]) for k, j in enumerate(g)) / 4
             for o in opts.values():
                 o.zero_grad(set_to_none=True)
-            loss_fn(img, tg[i]).backward()
+            loss.backward()
             for o in opts.values():
                 o.step()
             torch.cuda.synchronize()
             if r >= cfg.warmup:
                 clean.append((time.perf_counter() - t0) * 1000)
-        row = {"scale": s, "width": w, "height": h, "pixels": w * h,
-               **{f"{k}_ms_median": float(np.median(v)) for k, v in parts.items()},
+        row = {"scale": s, "width": w, "height": h, "pixels": w * h, "faces_per_step": cfg.faces,
+               "ms_per_view": float(np.median(clean)) / cfg.faces,
+               **{f"{k}_ms_median": (float(np.median(v)) if v else None) for k, v in parts.items()},
                "clean_step_ms_median": float(np.median(clean)), "clean_step_ms_p10": float(np.percentile(clean, 10)),
                "clean_step_ms_p90": float(np.percentile(clean, 90))}
         rows.append(row)
-        print(f"{w:4d}x{h:<4d} step {row['clean_step_ms_median']:6.1f} ms (p10 {row['clean_step_ms_p10']:.1f}, p90 {row['clean_step_ms_p90']:.1f}) | "
-              f"colours {row['colours_ms_median']:5.1f}  render fwd {row['render_fwd_ms_median']:5.1f}  "
-              f"loss+bwd {row['loss_bwd_ms_median']:5.1f}  adam {row['adam_ms_median']:5.1f}")
+        print(f"{w:4d}x{h:<4d} step {row['clean_step_ms_median']:6.1f} ms (p10 {row['clean_step_ms_p10']:.1f}, p90 {row['clean_step_ms_p90']:.1f}), "
+              f"{row['ms_per_view']:5.1f} ms per view" + ("" if cfg.faces > 1 else
+              f" | colours {row['colours_ms_median']:5.1f}  render fwd {row['render_fwd_ms_median']:5.1f}  "
+              f"loss+bwd {row['loss_bwd_ms_median']:5.1f}  adam {row['adam_ms_median']:5.1f}"))
     out = {"mode": cfg.mode, "delay_depth": cfg.delay_depth, "channels": channels, "gaussians": model.n_gaussians,
            "gpu": torch.cuda.get_device_name(0), "gpu_util_before": util_before, "gpu_util_after": gpu_util(),
            "reps": cfg.reps, "warmup": cfg.warmup, "rows": rows,
            "note": "render_fwd includes the colour evaluation; 'colours' is that evaluation timed alone. "
                    "clean_step = render + loss + backward + Adam, the train_rrf.py step."}
-    path = os.path.join(REPO, "output", "rrf", f"profile_resolution_{cfg.mode}.json")
+    tag = "" if (cfg.faces == 1 and cfg.sh_backend == "torch") else f"_f{cfg.faces}_{cfg.sh_backend}"
+    path = os.path.join(REPO, "output", "rrf", f"profile_resolution_{cfg.mode}{tag}.json")
     json.dump(out, open(path, "w"), indent=1)
     print(f"GPU before: {util_before}; wrote {path}")
 
