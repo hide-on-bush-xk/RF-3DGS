@@ -45,24 +45,29 @@ input[type=range] { accent-color:var(--accent); }
 .card { background:var(--surface); border:1px solid var(--line);
   border-radius:6px; padding:12px; }
 .card h2 { font-size:13px; margin:0 0 8px; font-weight:600; }
-/* The panel wall is a fixed grid, never auto-fill: one row per prediction and
-   a label gutter, so every prediction sits in the SAME column at the SAME width
-   and can be read down the page. Auto-fill wrapped the panels into whatever
-   order fitted, which is the one thing a comparison must not do. */
-.wall { display:grid; gap:10px 12px; align-items:start;
-  grid-template-columns:118px 1fr 1fr; }
-.wall.noerr { grid-template-columns:118px 1fr; }
-.wall .lab { font-size:11px; line-height:1.45; padding-top:2px; min-width:0;
+/* The panel wall is a fixed grid of equal columns, never auto-fill: ONE MODEL
+   PER CELL, its prediction and error stacked inside. Equal columns is what makes
+   the comparison legible -- every prediction is the same width and the first
+   canvas in every cell, so reading across a row compares like with like. An
+   auto-fill grid wrapped panels into whatever order fitted the window, which is
+   the one thing a comparison must not do. The column count is a variable rather
+   than a media query because how many fit is a judgement about the images, not
+   about the viewport. */
+.wall { display:grid; gap:12px; align-items:start;
+  grid-template-columns:repeat(var(--cols,3),minmax(0,1fr)); }
+.wall .cell { min-width:0; }
+.wall .lab { font-size:11px; line-height:1.4; margin-bottom:4px; min-width:0;
   font-family:"IBM Plex Mono",ui-monospace,monospace; color:var(--muted);
   overflow-wrap:anywhere; }
-.wall .lab b { display:block; color:var(--ink); font-size:12px; font-weight:600; }
+.wall .lab b { color:var(--ink); font-size:12px; font-weight:600; }
 .wall .lab .rel { color:var(--s2); }
-.wall .cell { min-width:0; }
-.wall .cap { font-size:11px; color:var(--muted); margin-top:4px;
+.wall .lab .sc { float:right; color:var(--ink); }
+.wall .cap { font-size:10px; color:var(--muted); margin-top:3px;
   font-family:"IBM Plex Mono",ui-monospace,monospace; }
+.wall .cap + canvas { margin-top:7px; }
 .wall .target canvas { outline:2px solid var(--accent); outline-offset:-2px; }
 .wall .head { grid-column:1/-1; font-size:11px; color:var(--muted);
-  border-top:1px solid var(--line); padding-top:8px; margin-top:2px; }
+  border-top:1px solid var(--line); padding-top:8px; }
 .chips { display:flex; gap:6px; flex-wrap:wrap; margin:0 0 10px; }
 .chip { font:inherit; font-size:12px; padding:3px 8px; border-radius:11px;
   border:1px solid var(--line); background:var(--sunk); color:var(--muted);
@@ -129,6 +134,12 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
             <button id="mSwipe">swipe</button>
             <button id="mErr" class="on">error map</button>
             <button id="mVis" class="on">visual</button>
+            <label style="font-weight:400;color:var(--muted);margin-left:6px">columns
+              <select id="cols">
+                <option value="0">auto</option>
+                <option>2</option><option>3</option><option>4</option>
+                <option>5</option><option>6</option>
+              </select></label>
           </h2>
 
           <div class="chips" id="chips"></div>
@@ -227,6 +238,7 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
 const $ = s => document.querySelector(s);
 let IDX = null, MODEL = null, VIEW = 0;
 let SEL = new Set();                 // prediction ids on show, insertion-ordered
+let SHOWN = 0;                       // generation counter, see show()
 let MODE = { swipe:false, err:true, vis:true };
 let REV = null;                      // 32x32x32 RGB -> level, built from the jet LUT
 
@@ -458,35 +470,47 @@ function el(tag, cls, html) {
   return n;
 }
 
-function labelCell(p) {
+// ---------------------------------------------------------------- cells
+// One model per cell, everything about it stacked inside: label, prediction,
+// and its error map underneath. That is what lets the wall be several columns
+// wide without the comparison coming apart -- the prediction is always the
+// first canvas of a cell, so reading across a row still compares predictions.
+function labelHtml(p) {
   const tag = p.kind === "released"
     ? `<span class="rel">RF-3DGS released</span>` : "ours";
-  return el("div", "lab",
-    `<b>${p.label}</b>${tag} · ${kIt(p)}<br>PSNR ${fmt(p.psnr[VIEW])}`);
+  return `<span class="sc">${fmt(p.psnr[VIEW])}</span>` +
+         `<b>${p.label}</b><br>${tag} · ${kIt(p)}`;
 }
 
-function imgCell(im, cap, cls) {
-  const c = el("div", "cell" + (cls ? " " + cls : ""));
+function cellFor(lab, build) {
+  const c = el("div", "cell");
+  c.appendChild(el("div", "lab", lab));
+  build(c);
+  return c;
+}
+
+function addCanvas(c, im, cap) {
   const cv = el("canvas");
   c.appendChild(cv);
   toCanvas(cv, im);
   if (cap) c.appendChild(el("div", "cap", cap));
-  return c;
+  return cv;
 }
 
-function swipeCell(under, over, cap, anchor) {
-  const c = el("div", "cell");
-  const sw = el("div", "swipe" + (anchor ? " anchor" : ""));
-  const cu = el("canvas", "under"), co = el("canvas", "over");
-  sw.append(cu, co, el("div", "handle"));
-  c.append(sw, el("div", "cap", cap));
-  toCanvas(cu, under);
-  toCanvas(co, over);
-  bindSwipe(sw);
-  return c;
+// how many columns to use when the control says "auto": as few rows as the
+// images allow, since the complaint auto exists to answer is not seeing them all
+function autoCols(n) {
+  return Math.min(Math.max(n, 2), 6);
 }
 
 async function show() {
+  // show() awaits image loads, so two calls can be in flight at once and the
+  // earlier one can finish last and repaint a stale wall. That is what made
+  // a deep link's model selection come out as whatever pickModel drew first.
+  // Each call takes a generation; anything superseded during its awaits drops
+  // out rather than touching the DOM. It also stops the flicker when an arrow
+  // key is held down.
+  const gen = ++SHOWN;
   const it = MODEL.items[VIEW];
   $("#pos").textContent = `${VIEW + 1} / ${MODEL.views}`;
   $("#vName").textContent = it.name ?? `#${it.i}`;
@@ -520,9 +544,10 @@ async function show() {
     ]);
     if (MODE.vis && MODEL.visual) iv = await loadImage(`/visual/${MODEL.name}/${VIEW}`);
   } catch (e) {
-    $("#errNote").textContent = "could not load " + e.message;
+    if (gen === SHOWN) $("#errNote").textContent = "could not load " + e.message;
     return;
   }
+  if (gen !== SHOWN) return;                 // a newer show() is already drawing
   const w = ig.naturalWidth, h = ig.naturalHeight;
 
   // the room sits with the floor plan, not in the wall: it is context for where
@@ -537,18 +562,25 @@ async function show() {
 
   const wall = $("#wall");
   wall.innerHTML = "";
-  // in swipe mode the target is inside every widget, so there is no error
-  // column and no separate target row
-  wall.classList.toggle("noerr", !showErr);
+  // swipe puts the target inside every widget, so there is no separate target
+  // cell and the cell count is just the number of models
+  const n = preds.length + (MODE.swipe ? 0 : 1);
+  wall.style.setProperty("--cols", +$("#cols").value || autoCols(n));
 
   if (MODE.swipe) {
     wall.appendChild(el("div", "head",
-      "Each row cuts the target against one model at the same column. " +
-      "Drag any row — they all follow."));
+      "Every cell cuts the target against one model at the same column. " +
+      "Drag any of them — they all follow."));
     preds.forEach((p, k) => {
-      wall.appendChild(labelCell(p));
-      wall.appendChild(swipeCell(ig, ips[k],
-        `left: ${p.label} · right: target`, k === 0));
+      wall.appendChild(cellFor(labelHtml(p), c => {
+        const sw = el("div", "swipe" + (k === 0 ? " anchor" : ""));
+        const cu = el("canvas", "under"), co = el("canvas", "over");
+        sw.append(cu, co, el("div", "handle"));
+        c.append(sw, el("div", "cap", `left ${p.label} · right target`));
+        toCanvas(cu, ig);
+        toCanvas(co, ips[k]);
+        bindSwipe(sw);
+      }));
     });
     applySplit();
     drawPlan();
@@ -556,28 +588,25 @@ async function show() {
     return;
   }
 
-  // target first, in the same column every prediction will use
-  wall.appendChild(el("div", "lab", "<b>target</b>the dataset spectrum"));
-  wall.appendChild(imgCell(ig, `${w}×${h}`, "target"));
-  if (showErr) wall.appendChild(el("div", "cell"));   // keeps the grid on-column
+  // the target leads, in the same cell shape every prediction will use
+  const tc = cellFor("<b>target</b><br>the dataset spectrum",
+                     c => addCanvas(c, ig, `${w}×${h}`));
+  tc.classList.add("target");
+  wall.appendChild(tc);
 
   let worst = null;
-
   preds.forEach((p, k) => {
-    wall.appendChild(labelCell(p));
-    wall.appendChild(imgCell(ips[k], "prediction"));
-    if (showErr) {
-      const c = el("div", "cell");
+    wall.appendChild(cellFor(labelHtml(p), c => {
+      addCanvas(c, ips[k], "prediction");
+      if (!showErr) return;
+      const dp = toCanvas(document.createElement("canvas"), ips[k]).getImageData(0, 0, w, h).data;
       const cv = el("canvas");
       c.appendChild(cv);
-      const dp = toCanvas(document.createElement("canvas"), ips[k]).getImageData(0, 0, w, h).data;
       const st = drawError(cv, dp, dg, w, h);
       c.appendChild(el("div", "cap",
-        `signed error · peak ${st.maxAbs} levels · mean ` +
-        `${st.mean >= 0 ? "+" : ""}${st.mean.toFixed(2)}`));
-      wall.appendChild(c);
+        `error · peak ${st.maxAbs} · mean ${st.mean >= 0 ? "+" : ""}${st.mean.toFixed(2)}`));
       if (!worst || st.maxAbs > worst.maxAbs) worst = { ...st, label: p.label };
-    }
+    }));
   });
 
   $("#errNote").innerHTML =
@@ -641,6 +670,7 @@ $("#mSide").onclick = () => { MODE.swipe = false; layout(); show(); };
 $("#mSwipe").onclick = () => { MODE.swipe = true; layout(); show(); };
 $("#mErr").onclick = () => { MODE.err = !MODE.err; layout(); show(); };
 $("#mVis").onclick = () => { MODE.vis = !MODE.vis; layout(); show(); };
+$("#cols").onchange = () => show();
 
 const TABS = { tabCmp:"cmp", tabRuns:"runs", tab3d:"v3d" };
 for (const [btn, pane] of Object.entries(TABS)) {
@@ -815,11 +845,18 @@ $("#load3d").onclick = async () => {
   layout();
   pickModel((want || IDX.spectra[0]).name);
   sel.value = (want || IDX.spectra[0]).name;
+  // hash[3] picks the models: "all", or a comma-separated list of chip ids
+  if (hash[3]) {
+    const pick = hash[3] === "all" ? MODEL.preds.map(p => p.id) : hash[3].split(",");
+    const ok = pick.filter(id => MODEL.preds.some(p => p.id === id));
+    if (ok.length) { SEL = new Set(ok); drawChips(); }
+  }
   if (hash[1] && MODEL.views > +hash[1]) {
     VIEW = +hash[1];
     $("#view").value = VIEW;
-    show();
   }
+  // pickModel already drew once; redraw only if the hash changed what it drew
+  if (hash[1] || hash[3]) show();
 })();
 </script>
 </body>
