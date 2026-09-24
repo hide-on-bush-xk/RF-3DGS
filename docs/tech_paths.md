@@ -130,6 +130,13 @@ Fourteen facts that re-rank everything below:
    capacity limit is real, and rounds 51-56 stand). On the unclipped views it is 56.9 % (median 0.82 deg), on
    the clipped ones 11.4 %: a flat-topped training target carries no peak position, and once a model can fit,
    the clipped range (item 16) is the ceiling. Next: the same with an unclipped training range.
+20. **Unclipped, placement + switch passes 50 % -- and the clip was hiding part of the plain field too.** Same
+   runs on the dataset's exact range (79 dB): placement + switch 61.7 % (3 seeds 59.7 / 62.9 / 62.5), plain
+   42.9 % (1 seed; 28.2 % clipped). Split: on the formerly clipped bright views both reach 87 %; on the weak,
+   diffuse-dominated views both get worse (placement + switch 56.9 -> 49.0 %, plain 32.4 -> 20.7 %) -- the
+   range trades bright views against weak ones. Placement + switch beats plain where M3 predicted: on the
+   diffuse views (49.0 vs 20.7 %). Rounds 51-56's absolute numbers (clipped targets) are partly the clip.
+   Next: the validation set, and a target / loss that serves bright and weak views at once.
 
 What this implies: the peak is lost in something every variant tried shares. One position is representable
 exactly by the frozen Gaussians; for 160 positions no colour model (SH4, lobes, CNN head, position-conditioned
