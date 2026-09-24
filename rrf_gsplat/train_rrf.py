@@ -799,7 +799,32 @@ def main():
     ap.add_argument("--head-lr", type=float, default=1e-3)
     ap.add_argument("--peak-loss", type=float, default=0.0,
                     help="extra L1 weight on the pixels within 10 dB of each view's true maximum (value / power channel)")
+    # 3DGS-LM (Hoellein et al., ICCV 2025): Levenberg-Marquardt on the SH coefficients after N Adam steps (lm_optim.py);
+    # the defaults are 3DGS-LM's, the subset size is its 25 images (6 positions x 4 faces)
+    ap.add_argument("--lm-after", type=int, default=0, help="switch from Adam to LM after this many steps (0 = off)")
+    ap.add_argument("--lm-iters", type=int, default=5)
+    ap.add_argument("--lm-subset-positions", type=int, default=6)
+    ap.add_argument("--lm-subsets", type=int, default=4)
+    ap.add_argument("--lm-pcg-iters", type=int, default=8)
+    ap.add_argument("--lm-pcg-rtol", type=float, default=5e-2)
+    ap.add_argument("--lm-radius", type=float, default=1e-3)
+    ap.add_argument("--lm-radius-min", type=float, default=1e-4)
+    ap.add_argument("--lm-radius-max", type=float, default=1e-2)
+    ap.add_argument("--lm-linesearch-frac", type=float, default=0.3)
+    ap.add_argument("--cudnn-tf32", choices=["on", "off"], default="on",
+                    help="off: cuDNN convolutions in full fp32. PyTorch's default (on) runs the SSIM's convolutions in TF32 "
+                         "on this GPU, and SSIM's variances (E[x^2] - E[x]^2) then lose so much that a quarter of our "
+                         "pixels come out above 1 (up to 1.48) and the loss's SSIM term and its gradient are wrong in "
+                         "smooth regions; the reported SSIM metric too (found 2026-09-24). Off also slows the head's CNN.")
     cfg = ap.parse_args()
+    if cfg.lm_after and cfg.cudnn_tf32 == "on":
+        cfg.cudnn_tf32 = "off"
+        print("--lm-after: cuDNN TF32 off (the LM residuals need an exact SSIM)")
+    torch.backends.cudnn.allow_tf32 = cfg.cudnn_tf32 == "on"
+    if cfg.lm_after:
+        if cfg.mode != "db" or cfg.train_geometry or cfg.head != "none" or cfg.densify != "none" or cfg.faces_per_step < 2:
+            raise SystemExit("--lm-after: db mode, frozen geometry, no head, no densification, --faces-per-step >= 2 "
+                             "(the render must be linear in the SH coefficients; LM works on receiver positions)")
     if cfg.densify == "mcmc":
         cfg.train_geometry = True
     if cfg.head != "none":
@@ -1036,6 +1061,8 @@ def main():
     torch.cuda.synchronize(); t_train = time.time()
     rng = np.random.default_rng(cfg.seed)
     for it in range(1, cfg.iterations + 1):
+        if cfg.lm_after and it > cfg.lm_after:
+            break                                    # the rest of the budget goes to LM (below)
         model.head_on = it > cfg.head_warmup
         if groups is None:
             i = int(rng.integers(n_train))
@@ -1081,6 +1108,30 @@ def main():
                   f"PSNR(jet) {m['psnr_rgb']:5.2f}  SSIM {m['ssim_rgb']:.3f}  "
                   f"RMSE {m['rmse_db']:5.2f} dB  (subset {len(eval_idx)}"
                   + (f", {m['gaussians']:,} Gaussians" if strategy is not None else "") + ")")
+    lm_history = None
+    if cfg.lm_after:
+        from lm_optim import LM
+        lm = LM(model, groups,
+                lambda g: (train["viewmats"][g], train["Ks"][g], train["width"], train["height"]),
+                lambda g: torch.stack([target(i) for i in g]),
+                span, cfg.lambda_dssim, sh_basis,
+                {"subset_positions": cfg.lm_subset_positions, "subsets": cfg.lm_subsets, "pcg_iters": cfg.lm_pcg_iters,
+                 "pcg_rtol": cfg.lm_pcg_rtol, "radius": cfg.lm_radius, "radius_min": cfg.lm_radius_min,
+                 "radius_max": cfg.lm_radius_max, "linesearch_frac": cfg.lm_linesearch_frac, "min_diag": 1.0,
+                 "max_diag": 1e6, "max_step": 10.0, "gamma0": 1.0, "gamma_alpha": 0.7, "min_rel_decrease": 1e-5})
+        for k in range(1, cfg.lm_iters + 1):
+            lm.step(k)
+            torch.cuda.synchronize(); t_ev = time.time()
+            m = evaluate(model, test, eval_idx, span, vmin, group=cfg.eval_group)
+            torch.cuda.synchronize(); running_eval_seconds += time.time() - t_ev
+            m.update(iteration=cfg.lm_after, lm_iteration=k, seconds=time.time() - t_train, gaussians=model.n_gaussians,
+                     seconds_excl_eval=time.time() - t_train - running_eval_seconds)
+            history.append(m)
+            print(f"  LM {k:3d}  {m['seconds']:6.0f} s  PSNR(jet) {m['psnr_rgb']:5.2f}  RMSE {m['rmse_db']:5.2f} dB "
+                  f"(subset {len(eval_idx)})")
+        lm_history = lm.history
+        del lm
+        torch.cuda.empty_cache()
     torch.cuda.synchronize(); train_seconds = time.time() - t_train
     model.head_on = True
 
@@ -1119,7 +1170,8 @@ def main():
               "strip_check": strip_check,
               "load_seconds": t_train - t_start, "eval_seconds": eval_seconds,
               "gpu": torch.cuda.get_device_name(0),
-              "total_seconds": time.time() - t_start, "history": history, "final": final}
+              "total_seconds": time.time() - t_start, "history": history, "final": final,
+              "adam_steps": cfg.lm_after or cfg.iterations, "lm_history": lm_history}
     with open(os.path.join(cfg.out, "results.json"), "w") as fid:
         json.dump(result, fid, indent=1)
     if final is None:
