@@ -95,33 +95,64 @@ def main():
     ap.add_argument("--cap", type=int, default=2000, help="most voxels kept per position")
     ap.add_argument("--checkpoint", default=os.path.join(REPO, "RF-3DGS_dataset", "blender_visual_trained", "chkpnt30000.pth"))
     ap.add_argument("--out", required=True)
+    ap.add_argument("--cache", default=None,
+                    help="a directory of per-position voxel aggregates: read when present, else solved and written. The "
+                         "solve is the expensive, GPU-bound part (467 positions: ~6 min); a cached build is CPU only")
     a = ap.parse_args()
     t0 = time.time()
     import generate_dataset as G
-    from sionna.rt import PathSolver, Transmitter
     meta = json.load(open(os.path.join(a.truth, "generation_meta.json")))
     if meta.get("spectrum", "").upper() != "APS":
         raise SystemExit("--truth must be an APS dataset (its paths and powers are what the emitters stand for)")
     fields = {f.name for f in dataclasses.fields(G.Config)}
     cfg = G.Config(**{k: v for k, v in meta.items() if k in fields})
-    cwd = os.getcwd(); os.chdir(HERE)
-    scene = G.build_scene(cfg); os.chdir(cwd)
-    scene.add(Transmitter(name="tx", position=list(cfg.tx_loc)))
-    solver = PathSolver()
+    rt = {}                                         # the scene and solver, built only if some position is not cached
+
+    def solver_scene():
+        if not rt:
+            from sionna.rt import PathSolver, Transmitter
+            cwd = os.getcwd(); os.chdir(HERE)
+            rt["scene"] = G.build_scene(cfg); os.chdir(cwd)
+            rt["scene"].add(Transmitter(name="tx", position=list(cfg.tx_loc)))
+            rt["solver"] = PathSolver()
+        return rt["solver"], rt["scene"]
     groups = G.read_pose_groups(os.path.join(a.truth, "sparse", "0", "images.txt"))
     pos = list(a.positions or []) + (capacity_positions(a.protocol, a.capacity) if a.capacity else [])
     pos = sorted(set(pos))
     per_pos, pooled = [], {}
     kept_pos = {}                                   # position -> kept voxel keys with their power (for the peak check)
-    idx_err = []                                    # vertex i belongs to path i: rx -> its interaction point = its AoA
+    # vertex i belongs to path i: rx -> its interaction point = its AoA. Kept as a histogram (0.001 deg bins up to
+    # 2 deg, then an overflow bin) so that a cached build can still report it
+    edges = np.append(np.arange(0, 2.0005, 0.001), np.inf)
+    idx_hist = np.zeros(len(edges) - 1, dtype=np.int64)
+    n_cached = 0
     for i in pos:
-        pts, pw, direct, aoa = position_paths(solver, scene, cfg, G, groups[i][0], i)
-        if len(pw) == 0:
+        cf = os.path.join(a.cache, f"pos_{i:04d}_v{int(round(a.voxel * 1000))}mm.npz") if a.cache else None
+        if cf and os.path.isfile(cf):
+            z = np.load(cf)
+            key, p, s = z["key"].astype(np.int64), z["p"], z["s"]
+            n_paths, direct_share, h = int(z["n_paths"]), float(z["direct_share"]), z["idx_hist"]
+            n_cached += 1
+        else:
+            pts, pw, direct, aoa = position_paths(*solver_scene(), cfg, G, groups[i][0], i)
+            n_paths = len(pw)
+            if n_paths:
+                dv = pts - np.asarray(groups[i][0], dtype=np.float64)[None]
+                dv /= np.linalg.norm(dv, axis=1, keepdims=True).clip(1e-9)
+                h = np.histogram(np.degrees(np.arccos(np.clip((dv * aoa).sum(1), -1, 1))), bins=edges)[0]
+                key, p, s = voxels(pts, pw, a.voxel)
+                direct_share = float(pw[direct].sum() / pw.sum())
+            else:
+                h = np.zeros(len(edges) - 1, dtype=np.int64)
+                key, p, s = np.zeros((0, 3), np.int64), np.zeros(0), np.zeros((0, 3))
+                direct_share = 0.0
+            if cf:
+                os.makedirs(a.cache, exist_ok=True)
+                np.savez(cf, key=key.astype(np.int32), p=p, s=s, n_paths=n_paths, direct_share=direct_share,
+                         idx_hist=h)
+        idx_hist += h
+        if n_paths == 0:
             per_pos.append({"position": i, "paths": 0}); print(f"position {i}: no paths"); continue
-        dv = pts - np.asarray(groups[i][0], dtype=np.float64)[None]
-        dv /= np.linalg.norm(dv, axis=1, keepdims=True).clip(1e-9)
-        idx_err.append(np.degrees(np.arccos(np.clip((dv * aoa).sum(1), -1, 1))))
-        key, p, s = voxels(pts, pw, a.voxel)
         # kept per face sector (azimuth within 45 deg of a face's yaw), not per position: a position's strongest
         # 90 % all sit on the faces towards the transmitter, and the back faces' peaks were dropped (smoke, first
         # run: 73.5 % of distinct views <= 1 deg; every voxel kept: 94.1 %)
@@ -145,9 +176,9 @@ def main():
             q = pooled.setdefault(k, [0.0, np.zeros(3)])
             q[0] += w; q[1] += w * sk / pk               # centroid pooled across positions by share
         kept_pos[i] = (key[sel], p[sel], s[sel] / p[sel, None])
-        per_pos.append({"position": i, "paths": int(len(pw)), "voxels": int(len(p)), "kept": int(n_keep),
+        per_pos.append({"position": i, "paths": n_paths, "voxels": int(len(p)), "kept": int(n_keep),
                         "captured_share": float(p[sel].sum() / tot), "sector_share_min": float(min(cum_s)),
-                        "direct_share": float(pw[direct].sum() / pw.sum())})
+                        "direct_share": direct_share})
     keys = list(pooled)
     means = np.stack([pooled[k][1] / pooled[k][0] for k in keys]).astype(np.float32)
     weight = np.array([pooled[k][0] for k in keys], dtype=np.float32)
@@ -196,8 +227,10 @@ def main():
            "direct_share_median": float(np.median([r["direct_share"] for r in per_pos if r.get("kept")])),
            "frame_nearest_visual_m": {"median": float(np.median(dist)), "p90": float(np.percentile(dist, 90)),
                                       "median_under_shift": shift_sweep},
-           "index_vertex_vs_aoa_deg": {"within_0p01": float((np.concatenate(idx_err) <= 0.01).mean()),
-                                       "p99": float(np.percentile(np.concatenate(idx_err), 99))},
+           "index_vertex_vs_aoa_deg": {"within_0p01": float(idx_hist[:10].sum() / max(idx_hist.sum(), 1)),
+                                       "p99": float(edges[1:][np.searchsorted(np.cumsum(idx_hist),
+                                                                               0.99 * idx_hist.sum())])},
+           "positions_from_cache": n_cached,
            "peaks": {"views": int(len(ang)), "within_1deg": float((ang <= 1).mean()),
                      "distinct_views": int(dist_flags.sum()),
                      "distinct_within_1deg": float((ang[dist_flags] <= 1).mean()) if dist_flags.any() else None,
