@@ -105,6 +105,8 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
 .warn { color:var(--s2); }
 #plan { width:100%; height:auto; }
 .hidden { display:none !important; }
+.head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.head h1 { margin:0; }
 /* 3D tab: the render at the held-out view's pose beside that view's prediction and target, all 3:2 */
 .row3d { display:grid; grid-template-columns:2fr 1fr; gap:10px; margin-top:10px; }
 .row3d .side { display:grid; gap:10px; align-content:start; }
@@ -120,24 +122,28 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
 </head>
 <body>
 <div class="wrap">
-  <h1>RRF model browser</h1>
+  <div class="head">
+    <h1>RRF model browser</h1>
+    <button id="theme" title="light / dark">&#9681;</button>
+  </div>
   <p class="sub">One held-out view at a time: the room, the target spectrum, and every
   model that predicted it &mdash; RF-3DGS as released beside our own runs, on the same
   pixels. Use <span class="mono">&larr;</span> / <span class="mono">&rarr;</span> to step views.</p>
 
   <p class="note warn hidden" id="crash" style="border:1px solid var(--s2);border-radius:4px;padding:8px 10px;margin:0 0 10px"></p>
   <div class="bar">
+    <span id="viewCtl" style="display:contents">
     <label>spectrum <select id="model"></select></label>
     <button id="prev">&larr;</button>
     <input class="grow" type="range" id="view" min="0" value="0">
     <button id="next">&rarr;</button>
     <span class="mono" id="pos"></span>
+    </span>
     <span class="grow"></span>
     <button id="tabCmp" class="on">compare</button>
     <button id="tabRuns">runs</button>
     <button id="tab3d">3D</button>
     <button id="tabLive">live</button>
-    <button id="theme" title="light / dark">&#9681;</button>
   </div>
 
   <!-- ---------------- compare tab ---------------- -->
@@ -816,6 +822,8 @@ for (const [btn, pane] of Object.entries(TABS)) {
     if (pane === "runs" && !$("#sqlTable").rows.length) runSql();
     if (pane === "v3d") load3d();
     liveActive(pane === "live");
+    // the spectrum / view controls belong to the compare and 3D tabs only
+    $("#viewCtl").classList.toggle("hidden", pane === "runs" || pane === "live");
   };
 }
 

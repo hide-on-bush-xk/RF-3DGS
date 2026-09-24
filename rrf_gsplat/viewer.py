@@ -578,7 +578,14 @@ def make_handler(spectra, page, db_path=None):
             # percent-encoded; no name contains "/", so decoding cannot change how the path splits
             p = unquote(self.path.split("?")[0])
             if p in ("/", "/index.html"):
-                self._send(page.encode(), "text/html; charset=utf-8"); return
+                # read from disk on every request, so an edit to viewer.html shows on a browser refresh without
+                # restarting the server (the page is ~60 KB; the start-up copy is the fallback)
+                try:
+                    body = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer.html"),
+                                encoding="utf-8").read()
+                except OSError:
+                    body = page
+                self._send(body.encode(), "text/html; charset=utf-8", extra={"Cache-Control": "no-store"}); return
             if p == "/api/index":
                 self._send(index_bytes, "application/json"); return
             if p == "/api/sql":
