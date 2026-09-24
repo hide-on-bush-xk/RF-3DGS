@@ -7,6 +7,8 @@
 # the natural setting. Same configuration as r45_lm otherwise (SH3 db, MVDR, Adam 1600 steps, 5 LM iterations,
 # TF32 off), 3 seeds; before every run 60 s under 15 % GPU utilisation.
 #   lmr   --lm-radius 1e4 --lm-radius-max 1e16
+#   (--bwd-no-geom off: round 45 ran the stock backward; since round 45 train_rrf.py turns NO_GEOM on by
+#   default for frozen geometry, which would give lmr a 6.5 % head start over r45_tf32off / r45_lm)
 # Decision, written before the run (against r45_tf32off, as for r45_lm; the two LM rows are "as published" =
 # r45_lm and "adapted trust region" = r46_lmr):
 #   keep if pure training time <= 0.85 x tf32off's, PSNR >= tf32off - 0.05 dB, at-true-peak within tf32off's seed
@@ -37,6 +39,6 @@ run() {   # name, args...
 echo "== round 46 start $(date +%H:%M:%S)" >> $LOG
 for s in 0 1 2; do
   sfx=""; [ $s -gt 0 ] && sfx="_s$s"
-  run r46_lmr$sfx --sh-degree 3 --seed $s --lm-after 1600 --lm-iters 5 --lm-radius 1e4 --lm-radius-max 1e16
+  run r46_lmr$sfx --sh-degree 3 --seed $s --lm-after 1600 --lm-iters 5 --lm-radius 1e4 --lm-radius-max 1e16 --bwd-no-geom off
 done
 echo "== all done $(date +%H:%M:%S)" >> $LOG

@@ -521,6 +521,23 @@ def attach_head(model, head="cnn", guides="", latent=0, strip=False, max_db=6.0,
 # --------------------------------------------------------------------------
 # evaluation
 # --------------------------------------------------------------------------
+def spread_positions(viewmats, n):
+    """About n view indices: whole receiver positions (runs of consecutive views sharing a camera centre, i.e. every
+    face = every orientation) spread evenly over the list, first and last included."""
+    c = torch.linalg.inv(viewmats)[:, :3, 3].cpu()
+    groups, cur = [], [0]
+    for i in range(1, c.shape[0]):
+        if float((c[i] - c[cur[0]]).norm()) < 1e-4:
+            cur.append(i)
+        else:
+            groups.append(cur); cur = [i]
+    groups.append(cur)
+    per = max(1, round(float(np.mean([len(g) for g in groups]))))
+    k = min(len(groups), max(1, n // per))
+    pick = np.linspace(0, len(groups) - 1, k).round().astype(int)
+    return [i for j in sorted(set(pick.tolist())) for i in groups[j]][:n]
+
+
 def psnr(a, b):
     """PSNR in dB for tensors in [0, 1]. The epsilon bounds identical inputs at
     about 120 dB instead of returning inf."""
@@ -811,11 +828,16 @@ def main():
     ap.add_argument("--lm-radius-min", type=float, default=1e-4)
     ap.add_argument("--lm-radius-max", type=float, default=1e-2)
     ap.add_argument("--lm-linesearch-frac", type=float, default=0.3)
-    ap.add_argument("--cudnn-tf32", choices=["on", "off"], default="on",
-                    help="off: cuDNN convolutions in full fp32. PyTorch's default (on) runs the SSIM's convolutions in TF32 "
-                         "on this GPU, and SSIM's variances (E[x^2] - E[x]^2) then lose so much that a quarter of our "
-                         "pixels come out above 1 (up to 1.48) and the loss's SSIM term and its gradient are wrong in "
-                         "smooth regions; the reported SSIM metric too (found 2026-09-24). Off also slows the head's CNN.")
+    ap.add_argument("--cudnn-tf32", choices=["on", "off"], default="off",
+                    help="off (the default since round 45): cuDNN convolutions in full fp32. PyTorch's default (on) runs "
+                         "the SSIM's convolutions in TF32 on this GPU, and SSIM's variances (E[x^2] - E[x]^2) then lose so "
+                         "much that a quarter of our pixels come out above 1 (up to 1.48) and the loss's SSIM term and its "
+                         "gradient are wrong in smooth regions; the reported SSIM metric too (found 2026-09-24). Every run "
+                         "before round 45 used on. Off costs about 4 %% of the training time and slows the head's CNN.")
+    ap.add_argument("--bwd-no-geom", choices=["auto", "on", "off"], default="auto",
+                    help="gsplat_win's GSPLAT_BWD_NO_GEOM: the rasteriser's backward skips the conic / 2D-mean gradients, "
+                         "which frozen geometry discards anyway (same colour / opacity gradients; -6.5 %% training time in "
+                         "round 45). auto = on whenever the geometry is frozen; the stock gsplat build ignores it")
     cfg = ap.parse_args()
     if cfg.lm_after and cfg.cudnn_tf32 == "on":
         cfg.cudnn_tf32 = "off"
@@ -827,6 +849,14 @@ def main():
                              "(the render must be linear in the SH coefficients; LM works on receiver positions)")
     if cfg.densify == "mcmc":
         cfg.train_geometry = True
+    if cfg.bwd_no_geom == "on" and cfg.train_geometry:
+        raise SystemExit("--bwd-no-geom on drops the geometry gradients; it needs frozen geometry")
+    if cfg.bwd_no_geom == "on" or (cfg.bwd_no_geom == "auto" and not cfg.train_geometry):
+        os.environ["GSPLAT_BWD_NO_GEOM"] = "1"          # read by the extension at every backward call
+    elif "GSPLAT_BWD_NO_GEOM" in os.environ:
+        if cfg.train_geometry:
+            raise SystemExit("GSPLAT_BWD_NO_GEOM is set in the environment but the geometry trains")
+        del os.environ["GSPLAT_BWD_NO_GEOM"]
     if cfg.head != "none":
         if cfg.mode == "rgb":
             raise SystemExit("--head works on the value modes (db, power, multi), not on jet RGB")
@@ -1055,7 +1085,10 @@ def main():
         interior = float(np.mean([float((target(g[0])[0][:, 1:] - target(g[0])[0][:, :-1]).abs().mean()) for g in pick]))
         strip_check = {"seam_error": errs, "chosen": best, "adjacent_column_step_inside_a_face": interior}
         print(f"ring order: seam jump {errs} (normalised), chosen {best}; a column step inside a face is {interior:.4f}")
-    eval_idx = list(range(0, len(test_names), max(1, len(test_names) // cfg.eval_subset)))[:cfg.eval_subset]
+    # the running evaluation's subset: whole held-out positions (every face) spread over the list. A stride over
+    # views (range(0, n, n // 64), until round 46) samples only some orientations: the views come in blocks of four
+    # faces, and a stride of 10 took faces 0 and 2 only. The final evaluation always covers every held-out view.
+    eval_idx = spread_positions(test["viewmats"], cfg.eval_subset)
     history = []
     running_eval_seconds = 0.0
     torch.cuda.synchronize(); t_train = time.time()
@@ -1171,7 +1204,8 @@ def main():
               "load_seconds": t_train - t_start, "eval_seconds": eval_seconds,
               "gpu": torch.cuda.get_device_name(0),
               "total_seconds": time.time() - t_start, "history": history, "final": final,
-              "adam_steps": cfg.lm_after or cfg.iterations, "lm_history": lm_history}
+              "adam_steps": cfg.lm_after or cfg.iterations, "lm_history": lm_history,
+              "gsplat_bwd_switches": {k: os.environ.get(k) for k in ("GSPLAT_BWD_NO_GEOM", "GSPLAT_BWD_PERGAUSS")}}
     with open(os.path.join(cfg.out, "results.json"), "w") as fid:
         json.dump(result, fid, indent=1)
     if final is None:
