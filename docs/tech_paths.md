@@ -137,6 +137,13 @@ Fourteen facts that re-rank everything below:
    range trades bright views against weak ones. Placement + switch beats plain where M3 predicted: on the
    diffuse views (49.0 vs 20.7 %). Rounds 51-56's absolute numbers (clipped targets) are partly the clip.
    Next: the validation set, and a target / loss that serves bright and weak views at once.
+21. **...but even true placement does not carry to new positions (step 1).** Trained on all 467 training
+   positions (117k steps, unclipped), scored on the validation set: oracle placement + switch 5.40 deg / 34 %
+   distinct <= 1 deg / beam-gain loss 4.30 dB, against NN 1.88 deg / 42 % / 1.36 dB and IDW-8 1.09 dB. It is
+   far better than the plain field (18.05 deg / 23 % / 9.58 dB) but loses to the look-ups on both selection
+   metrics -- by the reading written before the run, look at generalisation before non-oracle placement.
+   The gap is small in interpolation (45 vs 63 %) and large in extrapolation (21.8 vs 4.2 deg median). The plain
+   field's validation curve is flat from 10k steps and worsens over the last 20k.
 
 What this implies: the peak is lost in something every variant tried shares. One position is representable
 exactly by the frozen Gaussians; for 160 positions no colour model (SH4, lobes, CNN head, position-conditioned
