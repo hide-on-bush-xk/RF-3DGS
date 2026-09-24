@@ -119,6 +119,12 @@ Fourteen facts that re-rank everything below:
    35 to 53 %. Shared emitters with a ~45 deg colour cannot switch a reflection point on for the few receivers near
    its mirror direction and off for the rest. Next: a per-position component (per-position latent, or an explicit
    path set), not P4. The capacity benchmark's seed spread is 22-29 %, not +-1 point: 3 seeds from now on.
+18. **Placement plus a per-position switch is not enough either (M3 round 2).** The same emitters, each with a
+   latent decoded with the receiver position into a logit offset (so an emitter can be on for some receivers and
+   off for others; it learned to: per-emitter spread across receivers 2.5-4 logits): distinct <= 1 deg 25.9 %
+   (3 seeds 33.4 / 23.9 / 20.5). The visual Gaussians with P7 alone: 27.3 %. All four arms sit at 25-27 %. By the
+   reading written before the run: an explicit path set. Unresolved confound: views per step -- the 160-position
+   benchmark visits each training view ~19 times in 3000 steps, the 12-position smoke ~250 times.
 
 What this implies: the peak is lost in something every variant tried shares. One position is representable
 exactly by the frozen Gaussians; for 160 positions no colour model (SH4, lobes, CNN head, position-conditioned
