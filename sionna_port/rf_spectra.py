@@ -489,6 +489,37 @@ def aod_spectrum_equirect(paths, scale: int = 3, sigma: float = 3.0,
     return _log_rgb(img)
 
 
+def aps_equirect(paths, scale: int = 3, sigma: float = 3.0, kernel_size: int = 6) -> torch.Tensor:
+    """The angular power spectrum (APS) on the whole sphere: every path's power, linear, splatted at its angle of
+    arrival with a Gaussian of `sigma` equirect pixels (1/3 deg each: sigma 3 = 1 deg), the window +-kernel_size/2
+    sigma. Returns LINEAR power [180*scale, 360*scale]; no floor, no dB -- the caller cuts faces in linear power
+    and adds the dataset's soft floor. It is instrument-free only if the receiver's element pattern is isotropic
+    (generate_dataset.py --rx-pattern iso): the amplitudes come from paths.cir(), which include it."""
+    amp, _, theta_r, phi_r, _, _ = _path_arrays(paths)
+    return aps_splat(theta_r, phi_r, amp.double() ** 2, scale, sigma, kernel_size)
+
+
+def aps_splat(theta_rad, phi_rad, power, scale=3, sigma=3.0, kernel_size=6, chunk=100_000):
+    """equirect_splat for the APS: linear power in float64, the azimuth WRAPPED at +-180 deg (equirect_splat clamps,
+    which piles a blob up against the seam -- the seam runs through the middle of the 180 deg face), the poles
+    clamped, and the paths taken in chunks (1.2M paths x a 19 x 19 window would be 430M indices at once)."""
+    device = theta_rad.device
+    h, w = 180 * scale, 360 * scale
+    kernel, size = _gaussian_kernel(kernel_size, sigma, device)
+    half = size // 2
+    offs = torch.arange(-half, half + 1, device=device)
+    dy, dx = torch.meshgrid(offs, offs, indexing="ij")
+    dy, dx, kflat = dy.reshape(-1), dx.reshape(-1), kernel.reshape(-1).double()
+    out = torch.zeros(h * w, device=device, dtype=torch.float64)
+    for s in range(0, theta_rad.numel(), chunk):
+        ty = (torch.rad2deg(theta_rad[s:s + chunk]) * scale).round().long()
+        px = ((-torch.rad2deg(phi_rad[s:s + chunk]) + 180.0) * scale).round().long()
+        ys = (ty.unsqueeze(1) + dy.unsqueeze(0)).clamp_(0, h - 1)
+        xs = torch.remainder(px.unsqueeze(1) + dx.unsqueeze(0), w)
+        out.index_add_(0, (ys * w + xs).reshape(-1), (power[s:s + chunk].to(device).unsqueeze(1) * kflat.unsqueeze(0)).reshape(-1))
+    return out.reshape(h, w)
+
+
 MULTI_CHANNELS = ("power_db", "aod_az_cos", "aod_az_sin", "aod_zen", "delay_ns")
 
 

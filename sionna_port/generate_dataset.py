@@ -97,6 +97,17 @@ class Config:
     # CBF's delay-tap convention (rf_spectra._beamform): "asis" = |sum_l a^H x_l|, the published one; "fixed" =
     # sqrt(a^H R a), the Bartlett spectrum with taps as snapshots -- additive over taps in power (round 54)
     cbf_variant: str = "asis"
+    # the receive array's element pattern: "tr38901" (every dataset before 2026-09-24) or "iso". Path amplitudes from
+    # paths.cir() include it, so an angular power spectrum is instrument-free only with "iso" (protocol_v1, stage 2)
+    rx_pattern: str = "tr38901"
+    # APS: the soft floor 10 log10(P + N0), N0 this many dB below the median over views of each view's maximum --
+    # ONE constant for the dataset (a per-view floor would be a per-view normalisation)
+    aps_floor_below_db: float = 40.0
+    # APS: use this N0 (dB) instead -- a second draw of some positions (another --seed) must carry the reference
+    # dataset's floor, or the two differ below it by construction
+    aps_floor_fixed_db: float | None = None
+    max_num_paths_per_src: int = 10_000_000    # the solver's path cap (its default 1e6 truncates at >= 4M samples)
+    aps_repeats: int = 1            # APS: independent solves averaged per position (each on its own lattice)
     bandwidth_hz: float = 400e6     # link budget only; scales SNR and capacity
     dashboard: bool = True
 
@@ -206,7 +217,7 @@ def build_scene(cfg: Config):
     # half-wavelength UPA; keep the two in step if you change either.
     scene.rx_array = PlanarArray(num_rows=cfg.M, num_cols=cfg.M,
                                  vertical_spacing=0.5, horizontal_spacing=0.5,
-                                 pattern="tr38901", polarization="V")
+                                 pattern=cfg.rx_pattern, polarization="V")
 
     if cfg.materials != "uniform":
         # the notebook's per-material definitions replace the ITU placeholders
@@ -219,7 +230,7 @@ def build_scene(cfg: Config):
     return scene
 
 
-def solve_paths(solver, scene, cfg: Config, view_index: int = 0):
+def solve_paths(solver, scene, cfg: Config, view_index: int = 0, repeat: int = 0):
     """0.19's scene.compute_paths, expressed with the 2.x PathSolver.
 
     reflection -> specular_reflection, scattering -> diffuse_reflection,
@@ -235,10 +246,14 @@ def solve_paths(solver, scene, cfg: Config, view_index: int = 0):
                   refraction=cfg.refraction,
                   diffraction=cfg.diffraction,
                   synthetic_array=True,
+                  # Sionna's default cap (1e6 paths per source) truncates silently: harmless at 1M samples for one
+                  # receiver (310-470k paths), but 4M or more samples exceed it, and the truncation drops strong paths
+                  # too (16M samples lost 38 dB of the median view maximum, 2026-09-24; sampling_cap_check.py)
+                  max_num_paths_per_src=cfg.max_num_paths_per_src,
                   # The seed IS the sampling lattice: advancing it per view (or
                   # per position) decorrelates the residual, holding it fixed
                   # does not. See Config.per_view_seed.
-                  seed=cfg.seed + (view_index if cfg.per_view_seed else 0))
+                  seed=cfg.seed + (view_index if cfg.per_view_seed else 0) + 100_003 * repeat)
 
 
 def element_gain_fn(theta: torch.Tensor, phi: torch.Tensor) -> torch.Tensor:
@@ -260,7 +275,19 @@ def element_gain_fn(theta: torch.Tensor, phi: torch.Tensor) -> torch.Tensor:
                            device=theta.device).reshape(theta.shape)
 
 
-PROJECTION_KINDS = ("MULTI", "AOD3")
+PROJECTION_KINDS = ("MULTI", "AOD3", "APS")
+
+
+def cut_face(eq, cfg, yaw):
+    """One pinhole face from a projection family's sphere. APS spheres are LINEAR power: cut in linear power, then
+    dB (the soft floor is added in pass 2, once the dataset's N0 is known)."""
+    from rf_spectra import equirect_to_perspective
+    if cfg.spectrum.upper() == "APS":
+        eq = eq.float()          # grid_sample wants the grid's dtype; path powers (1e-20..1e-8) are fine in float32
+    face = equirect_to_perspective(eq, cfg.width, cfg.height, cfg.fov_deg, yaw_rad=yaw)
+    if cfg.spectrum.upper() == "APS":
+        return 10.0 * torch.log10(face.double().clamp_min(1e-300)).float()
+    return face
 # A receiver pose the ray tracer cannot reach at all (a closed room, a
 # transmitter behind two walls at depth 1) gives no paths. The projection
 # targets already render such a view as all-floor; the beamformed spectra
@@ -281,7 +308,9 @@ def projection_equirect(paths, kind: str, device, sigma: float = 3.0, power_floo
     """
     # Imported here rather than at module scope, so the beamformed path does not
     # pay for these when it is the one being run.
-    from rf_spectra import aod_spectrum_equirect, multichannel_spectrum_equirect
+    from rf_spectra import aod_spectrum_equirect, aps_equirect, multichannel_spectrum_equirect
+    if kind == "APS":
+        return aps_equirect(paths, sigma=sigma).to(device)
     eq = (multichannel_spectrum_equirect(paths, sigma=sigma, power_floor_db=power_floor_db) if kind == "MULTI"
           else aod_spectrum_equirect(paths, sigma=sigma))
     return eq.to(device)
@@ -292,9 +321,8 @@ def spectrum_for_paths(paths, grid: ArrayGrid, cfg: Config, yaw: float = 0.0):
     projection family has no linear form and returns None for it."""
     kind = cfg.spectrum.upper()
     if kind in PROJECTION_KINDS:
-        from rf_spectra import equirect_to_perspective
         eq = projection_equirect(paths, kind, grid.theta.device, cfg.splat_sigma, cfg.power_floor_db)
-        persp = equirect_to_perspective(eq, cfg.width, cfg.height, cfg.fov_deg, yaw_rad=yaw)
+        persp = cut_face(eq, cfg, yaw)
         return None, persp                                   # [C, H, W]
     if kind == "MVDR" and cfg.mvdr_float64:
         response = paths_to_response(paths, cfg.time_interval_ns, device=grid.theta.device, dtype=torch.complex128)
@@ -386,6 +414,15 @@ def generate(cfg: Config, shared=None):
         dr.sync_thread()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+
+    def _flush():
+        # Dr.Jit keeps freed buffers in its allocator cache, sized to the largest path set seen so far; with millions
+        # of paths per solve the cache plus the next solve ran out of GPU memory about 100 positions in (4 x 4M
+        # samples). Returning the cache after each solve holds free memory flat (probe: 7.5-9.2 GB of 10.7 GB).
+        import drjit as dr
+        dr.flush_malloc_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     projection = cfg.spectrum.upper() in PROJECTION_KINDS
     empty_views = 0
     for i, (rx_loc, yaws) in enumerate(groups):
@@ -395,9 +432,8 @@ def generate(cfg: Config, shared=None):
         for j, yaw in enumerate(yaws):
             if projection and eq is not None and not cfg.seed_per_view:
                 # same position, same paths: cut the next face from the sphere
-                from rf_spectra import equirect_to_perspective
                 t0 = time.perf_counter()
-                spec_db = equirect_to_perspective(eq, cfg.width, cfg.height, cfg.fov_deg, yaw_rad=yaw)
+                spec_db = cut_face(eq, cfg, yaw)
             else:
                 scene.remove("rx") if "rx" in scene.receivers else None
                 scene.add(Receiver(name="rx", position=list(rx_loc),
@@ -414,8 +450,22 @@ def generate(cfg: Config, shared=None):
                 t0 = time.perf_counter()
                 if projection:
                     eq = projection_equirect(paths, cfg.spectrum.upper(), grid.theta.device, cfg.splat_sigma, cfg.power_floor_db)
-                    from rf_spectra import equirect_to_perspective
-                    spec_db = equirect_to_perspective(eq, cfg.width, cfg.height, cfg.fov_deg, yaw_rad=yaw)
+                    if cfg.spectrum.upper() == "APS" and cfg.aps_repeats > 1:
+                        # more samples than one solve fits (16M in one solve runs out of memory): average independent
+                        # solves on other lattices, in linear power -- the APS is a mean power density, so this is
+                        # the same estimate with repeats x samples_per_src samples
+                        for r in range(1, cfg.aps_repeats):
+                            t1 = time.perf_counter()
+                            extra = solve_paths(solver, scene, cfg, view_index=i, repeat=r)
+                            _sync()
+                            dt_solve = time.perf_counter() - t1
+                            tsplit["solve"] += dt_solve
+                            t0 += dt_solve        # a repeat's solve is a solve: keep it out of the spectrum's clock
+                            eq = eq + projection_equirect(extra, "APS", grid.theta.device, cfg.splat_sigma, cfg.power_floor_db)
+                            del extra
+                            _flush()
+                        eq = eq / cfg.aps_repeats
+                    spec_db = cut_face(eq, cfg, yaw)
                 else:
                     try:
                         _, spec_db = spectrum_for_paths(paths, grid, cfg, yaw=yaw)
@@ -444,11 +494,15 @@ def generate(cfg: Config, shared=None):
                         print(f"  cfr unavailable: {type(exc).__name__}: {exc}")
             if "rx" in scene.receivers:
                 scene.remove("rx")
+        if projection:
+            paths = None
+            _flush()
 
     # Every view is held in memory at once, because the normalisation range has
     # to be known before any PNG can be written. This is what bounds how large a
     # dataset one process can produce.
     all_db = np.stack(specs)
+    aps_floor_db = None
     multi = all_db.ndim == 4                                  # [n, C, H, W]
     if multi:
         ranges = channel_ranges(all_db, cfg.spectrum.upper(), cfg.power_floor_db)
@@ -456,6 +510,18 @@ def generate(cfg: Config, shared=None):
         print(f"channel ranges: {[(round(a, 2), round(b, 2)) for a, b in ranges]}")
     else:
         ranges = None
+        if cfg.spectrum.upper() == "APS":
+            # the soft floor: 10 log10(P + N0) with ONE N0 for the dataset, no mask and no edges
+            if cfg.aps_floor_fixed_db is not None:
+                n0_db = float(cfg.aps_floor_fixed_db)
+                how = "fixed by --aps-floor-fixed-db"
+            else:
+                n0_db = float(np.median(all_db.reshape(len(all_db), -1).max(1))) - cfg.aps_floor_below_db
+                how = f"median view maximum - {cfg.aps_floor_below_db:g} dB"
+            all_db = (10.0 * np.log10(10.0 ** (all_db.astype(np.float64) / 10.0) + 10.0 ** (n0_db / 10.0))).astype(np.float32)
+            specs = list(all_db)
+            aps_floor_db = n0_db
+            print(f"APS soft floor N0 = {n0_db:.2f} dB ({how})")
         spec_min, spec_max = float(all_db.min()), float(all_db.max())
         print(f"global dB range: [{spec_min:.2f}, {spec_max:.2f}]")
 
@@ -489,7 +555,7 @@ def generate(cfg: Config, shared=None):
     write_images_txt(os.path.join(cfg.out_dir, "sparse", "0", "images.txt"), images)
 
     elapsed = time.time() - t_start
-    meta = asdict(cfg) | {"spec_min_db": spec_min, "spec_max_db": spec_max,
+    meta = asdict(cfg) | {"spec_min_db": spec_min, "spec_max_db": spec_max, "aps_floor_db": aps_floor_db,
                           "num_images": len(images), "colormap": "jet",
                           "normalization": "global",
                           "seconds": elapsed,
@@ -570,7 +636,7 @@ def main():
     ap.add_argument("--scene-xml", required=True)
     ap.add_argument("--rx-loc-file", required=True)
     ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--spectrum", default="MVDR", choices=["CBF", "MVDR", "MULTI", "AOD3"],
+    ap.add_argument("--spectrum", default="MVDR", choices=["CBF", "MVDR", "MULTI", "AOD3", "APS"],
                     help="MULTI: one channel each for path power (dB), AoD azimuth, AoD zenith "
                          "and delay; AOD3: the tutorial's angle-times-amplitude RGB encoding")
     ap.add_argument("--tx", dest="tx_loc", type=float, nargs=3, default=(6.905, 0.0, 2 - 1.713),
@@ -605,10 +671,24 @@ def main():
     ap.add_argument("--no-dashboard", dest="dashboard", action="store_false")
     ap.add_argument("--samples-per-src", type=int, default=1_000_000,
                     dest="samples_per_src")
+    ap.add_argument("--rx-pattern", choices=["tr38901", "iso"], default="tr38901",
+                    help="the receive array's element pattern; iso for an instrument-free angular power spectrum (APS)")
+    ap.add_argument("--max-num-paths-per-src", type=int, default=10_000_000,
+                    help="the solver's path cap per source; Sionna's default 1e6 silently truncates at >= 4M samples")
+    ap.add_argument("--aps-repeats", type=int, default=1,
+                    help="APS: average this many independent solves per position (repeats x samples in total)")
+    ap.add_argument("--aps-floor-below-db", type=float, default=40.0,
+                    help="APS: the dataset's soft floor N0 sits this far below the median view maximum")
     ap.add_argument("--cbf-variant", choices=["asis", "fixed"], default="asis",
                     help="CBF over delay taps: asis = coherent tap sum (published); fixed = sqrt(a^H R a) (Bartlett)")
     ap.add_argument("--mvdr-float32", dest="mvdr_float64", action="store_false",
                     help="the pre-2026-09-24 MVDR in complex64 (numerically unstable in the weak directions)")
+    ap.add_argument("--seed", type=int, default=42,
+                    help="the receiver jitter's seed and the solver lattice's base seed (seed + position index); with "
+                         "--poses-from only the lattice changes, i.e. an independent Monte-Carlo draw of the same scene")
+    ap.add_argument("--aps-floor-fixed-db", type=float, default=None,
+                    help="APS: this soft floor N0 (dB) instead of the dataset's own (a second draw of a reference "
+                         "dataset's positions takes the reference's generation_meta aps_floor_db)")
     ap.add_argument("--seed-per-view", dest="seed_per_view", action="store_true",
                     help="pre-fix behaviour for A/B tests: one lattice and solve per view instead of per position")
     ap.add_argument("--fixed-seed", dest="per_view_seed", action="store_false",
