@@ -95,6 +95,20 @@ Fourteen facts that re-rank everything below:
    20 local maxima within 3 dB of the peak; the truth and NN 1), but blurring them to the array's resolution
    removes the lumps without placing the peak (<= 1 deg 18-21 %): the field's energy sits in the wrong direction
    at the scale of degrees.
+15. **The field fails on the instrument-free angular power too (stage 2, protocol v1, 2026-09-24).** Target: each
+   path's power at its angle of arrival (iso receive pattern, 4 x 4M samples, soft floor), i.e. additive, no array,
+   no floor edges. Capacity benchmark <= 1 deg 26.8 % (power) / 18.5 % (db). The pixel fit is good (training RMSE
+   1.9 dB), but the field's maximum sits 13 dB below the truth's and its spectral spread is 34 deg against 14 deg.
+   By the gate written before the run (<= 30 %), stage 3 (the operator in the loop, P1) is cancelled; M3 is next.
+   Beam-gain loss on the true channel, validation: field 5.34 dB, NN 1.36, IDW-8 1.09, a second Monte-Carlo draw
+   of the same scene 0.60.
+16. **On the validation set no field beats a look-up (stage 1).** Train 467 positions; val = 59 interpolation
+   positions + a 61-position route stretch 1.7 m from training. The best field (P7) scores 5.09 deg / beam-gain loss
+   1.93 dB; NN scores 2.39 deg / 0.63 dB, and IDW-8's loss is 0.60 dB with a 4.3 dB P90. P7's gain over SH3 is
+   real and lies in extrapolation (5.6 vs 11.6 deg), but extrapolation is where the field is weakest, not
+   strongest: SH3 11.6 deg vs NN 4.2 deg, and on the APS target 22.2 deg. Separately, every gpct training range
+   clips the peaks of 16 % (MVDR) to 25 % (APS) of views. It does not explain the failure: clipped views score
+   better. Tables in `docs/stage2_notes.md`, "协议 v1".
 
 What this implies: the peak is lost in something every variant tried shares. One position is representable
 exactly by the frozen Gaussians; for 160 positions no colour model (SH4, lobes, CNN head, position-conditioned
