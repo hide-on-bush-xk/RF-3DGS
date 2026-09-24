@@ -19,9 +19,9 @@ views per step) moves PSNR by up to 3 dB and leaves "<= 1 deg" at 15-20 %. The p
 share. Tonight's ablations (rounds 43-45) do not change that: the head's features, the per-Gaussian backward, the
 exact SSIM and LM are about how fast / how smooth the fit is, not about what the model can represent.
 
-## 0b. What the night established (rounds 47-56; details in `docs/t4_channel_model_plan.md`, `stage2_notes.md`)
+## 0b. What the night established (rounds 47-56 and diagnostics; details in `docs/t4_channel_model_plan.md`, `stage2_notes.md`)
 
-Thirteen facts that re-rank everything below:
+Fourteen facts that re-rank everything below:
 
 1. **The labels are partly noise.** The dataset's MVDR ran in complex64 on a covariance with cond ~3e11; the
    solver returns its paths in a different order every time, so the weak directions are rounding noise. Against a
@@ -88,6 +88,13 @@ Thirteen facts that re-rank everything below:
    loss restores the peak level (at the true peak -7.9 -> -3.8 dB) but not its direction (22-24 %); trainable
    geometry raises training PSNR to 23.7 dB and makes the peaks worse (14.5 %, top-3 47 %); both together 22.3 %.
    Below the 40 % line written before the run for every arm.
+14. **The field misplaces peaks; it does not mis-rank them (diagnostic).** Of 640 held-out views (clean labels)
+   the field's main peak is right in 127, on another near-equal true peak in 82 (median 0.3 dB below the max),
+   and on **no** true peak in 431 (67 %). The label is spatially smooth: its main-peak direction moves 0.4 / 0.9 /
+   1.2 / 1.6 deg for displacements < 0.1 / 0.1-0.2 / 0.2-0.3 / 0.3-0.5 m. The field's spectra are lumpy (a median
+   20 local maxima within 3 dB of the peak; the truth and NN 1), but blurring them to the array's resolution
+   removes the lumps without placing the peak (<= 1 deg 18-21 %): the field's energy sits in the wrong direction
+   at the scale of degrees.
 
 What this implies: the peak is lost in something every variant tried shares. One position is representable
 exactly by the frozen Gaussians; for 160 positions no colour model (SH4, lobes, CNN head, position-conditioned
@@ -96,10 +103,10 @@ on MVDR and on a smooth additive Bartlett target alike -- while the neighbouring
 What they share is the alpha-composited Gaussian representation itself: a peak appears where some Gaussian
 projects, the Gaussians and their footprints are shared by every receiver position, and the main peaks are
 mostly diffuse hotspots whose direction jumps from one position to the next (0b.4). Questions for the deep dive:
-how fast does the true main-peak direction change with receiver position (a spatial-coherence length of the
-label -- if it is a few tens of cm, a field must resolve that; the NN result says the sampling does); is the
-error the peak moving to a *different* hotspot (a ranking error between near-equal peaks) or the right hotspot
-misplaced (a geometry error) -- beam loss vs direction per view separates them; and whether a representation
+how fast does the true main-peak direction change with receiver position -- answered (0b.14): 3-4 deg per metre,
+smooth enough for the sampling; is the
+error a ranking error or a misplacement -- answered (0b.14): mostly misplacement, 67 % of views put the peak where
+the truth has none, at the scale of degrees; and whether a representation
 that is not a projection of scene-anchored emitters (a per-position latent grid, or an explicit path set as in
 P3 / RF-PGS) is needed for peaks at all.
 
