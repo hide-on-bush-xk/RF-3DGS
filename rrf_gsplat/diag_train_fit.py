@@ -73,7 +73,10 @@ def main():
     model = T.RRF(ck, cfg["mode"], 1, cfg["sh_degree"], dev, train_opacity=not cfg.get("freeze_opacity", False),
                   train_geometry=cfg.get("train_geometry", False))
     model.sh_backend = cfg.get("sh_backend", "torch")
-    model.load_state(torch.load(os.path.join(a.run, "rrf_state.pt"), map_location=dev))
+    st = torch.load(os.path.join(a.run, "rrf_state.pt"), map_location=dev)
+    if "lobe_w" in st:                    # --lobes: create the parameters, then load them
+        model.add_lobes(st["lobe_w"].shape[1], 20.0, torch.zeros(1, 3))
+    model.load_state(st)
     out = os.path.join(a.run + "_trainfit", "renders")
     with torch.no_grad():
         m = T.evaluate(model, data, list(range(len(names))), span, vmin, save_dir=out, group=cfg.get("eval_group", False))

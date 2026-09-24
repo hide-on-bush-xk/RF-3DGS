@@ -298,6 +298,33 @@ class RRF(torch.nn.Module):
         autograd through INRIA's eval_sh expression (two thirds of a step for
         1M Gaussians). With trainable geometry the basis carries a gradient.
         """
+        col = self._sh_colours(cam_center)
+        if "lobe_w" in self.params:
+            col = col + self.lobe_colours(cam_center)
+        return col
+
+    def lobe_colours(self, cam_center):
+        """P2 (docs/tech_paths.md): K spherical-Gaussian lobes per Gaussian on top of the SH colour,
+        sum_k w_k exp(kappa_k (m_k . d - 1)) with d the same Gaussian-from-camera direction the SH uses. A lobe's
+        width is about 1 / sqrt(kappa) rad, so it can be far sharper than SH3's ~45 deg band limit."""
+        d = F.normalize(self.means.detach() - cam_center[None], dim=-1)                      # [N, 3]
+        m = F.normalize(self.params["lobe_axis"], dim=-1)                                    # [N, K, 3]
+        kappa = torch.exp(self.params["lobe_logk"])                                          # [N, K]
+        g = torch.exp(kappa * ((m * d[:, None, :]).sum(-1) - 1.0))                           # [N, K]
+        return (g[:, :, None] * self.params["lobe_w"]).sum(1)                                # [N, C]
+
+    def add_lobes(self, k, kappa_init, receivers):
+        """K lobes per Gaussian, weights zero (the model starts exactly as the SH one), axes pointing from the mean
+        receiver position to the Gaussian (where a receiver can see the lobe), kappa = kappa_init."""
+        dev, n = self.params["means"].device, self.n_gaussians
+        g0 = torch.Generator(device="cpu").manual_seed(1)
+        base = F.normalize(self.means.detach() - receivers.mean(0).to(dev)[None], dim=-1)    # [N, 3]
+        jitter = 0.1 * torch.randn(n, k, 3, generator=g0).to(dev)
+        self.params["lobe_axis"] = torch.nn.Parameter(F.normalize(base[:, None, :] + jitter, dim=-1))
+        self.params["lobe_logk"] = torch.nn.Parameter(torch.full((n, k), math.log(kappa_init), device=dev))
+        self.params["lobe_w"] = torch.nn.Parameter(torch.zeros(n, k, self.channels, device=dev))
+
+    def _sh_colours(self, cam_center):
         if self.sh_degree == 0:
             return self.params["sh0"][:, 0, :] * 0.28209479177387814 + 0.5
         if self.sh_backend == "gsplat" and not self.params["means"].requires_grad:
@@ -464,6 +491,9 @@ class RRF(torch.nn.Module):
             self.head.load_state_dict(st["head"])
         if "latent" in st and "latent" in p:
             p["latent"].data.copy_(st["latent"])
+        for k in ("lobe_axis", "lobe_logk", "lobe_w"):
+            if k in st and k in p and st[k].shape == p[k].shape:
+                p[k].data.copy_(st[k])
         if "sh0" in st:
             p["sh0"].data.copy_(st["sh0"]); p["shN"].data.copy_(st["shN"])
             p["opacities"].data.copy_(st["opacities"].reshape(-1))
@@ -834,6 +864,11 @@ def main():
                          "much that a quarter of our pixels come out above 1 (up to 1.48) and the loss's SSIM term and its "
                          "gradient are wrong in smooth regions; the reported SSIM metric too (found 2026-09-24). Every run "
                          "before round 45 used on. Off costs about 4 %% of the training time and slows the head's CNN.")
+    ap.add_argument("--lobes", type=int, default=0,
+                    help="P2 (docs/tech_paths.md): K spherical-Gaussian lobes per Gaussian on top of the SH colour")
+    ap.add_argument("--lobe-kappa", type=float, default=20.0, help="initial lobe sharpness (width ~ 1/sqrt(kappa) rad)")
+    ap.add_argument("--lobe-axis-lr", type=float, default=1e-3)
+    ap.add_argument("--lobe-kappa-lr", type=float, default=1e-2)
     ap.add_argument("--bwd-no-geom", choices=["auto", "on", "off"], default="auto",
                     help="gsplat_win's GSPLAT_BWD_NO_GEOM: the rasteriser's backward skips the conic / 2D-mean gradients, "
                          "which frozen geometry discards anyway (same colour / opacity gradients; -6.5 %% training time in "
@@ -844,6 +879,8 @@ def main():
         print("--lm-after: cuDNN TF32 off (the LM residuals need an exact SSIM)")
     torch.backends.cudnn.allow_tf32 = cfg.cudnn_tf32 == "on"
     if cfg.lm_after:
+        if cfg.lobes:
+            raise SystemExit("--lm-after assumes the render is linear in the SH coefficients alone; not with --lobes")
         if cfg.mode != "db" or cfg.train_geometry or cfg.head != "none" or cfg.densify != "none" or cfg.faces_per_step < 2:
             raise SystemExit("--lm-after: db mode, frozen geometry, no head, no densification, --faces-per-step >= 2 "
                              "(the render must be linear in the SH coefficients; LM works on receiver positions)")
@@ -956,6 +993,13 @@ def main():
             print(f"geometry (and opacity) from {cfg.init_from}, colours from zero")
         else:
             print(f"warm start from {cfg.init_from}")
+    if cfg.lobes:
+        rx = torch.linalg.inv(train["viewmats"])[:, :3, 3]
+        model.add_lobes(cfg.lobes, cfg.lobe_kappa, rx)
+        if cfg.init_from:
+            model.load_state(torch.load(cfg.init_from, map_location=device))       # its lobes, if it has any
+        print(f"lobes: {cfg.lobes} per Gaussian, kappa {cfg.lobe_kappa:g} (width ~{math.degrees(cfg.lobe_kappa ** -0.5):.0f} deg), "
+              f"weights from zero")
     print(f"{model.n_gaussians:,} Gaussians from visual iteration {model.visual_iteration}; "
           f"mode {cfg.mode}, {channels} channel(s), SH degree {cfg.sh_degree}; "
           f"geometry {'trained' if cfg.train_geometry else 'frozen'}, densify {cfg.densify}")
@@ -965,7 +1009,8 @@ def main():
     # the means at ten times INRIA's final position lr. One Adam per tensor,
     # which is what gsplat's strategies expect.
     lrs = {"sh0": cfg.feature_lr, "shN": cfg.feature_lr / 20.0, "opacities": cfg.opacity_lr,
-           "means": 1.6e-5 * model.spatial_lr_scale, "scales": 5e-3, "quats": 1e-3, "latent": cfg.feature_lr}
+           "means": 1.6e-5 * model.spatial_lr_scale, "scales": 5e-3, "quats": 1e-3, "latent": cfg.feature_lr,
+           "lobe_w": cfg.feature_lr, "lobe_axis": cfg.lobe_axis_lr, "lobe_logk": cfg.lobe_kappa_lr}
     lrs = {k: v * cfg.lr_scale for k, v in lrs.items()}
     optimizers = {name: torch.optim.Adam([p], lr=lrs[name], eps=1e-15)
                   for name, p in model.params.items() if p.requires_grad}
