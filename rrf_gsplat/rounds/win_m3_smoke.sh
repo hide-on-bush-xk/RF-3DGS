@@ -30,4 +30,8 @@ run() {
 }
 run smoke_plain
 run smoke_em --emitters output/rrf/m3/emitters_smoke.npz
+# round 2 (Ke, 2026-09-24: "OK先smoke"): the emitters with a position-conditioned colour (--em-pcolor 8), so an emitter
+# can be on for some receiver positions and off for others; check_emitters.py --em-pcolor 8 first (S1 bit-exact
+# against the emitters alone, S2 latent + MLP gradients from the second step, S3, S5)
+run smoke_em_pc8 --emitters output/rrf/m3/emitters_smoke.npz --em-pcolor 8
 echo "== all done $(date +%H:%M:%S)" >> $LOG

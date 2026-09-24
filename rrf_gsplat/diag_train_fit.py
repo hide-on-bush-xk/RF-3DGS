@@ -93,6 +93,9 @@ def main():
         model.add_pcolor(c["width"], c["hidden"], c["n_freqs"], torch.zeros(2, 3))
     if "em_means" in st:                  # --emitters: the points and their scale come from the state
         model.add_emitters(st["em_means"].cpu().numpy(), float(torch.exp(st["em_scales"][0, 0])))
+    if "em_pcolor_mlp" in st:             # --em-pcolor: its normalisation comes from the state too
+        c = st["em_pcolor_cfg"]
+        model.add_em_pcolor(c["width"], c["hidden"], c["n_freqs"], torch.zeros(2, 3))
     model.load_state(st)
     out = os.path.join(a.run + "_trainfit", "renders")
     with torch.no_grad():

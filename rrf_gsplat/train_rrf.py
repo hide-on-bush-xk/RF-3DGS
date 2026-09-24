@@ -405,15 +405,50 @@ class RRF(torch.nn.Module):
         self.params["em_shN"] = torch.nn.Parameter(torch.zeros(n, k - 1, self.channels, device=dev))
         self._em_quats = torch.zeros(n, 4, device=dev); self._em_quats[:, 0] = 1.0
 
+    EM_PC_GAIN = 4.0               # --em-pcolor's output is in logits of the emitter value: x4, so switching an emitter
+                                   # on or off (about 4 logits) needs outputs of order 1 from the MLP
+
+    def add_em_pcolor(self, width, hidden, n_freqs, receivers):
+        """P7 for the emitters (M3 oracle, round 2): a per-emitter latent and a shared MLP of (latent, direction from
+        the receiver, receiver position) added to the emitter's logit, so an emitter can be on for some receiver
+        positions and off for others -- what one shared SH3 colour per emitter could not do (round 1: 25.1 -> 27.1 %).
+        The last layer starts at zero: the model starts exactly as the emitters alone."""
+        p = self.params
+        dev, n = p["em_means"].device, p["em_means"].shape[0]
+        g0 = torch.Generator(device="cpu").manual_seed(4)
+        p["em_pc_latent"] = torch.nn.Parameter((0.1 * torch.randn(n, width, generator=g0)).to(dev))
+        rx = receivers.to(dev)
+        self._epc_centre = rx.mean(0); self._epc_scale = (rx - self._epc_centre).abs().max().clamp_min(1e-3)
+        self._epc_freqs = (2.0 ** torch.arange(n_freqs, device=dev, dtype=torch.float32)) * math.pi
+        last = torch.nn.Linear(hidden, self.channels)
+        torch.nn.init.zeros_(last.weight); torch.nn.init.zeros_(last.bias)
+        self.em_pcolor_mlp = torch.nn.Sequential(torch.nn.Linear(width + 3 + 6 * n_freqs, hidden), torch.nn.SiLU(),
+                                                 torch.nn.Linear(hidden, hidden), torch.nn.SiLU(), last).to(dev)
+        self.em_pcolor_cfg = {"width": width, "hidden": hidden, "n_freqs": n_freqs,
+                              "centre": self._epc_centre.tolist(), "scale": float(self._epc_scale)}
+
+    def em_pcolor(self, cam_center):
+        z = self.params["em_pc_latent"]                                                        # [E, W]
+        d = F.normalize(self.params["em_means"] - cam_center[None], dim=-1)                   # [E, 3]
+        r = (cam_center - self._epc_centre) / self._epc_scale
+        f = torch.cat([torch.sin(r[None] * self._epc_freqs[:, None]), torch.cos(r[None] * self._epc_freqs[:, None])], -1).reshape(-1)
+        return self.EM_PC_GAIN * self.em_pcolor_mlp(torch.cat([z, d, f[None].expand(z.shape[0], -1)], -1))   # [E, C]
+
+    def _emitter_raw(self, c, sh):
+        raw = self._sh_colours(c, self.params["em_means"], sh, frozen=True) - 0.5
+        if getattr(self, "em_pcolor_mlp", None) is not None:
+            raw = raw + self.em_pcolor(c)
+        return raw
+
     def _emitter_power(self, viewmats, Ks, width, height, span_db, centres):
         """The emitters' own rasterisation, linear power [B, C, H, W] on a zero background."""
         from gsplat import rasterization
         p = self.params
         sh = torch.cat([p["em_sh0"], p["em_shN"]], dim=1)
         if viewmats.shape[0] == 1 or float((centres - centres[:1]).norm(dim=-1).max()) < 1e-4:
-            raw = self._sh_colours(centres[0], p["em_means"], sh, frozen=True) - 0.5
+            raw = self._emitter_raw(centres[0], sh)
         else:
-            raw = torch.stack([self._sh_colours(c, p["em_means"], sh, frozen=True) for c in centres]) - 0.5
+            raw = torch.stack([self._emitter_raw(c, sh) for c in centres])
         v = self.EM_VMAX * torch.sigmoid(raw)
         col = torch.pow(10.0, v * span_db / 10.0) - 1.0
         img, _, _ = rasterization(p["em_means"], self._em_quats, torch.exp(p["em_scales"]), torch.sigmoid(p["em_opacities"]),
@@ -574,7 +609,11 @@ class RRF(torch.nn.Module):
             self.head.load_state_dict(st["head"])
         if "latent" in st and "latent" in p:
             p["latent"].data.copy_(st["latent"])
-        for k in ("lobe_axis", "lobe_logk", "lobe_w", "pc_latent", "em_opacities", "em_sh0", "em_shN"):
+        if "em_pcolor_mlp" in st and getattr(self, "em_pcolor_mlp", None) is not None:
+            self.em_pcolor_mlp.load_state_dict(st["em_pcolor_mlp"])
+            c = st["em_pcolor_cfg"]
+            self._epc_centre = torch.tensor(c["centre"], device=p["means"].device); self._epc_scale = torch.tensor(c["scale"], device=p["means"].device)
+        for k in ("lobe_axis", "lobe_logk", "lobe_w", "pc_latent", "em_opacities", "em_sh0", "em_shN", "em_pc_latent"):
             if k in st and k in p and st[k].shape == p[k].shape:
                 p[k].data.copy_(st[k])
         if "pcolor_mlp" in st and getattr(self, "pcolor_mlp", None) is not None:
@@ -604,6 +643,8 @@ class RRF(torch.nn.Module):
             st["head_cfg"] = {k: v for k, v in self.head_cfg.items() if k != "tx"}
         if getattr(self, "pcolor_mlp", None) is not None:
             st["pcolor_mlp"] = self.pcolor_mlp.state_dict(); st["pcolor_cfg"] = self.pcolor_cfg
+        if getattr(self, "em_pcolor_mlp", None) is not None:
+            st["em_pcolor_mlp"] = self.em_pcolor_mlp.state_dict(); st["em_pcolor_cfg"] = self.em_pcolor_cfg
         return st
 
 
@@ -981,6 +1022,10 @@ def main():
     ap.add_argument("--emitter-lr-mult", type=float, default=10.0,
                     help="the emitters' SH learning rate over --feature-lr: their value is a sigmoid of the SH and starts "
                          "near the floor, so at the visual Gaussians' rate it could not get bright within 3000 steps")
+    ap.add_argument("--em-pcolor", type=int, default=0,
+                    help="with --emitters: P7 for the emitters -- a per-emitter latent of this width and a shared MLP of "
+                         "(latent, direction, receiver position) added to each emitter's logit; 0 = off")
+    ap.add_argument("--em-pcolor-hidden", type=int, default=32)
     ap.add_argument("--train-names-file", default=None,
                     help="train on exactly these views (one name per line; each must be in the training set)")
     ap.add_argument("--bwd-no-geom", choices=["auto", "on", "off"], default="auto",
@@ -1018,6 +1063,8 @@ def main():
             print("--head-strip: evaluation groups each position's faces (--eval-group), or the ring could not form")
     if cfg.faces_per_step > 1 and cfg.densify != "none":
         raise SystemExit("--faces-per-step > 1 is not wired into the densification strategy's per-view statistics")
+    if cfg.em_pcolor and not cfg.emitters:
+        raise SystemExit("--em-pcolor needs --emitters")
     if cfg.emitters and (cfg.mode != "power" or cfg.head != "none" or cfg.delay_depth or cfg.densify != "none"
                          or cfg.lm_after or cfg.train_geometry):
         raise SystemExit("--emitters: --mode power, frozen geometry, no head, no delay channel, no densification, no LM")
@@ -1146,6 +1193,12 @@ def main():
         model.add_emitters(em["means"], cfg.emitter_scale, cfg.emitter_opacity)
         if cfg.init_from:
             model.load_state(torch.load(cfg.init_from, map_location=device))
+        if cfg.em_pcolor:
+            model.add_em_pcolor(cfg.em_pcolor, cfg.em_pcolor_hidden, cfg.pcolor_freqs, torch.linalg.inv(train["viewmats"])[:, :3, 3])
+            if cfg.init_from:
+                model.load_state(torch.load(cfg.init_from, map_location=device))
+            print(f"emitter position-conditioned colour: latent {cfg.em_pcolor}, MLP hidden {cfg.em_pcolor_hidden}, "
+                  f"output x{model.EM_PC_GAIN:g} logits, from zero")
         print(f"emitters (placement oracle): {len(em['means']):,} from {cfg.emitters}, scale {cfg.emitter_scale} m, "
               f"opacity {cfg.emitter_opacity} (fixed), value from near the floor, SH lr x{cfg.emitter_lr_mult:g}; "
               f"own pass, added in linear power")
@@ -1160,7 +1213,8 @@ def main():
     lrs = {"sh0": cfg.feature_lr, "shN": cfg.feature_lr / 20.0, "opacities": cfg.opacity_lr,
            "means": 1.6e-5 * model.spatial_lr_scale, "scales": 5e-3, "quats": 1e-3, "latent": cfg.feature_lr,
            "lobe_w": cfg.feature_lr, "lobe_axis": cfg.lobe_axis_lr, "lobe_logk": cfg.lobe_kappa_lr, "pc_latent": cfg.feature_lr,
-           "em_sh0": cfg.feature_lr * cfg.emitter_lr_mult, "em_shN": cfg.feature_lr / 20.0 * cfg.emitter_lr_mult}
+           "em_sh0": cfg.feature_lr * cfg.emitter_lr_mult, "em_shN": cfg.feature_lr / 20.0 * cfg.emitter_lr_mult,
+           "em_pc_latent": cfg.feature_lr}
     lrs = {k: v * cfg.lr_scale for k, v in lrs.items()}
     optimizers = {name: torch.optim.Adam([p], lr=lrs[name], eps=1e-15)
                   for name, p in model.params.items() if p.requires_grad}
@@ -1168,6 +1222,8 @@ def main():
         optimizers["head"] = torch.optim.Adam(model.head.parameters(), lr=cfg.head_lr)
     if getattr(model, "pcolor_mlp", None) is not None:
         optimizers["pcolor"] = torch.optim.Adam(model.pcolor_mlp.parameters(), lr=cfg.pcolor_lr * cfg.lr_scale)
+    if getattr(model, "em_pcolor_mlp", None) is not None:
+        optimizers["em_pcolor"] = torch.optim.Adam(model.em_pcolor_mlp.parameters(), lr=cfg.pcolor_lr * cfg.lr_scale)
     n_params = sum(p.numel() for p in model.params.values() if p.requires_grad)
     print(f"optimised per-Gaussian parameters: {n_params:,} (Adam state {2 * 4 * n_params / 2**20:.0f} MiB)")
     geom_mask = None
