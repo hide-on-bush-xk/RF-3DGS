@@ -600,6 +600,19 @@ def make_handler(spectra, page, db_path=None):
                 if p == "/api/live/data":
                     self._send(json.dumps(_live_data(rel), default=str).encode(), "application/json",
                                extra=nocache); return
+                if p == "/api/live/sys":
+                    # the last hour of sysmon.py's samples (720 at 5 s)
+                    f = os.path.join(OURS, "sysmon.jsonl")
+                    pts = []
+                    if os.path.isfile(f):
+                        with open(f, "rb") as fid:
+                            fid.seek(max(0, os.path.getsize(f) - 400_000))
+                            for line in fid.read().decode(errors="ignore").splitlines()[1:]:
+                                try:
+                                    pts.append(json.loads(line))
+                                except ValueError:
+                                    pass
+                    self._send(json.dumps(pts[-720:]).encode(), "application/json", extra=nocache); return
                 if p == "/api/live/img":
                     d = _live_dir(rel)
                     f = os.path.join(d, "live", "render.png") if d else None
