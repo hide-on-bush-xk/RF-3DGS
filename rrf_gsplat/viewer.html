@@ -118,6 +118,15 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
 .ltab th, .ltab td { text-align:left; padding:3px 14px 3px 0; vertical-align:top; }
 .ltab th.num, .ltab td.num { text-align:right; padding-right:0; }
 .ltab tr + tr td { border-top:1px solid var(--line); }
+/* the live render: row labels on the left, face labels on top, a colour bar under it */
+.rgrid { display:grid; grid-template-columns:118px 1fr; gap:4px 8px; align-items:stretch; }
+.rgrid .cols { display:grid; grid-template-columns:repeat(4, 1fr); font-size:11px; color:var(--muted); text-align:center; }
+.rgrid .rows { display:grid; grid-template-rows:repeat(4, 1fr); font-size:11px; color:var(--muted); }
+.rgrid .rows div { display:flex; align-items:center; justify-content:flex-end; text-align:right; line-height:1.25; }
+.rgrid .rows b { color:var(--ink); font-weight:500; }
+.cbar { height:10px; border-radius:2px; }
+.cbar-l { display:flex; justify-content:space-between; font-size:11px; color:var(--muted); }
+.desc { font-size:13px; margin:6px 0 2px; line-height:1.45; }
 @media (prefers-reduced-motion: reduce) { .dot.on { animation:none; } }
 /* 3D tab: the render at the held-out view's pose beside that view's prediction and target, all 3:2 */
 .row3d { display:grid; grid-template-columns:2fr 1fr; gap:10px; margin-top:10px; }
@@ -279,7 +288,25 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
           <canvas id="liveSpeed" style="width:100%;height:90px;display:block;margin-top:6px"></canvas>
           <div id="liveScores" style="margin-top:10px"></div>
           <h2 style="margin-top:14px">render <span class="mono" id="liveImgInfo" style="font-weight:400;font-size:12px"></span></h2>
-          <img id="liveImg" alt="" style="max-width:100%;display:block">
+          <p class="note" style="margin-top:0">Two receiver positions, each as its four faces side by side (the full
+          horizontal circle). Each prediction sits above its truth: first a training position (seen in training),
+          then a held-out validation position (never seen). Colour: power arriving from that direction, in dB over
+          the dataset&rsquo;s training range &mdash; blue the floor, red the strongest.</p>
+          <div class="rgrid">
+            <div></div>
+            <div class="cols"><div>face 1 &middot; yaw &minus;90&deg;</div><div>face 2 &middot; yaw 0&deg;</div>
+              <div>face 3 &middot; yaw 90&deg;</div><div>face 4 &middot; yaw 180&deg;</div></div>
+            <div class="rows">
+              <div><span><b>training position</b><br>prediction</span></div>
+              <div><span>truth</span></div>
+              <div><span><b>validation position</b><br>(held out) prediction</span></div>
+              <div><span>truth</span></div>
+            </div>
+            <img id="liveImg" alt="" style="width:100%;display:block">
+            <div></div>
+            <div><div class="cbar" id="liveCbar"></div>
+              <div class="cbar-l"><span id="cbarLo"></span><span id="cbarMid"></span><span id="cbarHi"></span></div></div>
+          </div>
         </div>
       </div>
     </div>
@@ -1225,6 +1252,12 @@ async function liveTick() {
     const row = t.insertRow(); row.style.cursor = "pointer";
     if (r.rel === LIVE.run) row.style.background = "var(--sunk)";
     const nameCell = row.insertCell(); nameCell.textContent = r.rel;
+    if (r.desc) {                                   // the first sentence of the description, under the name
+      const sm = document.createElement("div");
+      sm.style.cssText = "color:var(--muted);font-family:inherit;white-space:normal;max-width:280px";
+      sm.textContent = r.desc.split(/[\u3002.:\uff1a]/)[0].slice(0, 80);
+      nameCell.appendChild(sm);
+    }
     if (r.state === "running") { const dot = document.createElement("span"); dot.className = "dot on"; nameCell.prepend(dot); dot.style.margin = "0 6px 0 0"; }
     const c = row.insertCell(); c.textContent = r.state;
     c.style.color = r.state === "running" ? "var(--s3)" : r.state === "stale" ? "var(--s2)" : "var(--muted)";
@@ -1241,7 +1274,8 @@ async function liveTick() {
   const speed = last ? last.it_s : null;
   const eta = state === "running" && speed ? (n - it) / speed : null;
   const extras = Object.entries(st.extras || {}).map(([k, v]) => `${k}=${tail(v)}`).join("  ");
-  $("#liveHead").innerHTML = `<b>${d.rel}</b> &nbsp; ${state} &nbsp; ${it} / ${n} &nbsp; ` +
+  $("#liveHead").innerHTML = (d.desc ? `<div class="desc">${d.desc}</div>` : "") +
+    `<b>${d.rel}</b> &nbsp; ${state} &nbsp; ${it} / ${n} &nbsp; ` +
     `${speed ? speed.toFixed(0) + " it/s" : ""} &nbsp; elapsed ${fmtDur(last && last.t)} &nbsp; ` +
     `${eta != null ? "ETA " + fmtDur(eta) : ""}<br><span style="color:var(--muted)">${st.mode || ""} ` +
     `${tail(st.source || "")}  seed ${st.seed ?? ""}  ${extras}</span>`;
@@ -1264,12 +1298,22 @@ async function liveTick() {
     rows.push([`${pk.eval_set || pk.file}: main peak <= 1 deg (all / distinct)`,
                `${pct(pk.within_1deg)} / ${pct(pk.distinct_within_1deg)}, median ${num(pk.median)} deg`]);
   $("#liveScores").innerHTML = scoreTable(rows);
+  if (IDX && IDX.jet && !$("#liveCbar").style.background) {
+    const lut = IDX.jet, stops = [];
+    for (let k = 0; k <= 16; k++) { const c = lut[Math.round(k / 16 * (lut.length - 1))]; stops.push(`rgb(${c[0]},${c[1]},${c[2]}) ${k / 16 * 100}%`); }
+    $("#liveCbar").style.background = `linear-gradient(to right, ${stops.join(",")})`;
+  }
+  if (d.range_db) {
+    const [lo, hi] = d.range_db;
+    $("#cbarLo").textContent = `${lo.toFixed(1)} dB (floor)`;
+    $("#cbarMid").textContent = `${((lo + hi) / 2).toFixed(1)} dB`;
+    $("#cbarHi").textContent = `${hi.toFixed(1)} dB (strongest)`;
+  }
   if (st.render_it != null && (st.render_it !== LIVE.renderIt || $("#liveImg").dataset.run !== d.rel)) {
     LIVE.renderIt = st.render_it;
     $("#liveImg").dataset.run = d.rel;
     $("#liveImg").src = "/api/live/img?run=" + encodeURIComponent(d.rel) + "&it=" + st.render_it;
-    $("#liveImgInfo").textContent = `iteration ${st.render_it}: rows = ` +
-      (st.render_rows || []).map(r => r + " prediction, " + r + " truth").join(" / ");
+    $("#liveImgInfo").textContent = `at iteration ${st.render_it}`;
   }
   if (st.render_it == null) { $("#liveImg").removeAttribute("src"); $("#liveImgInfo").textContent = "no render yet"; }
 }

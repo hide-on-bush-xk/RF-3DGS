@@ -423,10 +423,23 @@ def _live_runs(max_age_h=72):
             continue                                   # being replaced right now: next poll
         age = _time.time() - st.get("updated", 0)
         st["rel"] = os.path.relpath(os.path.dirname(root), OURS).replace(os.sep, "/")
+        st["desc"] = _live_desc(os.path.dirname(root), st)
         st["state"] = "done" if st.get("done") else ("running" if age < 120 else "stale")
         if st["state"] == "running" or age < max_age_h * 3600:
             out.append(st)
     return sorted(out, key=lambda s: -s.get("updated", 0))
+
+
+def _live_desc(run_dir, status):
+    """What the run is, in words: live/desc.txt beside the run (written by the round scripts, or by hand), else the
+    description the run itself recorded, else nothing."""
+    f = os.path.join(run_dir, "live", "desc.txt")
+    if os.path.isfile(f):
+        try:
+            return open(f, encoding="utf-8").read().strip()
+        except OSError:
+            pass
+    return (status or {}).get("desc", "")
 
 
 def _live_dir(rel):
@@ -446,6 +459,14 @@ def _live_data(rel):
         body["status"] = json.load(open(os.path.join(d, "live", "status.json")))
     except (OSError, ValueError):
         body["status"] = None
+    body["desc"] = _live_desc(d, body["status"])
+    # the colour scale of the render: the training range of the run's dataset
+    try:
+        src = (body["status"] or {}).get("source", "")
+        meta = json.load(open(os.path.join(src if os.path.isabs(src) else os.path.join(REPO, src), "generation_meta.json")))
+        body["range_db"] = [meta["spec_min_db"], meta["spec_max_db"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        body["range_db"] = None
     pts, evals = [], []
     try:
         for line in open(os.path.join(d, "live.jsonl")):
