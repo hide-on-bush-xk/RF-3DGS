@@ -18,7 +18,8 @@ import numpy as np
 from dlss_ablation import RRF, one
 
 VARIANTS = ["base", "nogeom", "pg", "pgng", "tf32off", "lm", "lmr"]
-PREFIX = {"lmr": "r46"}          # round 46: LM with the trust region sized for a linear problem
+PREFIX = {"lmr": "r46b"}         # round 46(b): LM with the trust region sized for a linear problem; 46b = the
+                                 # re-run after the memory-leak fix (round 46 paged to host memory: time invalid)
 
 
 def runs(v, n_seeds=3):
