@@ -19,9 +19,9 @@ views per step) moves PSNR by up to 3 dB and leaves "<= 1 deg" at 15-20 %. The p
 share. Tonight's ablations (rounds 43-45) do not change that: the head's features, the per-Gaussian backward, the
 exact SSIM and LM are about how fast / how smooth the fit is, not about what the model can represent.
 
-## 0b. What the night established (rounds 47-55; details in `docs/t4_channel_model_plan.md`, `stage2_notes.md`)
+## 0b. What the night established (rounds 47-56; details in `docs/t4_channel_model_plan.md`, `stage2_notes.md`)
 
-Twelve facts that re-rank everything below:
+Thirteen facts that re-rank everything below:
 
 1. **The labels are partly noise.** The dataset's MVDR ran in complex64 on a covariance with cond ~3e11; the
    solver returns its paths in a different order every time, so the weak directions are rounding noise. Against a
@@ -84,17 +84,24 @@ Twelve facts that re-rank everything below:
    the 26 % line written before the run -- while training PSNR rises 19.7 -> 22.3 dB and held-out PSNR 18.8 ->
    21.0 dB with a quarter of the positions. Every colour model tried (SH1-4, lobes, the CNN head, P7) raises
    pixel accuracy and leaves the main peak where it was (19-26 %, 3.3-5.0 deg on this benchmark).
+13. **Neither the loss nor the geometry alone is the lever (round 56).** On the same benchmark a peak-weighted
+   loss restores the peak level (at the true peak -7.9 -> -3.8 dB) but not its direction (22-24 %); trainable
+   geometry raises training PSNR to 23.7 dB and makes the peaks worse (14.5 %, top-3 47 %); both together 22.3 %.
+   Below the 40 % line written before the run for every arm.
 
-What this implies: the peak is not lost in the colour model. One position is representable exactly by the frozen
-Gaussians; for many positions, every richer colour model (SH4, lobes, a CNN head, a position-conditioned MLP)
-buys pixels and not peaks, on MVDR and on a smooth additive Bartlett target alike. Two things all of them share
-are left: (a) the loss -- L1 + SSIM over all pixels lets the bulk dominate, and the true peak stays 6-8 dB low
-in every model (a peak loss raised the level by 3 dB in round 41 but not the direction); (b) the geometry --
-where a peak appears is where some Gaussian projects, and the Gaussians are frozen where the visual texture is
-(M3). The next experiments separate the two on the capacity benchmark: a peak-weighted loss with a
-position-conditioned colour (does the direction move once the peaks carry weight?), and trainable means with the
-colour held fixed (does the direction move once Gaussians can slide to the energy?). Round 37's unfrozen
-geometry raised PSNR but lowered top-3 detection -- with the plain image loss.
+What this implies: the peak is lost in something every variant tried shares. One position is representable
+exactly by the frozen Gaussians; for 160 positions no colour model (SH4, lobes, CNN head, position-conditioned
+MLP), no peak-weighted loss and no trainable geometry moves the training-view main peak past 26 % within 1 deg,
+on MVDR and on a smooth additive Bartlett target alike -- while the neighbouring position's label is 1.3 deg off.
+What they share is the alpha-composited Gaussian representation itself: a peak appears where some Gaussian
+projects, the Gaussians and their footprints are shared by every receiver position, and the main peaks are
+mostly diffuse hotspots whose direction jumps from one position to the next (0b.4). Questions for the deep dive:
+how fast does the true main-peak direction change with receiver position (a spatial-coherence length of the
+label -- if it is a few tens of cm, a field must resolve that; the NN result says the sampling does); is the
+error the peak moving to a *different* hotspot (a ranking error between near-equal peaks) or the right hotspot
+misplaced (a geometry error) -- beam loss vs direction per view separates them; and whether a representation
+that is not a projection of scene-anchored emitters (a per-position latent grid, or an explicit path set as in
+P3 / RF-PGS) is needed for peaks at all.
 
 ## 1. What the model is asked to represent
 
