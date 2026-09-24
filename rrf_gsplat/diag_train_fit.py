@@ -27,20 +27,25 @@ from mvdr_peaks import angle, local_maxima, pixel_dirs, top_peaks  # noqa: E402
 
 def peak_metrics(names, pred_dir, truth, dirs):
     flat = dirs.reshape(-1, 3)
-    ang, at, det = [], [], []
+    ang, at, det, distinct = [], [], [], []
     for n in names:
         t = np.load(os.path.join(truth, "spectra_float", n + ".npy")).astype(np.float64)
-        if t.max() < -250:
+        if t.max() < -250 or t.max() - t.min() < 1e-3:   # no paths (MVDR: EMPTY_VIEW_DB; APS: flat at N0)
             continue
         p = np.load(os.path.join(pred_dir, n + ".npy")).astype(np.float64)
         kt, kp = int(t.argmax()), int(p.argmax())
         ang.append(angle(dirs, kt, kp)); at.append(p.flat[kt] - t.flat[kt])
         pm = np.flatnonzero(local_maxima(p))
-        for c in top_peaks(t, dirs, 3):
+        kept = top_peaks(t, dirs, 3)
+        for c in kept:
             det.append(bool(len(pm)) and np.degrees(np.arccos(np.clip(flat[pm] @ flat[c], -1, 1))).min() <= 1.5)
-    ang = np.array(ang)
+        distinct.append(len(kept) < 2 or t.flat[kept[0]] - t.flat[kept[1]] >= 1.0)   # as mvdr_peaks.py
+    ang = np.array(ang); ang_d = ang[np.array(distinct, dtype=bool)]
     return {"views": len(ang), "angle_median": float(np.median(ang)), "within_1deg": float((ang <= 1).mean()),
-            "at_true_median": float(np.median(at)), "top3_detected": float(np.mean(det))}
+            "at_true_median": float(np.median(at)), "top3_detected": float(np.mean(det)),
+            "distinct_views": int(len(ang_d)),
+            "distinct_angle_median": float(np.median(ang_d)) if len(ang_d) else None,
+            "distinct_within_1deg": float((ang_d <= 1).mean()) if len(ang_d) else None}
 
 
 def main():
@@ -54,7 +59,11 @@ def main():
         raise SystemExit("head models are not wired into this diagnostic")
     source = cfg["source"] if os.path.isabs(cfg["source"]) else os.path.join(T.REPO, cfg["source"])
     vmin, vmax = res["db_range"]; span = vmax - vmin
-    train_names, test_names = T.ensure_split(source)
+    if cfg.get("protocol"):
+        import protocol as PR          # the run's own protocol: its training views are the protocol's training set
+        train_names = PR.train_names(cfg["protocol"])
+    else:
+        train_names, test_names = T.ensure_split(source)
     views = T.read_colmap_text(os.path.join(source, "sparse", "0"))
     # stratified: whole training positions (every face), spread over the list
     vm = torch.tensor(np.stack([views[n + ".png"][0] if n + ".png" in views else views[n][0] for n in train_names]))
@@ -99,6 +108,10 @@ def main():
         r = rep[k]
         print(f"{k:5s}: PSNR(jet) {r['psnr_rgb']:.2f}  RMSE {r['rmse_db']:.2f} dB | main peak median {r['angle_median']:.2f} deg, "
               f"<= 1 deg {100 * r['within_1deg']:.1f} %, at true peak {r['at_true_median']:+.2f} dB, top-3 {100 * r['top3_detected']:.1f} %")
+    d = rep["train"]
+    if d["distinct_views"]:
+        print(f"train, distinct main peak only ({d['distinct_views']} of {d['views']} views): median {d['distinct_angle_median']:.2f} deg, "
+              f"<= 1 deg {100 * d['distinct_within_1deg']:.1f} %")
     json.dump(rep, open(a.run + "_trainfit.json", "w"), indent=1)
 
 

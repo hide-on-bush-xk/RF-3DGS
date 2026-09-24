@@ -1,0 +1,62 @@
+{
+ "reference": "C:\\Users\\Ke\\Documents\\GitHub\\RF-3DGS\\RF-3DGS_dataset\\regenerated\\3dgs_MVDR_100_gpct",
+ "images_digest": "4fb157d422edd708945e209fffa33f51e34df157da0f150d3c1584ef32a4e668",
+ "region": "x > 4 and y < -7",
+ "val_segment": "y > -1 and 1 < x < 3",
+ "buffer_m_xy": 0.5,
+ "seed": 0,
+ "near_duplicates_dropped": [
+  [
+   "03097",
+   "train"
+  ],
+  [
+   "00325",
+   "train"
+  ]
+ ],
+ "train_spacing_m_median": 0.25265661127459527,
+ "sets": {
+  "train": {
+   "positions": 467,
+   "views": 1868,
+   "nearest_train_m_median": null,
+   "nearest_train_m_min": null
+  },
+  "val_random": {
+   "positions": 59,
+   "views": 236,
+   "nearest_train_m_median": 0.22542778678973566,
+   "nearest_train_m_min": 0.05382880070809938
+  },
+  "val_segment": {
+   "positions": 61,
+   "views": 244,
+   "nearest_train_m_median": 1.7414175153234035,
+   "nearest_train_m_min": 0.6238757010636481
+  },
+  "test_interp": {
+   "positions": 46,
+   "views": 184,
+   "nearest_train_m_median": 0.2530468384525302,
+   "nearest_train_m_min": 0.07670285273933253
+  },
+  "test_region": {
+   "positions": 101,
+   "views": 404,
+   "nearest_train_m_median": 1.8694169561118736,
+   "nearest_train_m_min": 0.6612502993022531
+  },
+  "dropped": {
+   "positions": 66,
+   "views": 264,
+   "nearest_train_m_median": 0.9884886363220473,
+   "nearest_train_m_min": 0.18167351235069532
+  }
+ },
+ "sealed": [
+  "test_interp",
+  "test_region"
+ ],
+ "note": "val = val_random + val_segment; test = test_interp + test_region (read only with --final-test)"
+}

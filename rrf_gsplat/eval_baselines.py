@@ -114,6 +114,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--multi", required=True); ap.add_argument("--truth", required=True)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--protocol", default=None, help="train / evaluation views from a protocol directory")
+    ap.add_argument("--eval-set", default="val")
+    ap.add_argument("--final-test", action="store_true", help="allow a sealed test set (logged)")
     ap.add_argument("--subset-mode", choices=["route", "fps"], default="route")
     ap.add_argument("--allow-partial", action="store_true", help="score a run whose saved renders cover only part of the held-out set (recorded in the JSON)")
     ap.add_argument("--layout", default=None, help="scene layout.json (scene 2): also report every method per space class "
@@ -124,7 +127,12 @@ def main():
     meta = json.load(open(os.path.join(cfg.truth, "generation_meta.json")))
     ch = {n: i for i, n in enumerate(meta["channels"])}; lo0, hi0 = meta["channel_ranges"][0]
     poses = read_poses(os.path.join(cfg.truth, "sparse", "0", "images.txt"))
-    train = [l.strip() for l in open(os.path.join(cfg.truth, "train_index.txt")) if l.strip()]
+    if cfg.protocol:
+        import protocol as PR
+        PR.check_dataset(cfg.protocol, cfg.truth)
+        train = PR.train_names(cfg.protocol)
+    else:
+        train = [l.strip() for l in open(os.path.join(cfg.truth, "train_index.txt")) if l.strip()]
     if cfg.max_train_views:                 # the trainer's rule: whole positions, evenly spaced along the training list, or fps
         per_pos, n_pos = 4, len(train) // 4
         keep = max(1, cfg.max_train_views // per_pos)
@@ -140,7 +148,8 @@ def main():
         else:
             pos_idx = np.linspace(0, n_pos - 1, keep).round().astype(int)
         train = [train[p * per_pos + k] for p in pos_idx for k in range(per_pos)]
-    test_all = [l.strip() for l in open(os.path.join(cfg.truth, "test_index.txt")) if l.strip()]
+    test_all = (PR.eval_names(cfg.protocol, cfg.eval_set, allow_test=cfg.final_test) if cfg.protocol else
+                [l.strip() for l in open(os.path.join(cfg.truth, "test_index.txt")) if l.strip()])
     test = [n for n in test_all if os.path.exists(os.path.join(cfg.multi, "renders", n + ".npy"))]
     if len(test) < len(test_all):
         # a partial render set is a partial test set (and, with an interleaved route file, a biased one); refuse unless told to

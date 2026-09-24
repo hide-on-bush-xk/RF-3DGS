@@ -158,7 +158,11 @@ def load_views(source, names, views, device, want_float):
 
     def read(n):
         img = np.array(Image.open(os.path.join(source, "images", n + ".png")).convert("RGB"))
-        f = np.load(os.path.join(source, "spectra_float", n + ".npy")).astype(np.float16) if have_float else None
+        f = np.load(os.path.join(source, "spectra_float", n + ".npy")) if have_float else None
+        # single-channel spectra stay float32 (~0.7 GB for 3200 views; float16 quantised dB to 0.125 dB above
+        # 128 dB, since 2026-09-24); multichannel ones float16, or 10k five-channel views would not fit (12 GB)
+        if f is not None:
+            f = f.astype(np.float32 if f.ndim == 2 else np.float16)
         return img, f
     # Read in parallel, in order: from WSL every file crosses the 9p mount, whose per-file latency (not its
     # bandwidth) made a 3200-view load 38 s sequentially; 16 threads read the same files in about a fifth of that.
@@ -179,8 +183,8 @@ def load_views(source, names, views, device, want_float):
         elif (w, h) != (width, height):
             raise ValueError(f"{n}: image size {w}x{h} differs from the first view's {width}x{height}")
         viewmats.append(torch.from_numpy(view)); Ks.append(torch.from_numpy(np.ascontiguousarray(K)))
-    # Everything resident on the GPU: uint8 for the PNGs and float16 for the
-    # spectra, which is what makes a whole dataset fit alongside the model.
+    # Everything resident on the GPU: uint8 for the PNGs, float32 for single-channel spectra and float16 for
+    # multichannel ones, which is what makes a whole multichannel dataset fit alongside the model.
     out = {"rgb": torch.stack(rgb).to(device), "viewmats": torch.stack(viewmats).to(device),
            "Ks": torch.stack(Ks).to(device), "names": names, "width": width, "height": height}
     if have_float:
@@ -859,6 +863,14 @@ def main():
                          "evaluation) and takes one Adam step on their mean loss; 1 = one random view per step")
     ap.add_argument("--lr-scale", type=float, default=1.0,
                     help="multiply every learning rate (e.g. sqrt(faces-per-step) for the batched step)")
+    ap.add_argument("--protocol", default=None,
+                    help="a protocol directory (rrf_gsplat/protocol_v1): train on its training set and evaluate on "
+                         "--eval-set, instead of the dataset's own train_index / test_index")
+    ap.add_argument("--eval-set", default="val",
+                    help="with --protocol: val (default), val_random, val_segment; the sealed test sets (test, "
+                         "test_interp, test_region) only together with --final-test")
+    ap.add_argument("--final-test", action="store_true",
+                    help="allow a sealed test set (stage 4 only; every use is logged in <protocol>/test_access.log)")
     ap.add_argument("--test-source", default=None,
                     help="take the held-out views (poses, targets, render size) from this dataset instead: the same "
                          "positions and image names, e.g. rendered at another resolution or ray budget. The split and "
@@ -969,7 +981,17 @@ def main():
         ch_ranges = torch.tensor(meta["channel_ranges"], device=device, dtype=torch.float32)  # [C,2]
 
     views = read_colmap_text(os.path.join(cfg.source, "sparse", "0"))
-    train_names, test_names = ensure_split(cfg.source)
+    if cfg.protocol:
+        # protocol_v1 and later: train on the protocol's training set, evaluate on --eval-set (the validation set
+        # unless --final-test), never on the dataset's own train / test index
+        import protocol as PR
+        PR.check_dataset(cfg.protocol, cfg.source)
+        train_names = PR.train_names(cfg.protocol)
+        test_names = PR.eval_names(cfg.protocol, cfg.eval_set, allow_test=cfg.final_test)
+        print(f"protocol {os.path.basename(os.path.abspath(cfg.protocol))}: {len(train_names)} training views, "
+              f"evaluating on {cfg.eval_set} ({len(test_names)} views)")
+    else:
+        train_names, test_names = ensure_split(cfg.source)
     if cfg.max_train_views:
         # Keep whole positions (all four yaws), not every k-th image: images
         # are position-major, so every 4th image would be the same yaw at

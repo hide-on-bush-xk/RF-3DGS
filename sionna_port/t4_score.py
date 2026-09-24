@@ -115,7 +115,7 @@ def score(run, truth, test, dirs, lo, hi, cams, tx, offset=None, bart=None):
     T, P = [], []
     for n in test:
         t = np.load(truth_file(truth, n)).astype(np.float64)
-        if t.max() < -250:
+        if t.max() < -250 or t.max() - t.min() < 1e-3:   # no paths (MVDR: EMPTY_VIEW_DB; APS: flat at N0)
             continue
         T.append((n, t)); P.append(np.load(os.path.join(run, "renders", n + ".npy")).astype(np.float64))
     off_est = float(np.median([t.max() - p.max() for (_, t), p in zip(T, P)]))
@@ -172,6 +172,9 @@ def main():
     ap.add_argument("--cov", default=None, help="t6's t4_rt_cov_*.npz: adds the level-3 beam-gain loss")
     ap.add_argument("--rt-stats", default=None, help="t6's t4_rt_stats_*.json: adds the level-2 channel LSPs vs InH")
     ap.add_argument("--partial", action="store_true", help="smoke: only the held-out views every run has")
+    ap.add_argument("--protocol", default=None, help="score the protocol's --eval-set instead of test_index.txt")
+    ap.add_argument("--eval-set", default="val")
+    ap.add_argument("--final-test", action="store_true", help="allow a sealed test set (logged)")
     ap.add_argument("--truth-renders", default=None, help="a run directory whose renders/ are the truth "
                     "(t6's float64 recomputation); geometry still from --truth")
     a = ap.parse_args()
@@ -182,7 +185,12 @@ def main():
     # 2026-09-24 04:10 this defaulted to r45_base's MVDR range, which clipped the Bartlett / power datasets' RMSE
     meta_t = json.load(open(os.path.join(a.truth, "generation_meta.json")))
     lo, hi = a.db_range or (meta_t["spec_min_db"], meta_t["spec_max_db"])
-    test = [l.strip() for l in open(os.path.join(a.truth, "test_index.txt")) if l.strip()]
+    if a.protocol:
+        import protocol as PR
+        PR.check_dataset(a.protocol, a.truth)
+        test = PR.eval_names(a.protocol, a.eval_set, allow_test=a.final_test)
+    else:
+        test = [l.strip() for l in open(os.path.join(a.truth, "test_index.txt")) if l.strip()]
     dirs = pixel_dirs(a.truth); cams = camera_rotations(a.truth)
     tx = np.array(json.load(open(os.path.join(a.truth, "generation_meta.json")))["tx_loc"], dtype=np.float64)
     runs = sorted({r for pat in a.runs for r in (glob.glob(pat) or [pat]) if os.path.isdir(r)})

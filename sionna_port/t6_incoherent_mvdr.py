@@ -34,6 +34,9 @@ sys.path.insert(0, HERE); sys.path.insert(0, os.path.join(REPO, "rrf_gsplat"))
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--truth", required=True); ap.add_argument("--positions", type=int, default=20)
+    ap.add_argument("--protocol", default=None, help="the held-out views are the protocol's --eval-set, not test_index.txt")
+    ap.add_argument("--eval-set", default="val")
+    ap.add_argument("--final-test", action="store_true", help="allow a sealed test set (logged)")
     a = ap.parse_args()
     import generate_dataset as G
     from rf_spectra import ArrayGrid, merge_paths_to_time_grid, mvdr_spectrum
@@ -54,7 +57,12 @@ def main():
         p = line.split()
         if len(p) >= 10 and p[9].lower().endswith(".png"):
             names.append(p[9][:-4])
-    test = set(l.strip() for l in open(os.path.join(a.truth, "test_index.txt")) if l.strip())
+    if a.protocol:
+        import protocol as PR
+        PR.check_dataset(a.protocol, a.truth)
+        test = set(PR.eval_names(a.protocol, a.eval_set, allow_test=a.final_test))
+    else:
+        test = set(l.strip() for l in open(os.path.join(a.truth, "test_index.txt")) if l.strip())
     view_pos = []                                             # (position index, yaw, name) in dataset order
     k = 0
     for i, (rx, yaws) in enumerate(groups):
@@ -79,7 +87,8 @@ def main():
     rows, stats, covs = [], {}, {}
     # the float64 recomputation of every processed view, in a run's layout so mvdr_peaks.py / t4_score.py can score
     # the stored truth's rounding noise like any predictor
-    truth64_dir = os.path.join(REPO, "output", "rrf", "t6_truth64" + ("" if a.positions <= 0 else f"_{a.positions}pos"))
+    tag = ("" if not a.protocol else f"_{a.eval_set}")                  # protocol dumps never overwrite the old ones
+    truth64_dir = os.path.join(REPO, "output", "rrf", "t6_truth64" + tag + ("" if a.positions <= 0 else f"_{a.positions}pos"))
     for i in pick:
         rx, yaws = groups[i]
         for yaw in yaws:
@@ -162,7 +171,7 @@ def main():
                                             "top3_detected": float(np.mean(col(f"inc_vs_{ref_name}_top3_detected"))),
                                             "rmse_db_aligned_median": float(np.median(col(f"inc_vs_{ref_name}_rmse_db_aligned")))}
     print(json.dumps(summ, indent=1))
-    sfx = "_all" if a.positions <= 0 else f"_{len(pick)}pos"
+    sfx = tag + ("_all" if a.positions <= 0 else f"_{len(pick)}pos")
     rr = os.path.join(REPO, "output", "rrf")
     json.dump({"summary": summ, "views": rows_all}, open(os.path.join(rr, f"t6_incoherent_mvdr{sfx}.json"), "w"), indent=1)
     json.dump(stats, open(os.path.join(rr, f"t4_rt_stats{sfx}.json"), "w"), indent=1)

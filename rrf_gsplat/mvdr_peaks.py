@@ -72,25 +72,37 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", required=True); ap.add_argument("--truth", required=True)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--protocol", default=None, help="score the protocol's --eval-set instead of test_index.txt")
+    ap.add_argument("--eval-set", default="val")
+    ap.add_argument("--final-test", action="store_true", help="allow a sealed test set (logged)")
     a = ap.parse_args()
     dirs = pixel_dirs(a.truth); flat = dirs.reshape(-1, 3)
-    test = [l.strip() for l in open(os.path.join(a.truth, "test_index.txt")) if l.strip()]
+    if a.protocol:
+        import protocol as PR
+        PR.check_dataset(a.protocol, a.truth)
+        test = PR.eval_names(a.protocol, a.eval_set, allow_test=a.final_test)
+    else:
+        test = [l.strip() for l in open(os.path.join(a.truth, "test_index.txt")) if l.strip()]
     missing = [n for n in test if not os.path.exists(os.path.join(a.run, "renders", n + ".npy"))]
     if missing:
         raise SystemExit(f"{len(missing)} of {len(test)} held-out views have no saved render in {a.run}")
-    main_ang, main_pow, at_true, det, top_pow, skipped = [], [], [], [], [], 0
+    main_ang, main_pow, at_true, det, top_pow, skipped, distinct = [], [], [], [], [], 0, []
     false_flags = []
     for n in test:
         t = np.load(os.path.join(a.truth, "spectra_float", n + ".npy")).astype(np.float64)
         p = np.load(os.path.join(a.run, "renders", n + ".npy")).astype(np.float64)
         if p.shape != t.shape:
             raise SystemExit(f"{n}: render {p.shape} vs truth {t.shape}; render at the truth's resolution first")
-        if t.max() < -250:                  # an all-floor view (no paths): nothing to find
+        if t.max() < -250 or t.max() - t.min() < 1e-3:   # an all-floor view (no paths; APS: flat at N0): nothing to find
             skipped += 1; continue
         kt, kp = int(t.argmax()), int(p.argmax())
         main_ang.append(angle(dirs, kt, kp)); main_pow.append(p.max() - t.max()); at_true.append(p.flat[kt] - t.flat[kt])
         # the truth's top peaks, >= 3 deg apart
         kept = top_peaks(t, dirs, 3)
+        # is the truth's main peak distinct? its best rival >= 3 deg away is >= 1 dB lower (or there is none within
+        # 20 dB). On near-ties the argmax flips between two lattices of the same scene (APS smoke: 73 % within 1 deg
+        # over all views, 94 % on the distinct ones), so the main-peak angle is only well posed on these
+        distinct.append(len(kept) < 2 or t.flat[kept[0]] - t.flat[kept[1]] >= 1.0)
         pm = np.flatnonzero(local_maxima(p))
         # the prediction's top peaks, each checked against every true local maximum within 20 dB
         tm = np.flatnonzero(local_maxima(t) & (t >= t.max() - 20.0))
@@ -112,11 +124,18 @@ def main():
                           "power_err_db_median": q(top_pow, np.median), "power_err_db_p10": q(top_pow, lambda x: np.percentile(x, 10))},
            "false_peaks": {"predicted_peaks": len(false_flags),
                            "false_rate": q(false_flags, np.mean) if false_flags else None}}
+    ang_d = np.asarray(main_ang)[np.asarray(distinct, dtype=bool)]
+    res["main_peak_angle_deg_distinct"] = {"views": int(len(ang_d)),
+                                           "median": float(np.median(ang_d)) if len(ang_d) else None,
+                                           "within_1deg": float((ang_d <= 1.0).mean()) if len(ang_d) else None}
+    res["eval_set"] = a.eval_set if a.protocol else "test_index"
     out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.run)), f"peaks_{os.path.basename(os.path.abspath(a.run))}.json")
     json.dump(res, open(out, "w"), indent=1)
     m, pw, at, tp = res["main_peak_angle_deg"], res["main_peak_power_err_db"], res["power_at_true_peak_err_db"], res["top3_peaks"]
+    md = {k: (float("nan") if v is None else v) for k, v in res["main_peak_angle_deg_distinct"].items()}
     print(f"{os.path.basename(a.run)}: {res['views']} views | main peak angle median {m['median']:.2f} P90 {m['p90']:.2f} deg "
-          f"(<=1 deg {100 * m['within_1deg']:.0f}%) | peak power err median {pw['median']:+.2f} P10 {pw['p10']:+.2f} dB | "
+          f"(<=1 deg {100 * m['within_1deg']:.0f}%; distinct {md['views']} views: median {md['median']:.2f}, "
+          f"<=1 deg {100 * md['within_1deg']:.0f}%) | peak power err median {pw['median']:+.2f} P10 {pw['p10']:+.2f} dB | "
           f"at true peak {at['median']:+.2f} (P10 {at['p10']:+.2f}) | top-3 peaks detected {100 * tp['detected_within_1p5deg']:.0f}% "
           f"of {tp['count']}, power err {tp['power_err_db_median']:+.2f} dB | false peaks "
           f"{'n/a' if res['false_peaks']['false_rate'] is None else format(100 * res['false_peaks']['false_rate'], '.0f') + '%'} "

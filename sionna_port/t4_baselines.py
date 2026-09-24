@@ -57,7 +57,8 @@ def read_views(truth):
             continue
         R = rotmat([float(v) for v in p[1:5]]); t = np.array([float(v) for v in p[5:8]])
         views[p[9][:-4]] = ((-R.T @ t), min(VIEW_YAWS, key=lambda y: np.abs(yaw_R[y] - R).sum()))
-    idx = lambda f: [l.strip() for l in open(os.path.join(truth, f)) if l.strip()]            # noqa: E731
+    idx = lambda f: ([l.strip() for l in open(os.path.join(truth, f)) if l.strip()]            # noqa: E731
+                     if os.path.exists(os.path.join(truth, f)) else [])       # a protocol dataset has no index files
     return views, idx("train_index.txt"), idx("test_index.txt")
 
 
@@ -92,10 +93,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--truth", required=True)
     ap.add_argument("--out-prefix", default=os.path.join(REPO, "output", "rrf", "t4_"))
-    ap.add_argument("--which", default="control,los,nn,inh_open,inh_mixed")
+    ap.add_argument("--which", default="control,los,nn,inh_open,inh_mixed", help="also: idw, const")
     ap.add_argument("--realisations", type=int, default=10)
     ap.add_argument("--loading", type=float, default=1e-3)
     ap.add_argument("--device", default="cuda:0", help="Sionna accepts cuda:<i>, not cuda")
+    ap.add_argument("--protocol", default=None, help="train / evaluation views from a protocol directory")
+    ap.add_argument("--eval-set", default="val")
+    ap.add_argument("--final-test", action="store_true", help="allow a sealed test set (logged)")
+    ap.add_argument("--idw-k", type=int, nargs="+", default=[2, 4, 8],
+                    help="--which idw: the k nearest same-face training positions, blended in linear power by 1/d")
     ap.add_argument("--nn-positions", type=int, default=0,
                     help="NN from only K training positions (train_rrf's route subset); 0 = all")
     ap.add_argument("--floor-offset", type=float, default=1.713, help="m added to every z for InH (scene z = 0 above the floor)")
@@ -109,6 +115,13 @@ def main():
     lam = C0 / fc
     tx = np.array(meta["tx_loc"], dtype=np.float64)
     views, train, test = read_views(a.truth)
+    if a.protocol:
+        # protocol_v1: look up only the protocol's training positions, predict its --eval-set
+        sys.path.insert(0, os.path.join(REPO, "rrf_gsplat"))
+        import protocol as PR
+        PR.check_dataset(a.protocol, a.truth)
+        train = PR.train_names(a.protocol)
+        test = PR.eval_names(a.protocol, a.eval_set, allow_test=a.final_test)
     if a.limit:
         # stratified, not a prefix: whole positions (every face = every orientation), spread over the route
         pos = {}
@@ -120,14 +133,17 @@ def main():
         pick.add(min(keys, key=lambda k: peak[k]))
         test = [n for n in test if tuple(np.round(views[n][0], 6)) in pick]
         print(f"smoke: {len(pick)} positions, {len(test)} views (weakest position max {min(peak.values()):.1f} dB)")
-    from generate_dataset import element_gain_fn
-    from rf_spectra import ArrayGrid, steering_vector
-    from t6_incoherent_mvdr import channel_stats
-    import mitsuba as mi
-    if mi.variant() is None:
-        mi.set_variant("cuda_ad_mono_polarized" if a.device.startswith("cuda") else "llvm_ad_mono_polarized")
-    grid = ArrayGrid.build(M, meta["width"], meta["height"], meta["fov_deg"], element_gain_fn=element_gain_fn, device=dev)
     which = a.which.split(",")
+    if set(which) - {"nn", "idw", "const"}:
+        # only the models that synthesise a spectrum need the array grid and a Mitsuba variant; the look-up baselines
+        # are numpy and leave the GPU alone (so they can run beside a timed generation)
+        from generate_dataset import element_gain_fn
+        from rf_spectra import ArrayGrid, steering_vector
+        from t6_incoherent_mvdr import channel_stats
+        import mitsuba as mi
+        if mi.variant() is None:
+            mi.set_variant("cuda_ad_mono_polarized" if a.device.startswith("cuda") else "llvm_ad_mono_polarized")
+        grid = ArrayGrid.build(M, meta["width"], meta["height"], meta["fov_deg"], element_gain_fn=element_gain_fn, device=dev)
     log = {"truth": a.truth, "loading": a.loading, "views": len(test)}
 
     def local_angles(d_world, yaw):
@@ -215,6 +231,43 @@ def main():
             np.save(os.path.join(run, "renders", n + ".npy"),
                     np.load(os.path.join(a.truth, "spectra_float", best + ".npy")).astype(np.float32))
         print(f"nn: {len(test)} views -> {run}")
+
+    # ---- constant: one spectrum per face whatever the position -- the per-pixel median (dB) of the training views
+    # with that yaw. The floor any position-aware model has to clear; the median, not the mean, so the few empty
+    # views (EMPTY_VIEW_DB) do not drag it
+    if "const" in which:
+        run = a.out_prefix + "const"
+        by_yaw = {}
+        for n in train:
+            by_yaw.setdefault(round(views[n][1], 3), []).append(n)
+        med = {y: np.median(np.stack([np.load(os.path.join(a.truth, "spectra_float", n + ".npy")).astype(np.float32)
+                                      for n in ns]), axis=0) for y, ns in by_yaw.items()}
+        os.makedirs(os.path.join(run, "renders"), exist_ok=True)
+        for n in test:
+            np.save(os.path.join(run, "renders", n + ".npy"), med[round(views[n][1], 3)].astype(np.float32))
+        print(f"const: {len(test)} views -> {run}")
+
+    # ---- IDW: inverse-distance blend of the k nearest training positions, same face, in linear power -----------------
+    if "idw" in which:
+        tr_pos = {}
+        for n in train:
+            rx, yaw = views[n]
+            tr_pos.setdefault(round(yaw, 3), []).append((n, rx))
+        cache = {}
+        for k in a.idw_k:
+            run = a.out_prefix + f"idw{k}"
+            for n in test:
+                rx, yaw = views[n]
+                cand = sorted(tr_pos[round(yaw, 3)], key=lambda c: float(np.linalg.norm(c[1] - rx)))[:k]
+                d = np.array([max(float(np.linalg.norm(c[1] - rx)), 1e-3) for c in cand]); w = (1 / d) / (1 / d).sum()
+                lin = 0.0
+                for wi, (m, _) in zip(w, cand):
+                    if m not in cache:
+                        cache[m] = 10.0 ** (np.load(os.path.join(a.truth, "spectra_float", m + ".npy")).astype(np.float64) / 10.0)
+                    lin = lin + wi * cache[m]
+                os.makedirs(os.path.join(run, "renders"), exist_ok=True)
+                np.save(os.path.join(run, "renders", n + ".npy"), (10 * np.log10(np.maximum(lin, 1e-300))).astype(np.float32))
+            print(f"idw k={k}: {len(test)} views -> {run}")
 
     # ---- 3GPP InH ------------------------------------------------------------------------------------------------
     for kind in ("open", "mixed"):
