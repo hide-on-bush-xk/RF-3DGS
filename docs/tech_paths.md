@@ -19,9 +19,9 @@ views per step) moves PSNR by up to 3 dB and leaves "<= 1 deg" at 15-20 %. The p
 share. Tonight's ablations (rounds 43-45) do not change that: the head's features, the per-Gaussian backward, the
 exact SSIM and LM are about how fast / how smooth the fit is, not about what the model can represent.
 
-## 0b. What the night established (rounds 47-53; details in `docs/t4_channel_model_plan.md`, `stage2_notes.md`)
+## 0b. What the night established (rounds 47-54; details in `docs/t4_channel_model_plan.md`, `stage2_notes.md`)
 
-Ten facts that re-rank everything below:
+Eleven facts that re-rank everything below:
 
 1. **The labels are partly noise.** The dataset's MVDR ran in complex64 on a covariance with cond ~3e11; the
    solver returns its paths in a different order every time, so the weak directions are rounding noise. Against a
@@ -74,13 +74,20 @@ Ten facts that re-rank everything below:
    MVDR (Monte-Carlo splats; NN's RMSE on it is 10.7 dB). No conclusion. The clean control is a smooth, floor-free
    additive target from the same channels: the Bartlett spectrum sqrt(a^H R a) (CBF 'fixed'), or its incoherent
    R_inc version -- the first thing to run when testing P1's premise.
+11. **The field fails on the clean additive target too (round 54).** The Bartlett spectrum sqrt(a^H R a) of the
+   same channels (smooth, ~30 dB per view, no floor; `--spectrum CBF --cbf-variant fixed`): capacity benchmark
+   <= 1 deg 10.9 % (power mode) / 11.7 % (db), main peak 3.3-3.5 deg, training RMSE 4.0 dB; held out the field
+   3.43 deg / beam loss 1.12 dB / RMSE 4.28 dB, NN 0.83 deg / 0.07 dB / 2.13 dB. By the reading written before
+   the run (<= 30 %): the Gaussians' capacity limits both targets. **M1 is not the main limiter.**
 
-What this implies: the bottleneck is how a Gaussian's value may vary with the receiver position. One position
-is representable by the frozen Gaussians; many are not, and neither more SH bands (0b.8) nor sharp lobes (0b.9)
-change that much -- a sharper function of the direction alone is not what is missing. What is left: the value
-must depend on the receiver position itself (a diffuse hotspot's MVDR level depends on what else the array
-sees -- M1), which points at P1 (make the target additive: render power, apply the MVDR as a known layer) and
-at P7 (a position-conditioned colour). The MULTI contrast (section 2, item 2) favours P1.
+What this implies: the bottleneck is the representation, not the target. One position is representable by the
+frozen Gaussians; many are not -- for MVDR and for a smooth, additive Bartlett spectrum of the same channels
+alike (0b.11) -- and neither more SH bands (0b.8) nor sharp lobes (0b.9) change that much. A Gaussian placed for
+visual texture, with one smooth function of the viewing direction, cannot carry what the receiver sees from
+many positions; the neighbouring position's label can. The candidates left are those that change how a
+Gaussian's value depends on the receiver: a position-conditioned colour (P7), or Gaussians / emitters placed where
+the radio energy comes from rather than where the visual texture is (M3; P3 / P4). P1 (make the target additive)
+is no longer first: the additive target fails the same way.
 
 ## 1. What the model is asked to represent
 
@@ -122,22 +129,28 @@ and lowered top-3 detection from 68 % to 45 % (round 37): the optimiser moved Ga
 
 ## 2. Candidate paths, ranked by expected gain per unit of work
 
-**Ranking after the night (0b).** The order below was written before rounds 47-49; this is the order they suggest:
+**Ranking after the night (0b).** The order below was written before rounds 47-54; this is the order they suggest
+(revised after round 54: the additive Bartlett control fails like MVDR, so P7 moves ahead of P1):
 
 1. **Regenerate the MVDR labels in float64** (the generator's default since 2d12e13; ~5 min of generation per
    dataset, then re-run the baselines). Every comparison until then carries up to tens of dB of label noise in the
    weak directions and a 67.5 % ceiling on "<= 1 deg". Cheapest, and a prerequisite for judging anything else.
-2. **P1 -- render power, apply the MVDR as a known layer.** Two independent hints point at the target's
-   non-additivity (M1) rather than at the Gaussians: on the additive per-path encodings (MULTI, `stage2_notes.md`
-   "波束选择准确率") the same kind of field **beat** copying the nearest training position -- M = 10 beam-selection
-   top-1 0.68 vs 0.60 (sigma 3) and 0.55 vs 0.38 (sigma 1), decoded-azimuth P90 5.85 vs 131 deg -- while on MVDR the
-   copy wins at every density (0b.6); and the incoherent-MVDR ceiling (65.8 % <= 1 deg) is three times where the
-   field is.
-3. **Position-conditioned colour (new, P7).** Sharper lobes (P2) were tried in round 52 and bought about one SH
+2. **Position-conditioned colour (new, P7), or energy-placed emitters (M3).** Sharper lobes (P2) were tried in round 52 and bought about one SH
    band (0b.9). P7: a small per-Gaussian latent decoded together with the receiver position (not only the
    direction) by a shared MLP -- the shading head's idea moved into the Gaussians. Its fast test is the capacity
    benchmark (0b.3): train on 160 positions and score the training views (`diag_train_fit.py`); SH3 19 %, SH4
    24 %, lobes 26 %, one position alone ~100 % top-3.
+   The other half of the same question: Gaussians placed where the radio energy comes from (reflection points,
+   diffuse hotspots) rather than where the visual texture is -- P3 / P4 below.
+3. **P1 -- render power, apply the MVDR as a known layer (demoted after round 54).** Before round 54 two hints
+   pointed at the target's non-additivity (M1): on the additive per-path encodings (MULTI at 2.4 GHz,
+   `stage2_notes.md` "波束选择准确率") the field beat copying the nearest training position (M = 10 beam-selection
+   top-1 0.68 vs 0.60 at sigma 3, 0.55 vs 0.38 at sigma 1), while on MVDR the copy wins at every density; and the
+   incoherent-MVDR ceiling (65.8 % <= 1 deg) is three times where the field is. Round 54 then tested it directly:
+   an additive, smooth Bartlett target of the same 60 GHz channels fails the same way (0b.11). What differs
+   between the MULTI result and this one (2.4 vs 60 GHz, decoded per-pixel angles vs main-peak direction, the
+   scene's diffuse share) is itself worth one experiment. P1 stays the right way to produce an exact MVDR once the
+   rendered power is right; it is not the fix for peak placement.
 4. **Report the NN baseline everywhere.** A radio radiance field has to beat the lookup of its own training labels
    to claim anything about peaks; on this dataset it does not, at any density.
 5. P0 is moot (0b.4); P3-P5 stay as the heavier physics routes.

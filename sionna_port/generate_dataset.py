@@ -94,6 +94,9 @@ class Config:
     # reproducible: the solver returns the same paths in another order each time). Every dataset generated before
     # 2026-09-24 has no key and was float32.
     mvdr_float64: bool = True
+    # CBF's delay-tap convention (rf_spectra._beamform): "asis" = |sum_l a^H x_l|, the published one; "fixed" =
+    # sqrt(a^H R a), the Bartlett spectrum with taps as snapshots -- additive over taps in power (round 54)
+    cbf_variant: str = "asis"
     bandwidth_hz: float = 400e6     # link budget only; scales SNR and capacity
     dashboard: bool = True
 
@@ -299,7 +302,7 @@ def spectrum_for_paths(paths, grid: ArrayGrid, cfg: Config, yaw: float = 0.0):
         return p.float(), db.float()
     response = paths_to_response(paths, cfg.time_interval_ns, device=grid.theta.device)
     if kind == "CBF":
-        return cbf_spectrum(response, grid)
+        return cbf_spectrum(response, grid, variant=cfg.cbf_variant)
     if kind == "MVDR":
         return mvdr_spectrum(response, grid, cfg.diagonal_loading)
     raise ValueError(f"unknown spectrum type {cfg.spectrum!r}")
@@ -602,6 +605,8 @@ def main():
     ap.add_argument("--no-dashboard", dest="dashboard", action="store_false")
     ap.add_argument("--samples-per-src", type=int, default=1_000_000,
                     dest="samples_per_src")
+    ap.add_argument("--cbf-variant", choices=["asis", "fixed"], default="asis",
+                    help="CBF over delay taps: asis = coherent tap sum (published); fixed = sqrt(a^H R a) (Bartlett)")
     ap.add_argument("--mvdr-float32", dest="mvdr_float64", action="store_false",
                     help="the pre-2026-09-24 MVDR in complex64 (numerically unstable in the weak directions)")
     ap.add_argument("--seed-per-view", dest="seed_per_view", action="store_true",

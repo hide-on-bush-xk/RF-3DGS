@@ -167,7 +167,7 @@ def score(run, truth, test, dirs, lo, hi, cams, tx, offset=None, bart=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--truth", required=True); ap.add_argument("--runs", nargs="+", required=True)
-    ap.add_argument("--db-range", nargs=2, type=float, default=None, help="default: r45_base's results.json")
+    ap.add_argument("--db-range", nargs=2, type=float, default=None, help="default: the truth dataset's generation_meta range")
     ap.add_argument("--out", default=os.path.join(REPO, "output", "rrf", "t4_scores.json"))
     ap.add_argument("--cov", default=None, help="t6's t4_rt_cov_*.npz: adds the level-3 beam-gain loss")
     ap.add_argument("--rt-stats", default=None, help="t6's t4_rt_stats_*.json: adds the level-2 channel LSPs vs InH")
@@ -178,7 +178,10 @@ def main():
     global TRUTH_RENDERS
     TRUTH_RENDERS = a.truth_renders
     bart = bartlett_maps(a.cov, a.truth) if a.cov else None
-    lo, hi = a.db_range or json.load(open(os.path.join(REPO, "output", "rrf", "r45_base", "results.json")))["db_range"]
+    # the truth dataset's own normalisation range (the one its training images and every run on it use); until
+    # 2026-09-24 04:10 this defaulted to r45_base's MVDR range, which clipped the Bartlett / power datasets' RMSE
+    meta_t = json.load(open(os.path.join(a.truth, "generation_meta.json")))
+    lo, hi = a.db_range or (meta_t["spec_min_db"], meta_t["spec_max_db"])
     test = [l.strip() for l in open(os.path.join(a.truth, "test_index.txt")) if l.strip()]
     dirs = pixel_dirs(a.truth); cams = camera_rotations(a.truth)
     tx = np.array(json.load(open(os.path.join(a.truth, "generation_meta.json")))["tx_loc"], dtype=np.float64)
