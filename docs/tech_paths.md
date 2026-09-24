@@ -19,9 +19,9 @@ views per step) moves PSNR by up to 3 dB and leaves "<= 1 deg" at 15-20 %. The p
 share. Tonight's ablations (rounds 43-45) do not change that: the head's features, the per-Gaussian backward, the
 exact SSIM and LM are about how fast / how smooth the fit is, not about what the model can represent.
 
-## 0b. What the night established (rounds 47-54; details in `docs/t4_channel_model_plan.md`, `stage2_notes.md`)
+## 0b. What the night established (rounds 47-55; details in `docs/t4_channel_model_plan.md`, `stage2_notes.md`)
 
-Eleven facts that re-rank everything below:
+Twelve facts that re-rank everything below:
 
 1. **The labels are partly noise.** The dataset's MVDR ran in complex64 on a covariance with cond ~3e11; the
    solver returns its paths in a different order every time, so the weak directions are rounding noise. Against a
@@ -79,15 +79,22 @@ Eleven facts that re-rank everything below:
    <= 1 deg 10.9 % (power mode) / 11.7 % (db), main peak 3.3-3.5 deg, training RMSE 4.0 dB; held out the field
    3.43 deg / beam loss 1.12 dB / RMSE 4.28 dB, NN 0.83 deg / 0.07 dB / 2.13 dB. By the reading written before
    the run (<= 30 %): the Gaussians' capacity limits both targets. **M1 is not the main limiter.**
+12. **A position-conditioned colour (P7) fits pixels, not peaks (round 55).** Latent 8 + MLP of (latent,
+   direction, receiver position): training-view <= 1 deg 22.0 % (latent 16: 23.1 %), main peak 4.36 deg -- below
+   the 26 % line written before the run -- while training PSNR rises 19.7 -> 22.3 dB and held-out PSNR 18.8 ->
+   21.0 dB with a quarter of the positions. Every colour model tried (SH1-4, lobes, the CNN head, P7) raises
+   pixel accuracy and leaves the main peak where it was (19-26 %, 3.3-5.0 deg on this benchmark).
 
-What this implies: the bottleneck is the representation, not the target. One position is representable by the
-frozen Gaussians; many are not -- for MVDR and for a smooth, additive Bartlett spectrum of the same channels
-alike (0b.11) -- and neither more SH bands (0b.8) nor sharp lobes (0b.9) change that much. A Gaussian placed for
-visual texture, with one smooth function of the viewing direction, cannot carry what the receiver sees from
-many positions; the neighbouring position's label can. The candidates left are those that change how a
-Gaussian's value depends on the receiver: a position-conditioned colour (P7), or Gaussians / emitters placed where
-the radio energy comes from rather than where the visual texture is (M3; P3 / P4). P1 (make the target additive)
-is no longer first: the additive target fails the same way.
+What this implies: the peak is not lost in the colour model. One position is representable exactly by the frozen
+Gaussians; for many positions, every richer colour model (SH4, lobes, a CNN head, a position-conditioned MLP)
+buys pixels and not peaks, on MVDR and on a smooth additive Bartlett target alike. Two things all of them share
+are left: (a) the loss -- L1 + SSIM over all pixels lets the bulk dominate, and the true peak stays 6-8 dB low
+in every model (a peak loss raised the level by 3 dB in round 41 but not the direction); (b) the geometry --
+where a peak appears is where some Gaussian projects, and the Gaussians are frozen where the visual texture is
+(M3). The next experiments separate the two on the capacity benchmark: a peak-weighted loss with a
+position-conditioned colour (does the direction move once the peaks carry weight?), and trainable means with the
+colour held fixed (does the direction move once Gaussians can slide to the energy?). Round 37's unfrozen
+geometry raised PSNR but lowered top-3 detection -- with the plain image loss.
 
 ## 1. What the model is asked to represent
 

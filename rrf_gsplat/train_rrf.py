@@ -301,7 +301,36 @@ class RRF(torch.nn.Module):
         col = self._sh_colours(cam_center)
         if "lobe_w" in self.params:
             col = col + self.lobe_colours(cam_center)
+        if getattr(self, "pcolor_mlp", None) is not None:
+            col = col + self.pcolor(cam_center)
         return col
+
+    def pcolor(self, cam_center):
+        """P7 (docs/tech_paths.md): a position-conditioned colour residual. A shared MLP maps each Gaussian's latent,
+        its direction from the receiver and the receiver position (Fourier features over the scene's extent) to a
+        value added to the SH colour -- so a Gaussian's value may depend on where the receiver is, not only on the
+        direction it is seen from. The last layer starts at zero: the model starts exactly as the SH one."""
+        z = self.params["pc_latent"]                                                          # [N, W]
+        d = F.normalize(self.means.detach() - cam_center[None], dim=-1)                       # [N, 3]
+        r = (cam_center - self._pc_centre) / self._pc_scale                                   # [3], about [-1, 1]
+        f = torch.cat([torch.sin(r[None] * self._pc_freqs[:, None]), torch.cos(r[None] * self._pc_freqs[:, None])], -1).reshape(-1)
+        x = torch.cat([z, d, f[None].expand(z.shape[0], -1)], -1)
+        return self.pcolor_mlp(x)                                                             # [N, C]
+
+    def add_pcolor(self, width, hidden, n_freqs, receivers):
+        dev, n = self.params["means"].device, self.n_gaussians
+        g0 = torch.Generator(device="cpu").manual_seed(2)
+        self.params["pc_latent"] = torch.nn.Parameter((0.1 * torch.randn(n, width, generator=g0)).to(dev))
+        rx = receivers.to(dev)
+        self._pc_centre = rx.mean(0); self._pc_scale = (rx - self._pc_centre).abs().max().clamp_min(1e-3)
+        self._pc_freqs = (2.0 ** torch.arange(n_freqs, device=dev, dtype=torch.float32)) * math.pi
+        n_in = width + 3 + 6 * n_freqs
+        last = torch.nn.Linear(hidden, self.channels)
+        torch.nn.init.zeros_(last.weight); torch.nn.init.zeros_(last.bias)
+        self.pcolor_mlp = torch.nn.Sequential(torch.nn.Linear(n_in, hidden), torch.nn.SiLU(),
+                                              torch.nn.Linear(hidden, hidden), torch.nn.SiLU(), last).to(dev)
+        self.pcolor_cfg = {"width": width, "hidden": hidden, "n_freqs": n_freqs,
+                           "centre": self._pc_centre.tolist(), "scale": float(self._pc_scale)}
 
     def lobe_colours(self, cam_center):
         """P2 (docs/tech_paths.md): K spherical-Gaussian lobes per Gaussian on top of the SH colour,
@@ -491,9 +520,13 @@ class RRF(torch.nn.Module):
             self.head.load_state_dict(st["head"])
         if "latent" in st and "latent" in p:
             p["latent"].data.copy_(st["latent"])
-        for k in ("lobe_axis", "lobe_logk", "lobe_w"):
+        for k in ("lobe_axis", "lobe_logk", "lobe_w", "pc_latent"):
             if k in st and k in p and st[k].shape == p[k].shape:
                 p[k].data.copy_(st[k])
+        if "pcolor_mlp" in st and getattr(self, "pcolor_mlp", None) is not None:
+            self.pcolor_mlp.load_state_dict(st["pcolor_mlp"])
+            c = st["pcolor_cfg"]
+            self._pc_centre = torch.tensor(c["centre"], device=p["means"].device); self._pc_scale = torch.tensor(c["scale"], device=p["means"].device)
         if "sh0" in st:
             p["sh0"].data.copy_(st["sh0"]); p["shN"].data.copy_(st["shN"])
             p["opacities"].data.copy_(st["opacities"].reshape(-1))
@@ -515,6 +548,8 @@ class RRF(torch.nn.Module):
         if self.head is not None:
             st["head"] = self.head.state_dict()
             st["head_cfg"] = {k: v for k, v in self.head_cfg.items() if k != "tx"}
+        if getattr(self, "pcolor_mlp", None) is not None:
+            st["pcolor_mlp"] = self.pcolor_mlp.state_dict(); st["pcolor_cfg"] = self.pcolor_cfg
         return st
 
 
@@ -869,6 +904,12 @@ def main():
     ap.add_argument("--lobe-kappa", type=float, default=20.0, help="initial lobe sharpness (width ~ 1/sqrt(kappa) rad)")
     ap.add_argument("--lobe-axis-lr", type=float, default=1e-3)
     ap.add_argument("--lobe-kappa-lr", type=float, default=1e-2)
+    ap.add_argument("--pcolor", type=int, default=0,
+                    help="P7 (docs/tech_paths.md): per-Gaussian latent of this width + a shared MLP of (latent, direction, "
+                         "receiver position) added to the SH colour; 0 = off")
+    ap.add_argument("--pcolor-hidden", type=int, default=32)
+    ap.add_argument("--pcolor-freqs", type=int, default=4, help="Fourier frequencies of the receiver position")
+    ap.add_argument("--pcolor-lr", type=float, default=1e-3, help="the MLP's learning rate (the latent: --feature-lr)")
     ap.add_argument("--bwd-no-geom", choices=["auto", "on", "off"], default="auto",
                     help="gsplat_win's GSPLAT_BWD_NO_GEOM: the rasteriser's backward skips the conic / 2D-mean gradients, "
                          "which frozen geometry discards anyway (same colour / opacity gradients; -6.5 %% training time in "
@@ -879,8 +920,8 @@ def main():
         print("--lm-after: cuDNN TF32 off (the LM residuals need an exact SSIM)")
     torch.backends.cudnn.allow_tf32 = cfg.cudnn_tf32 == "on"
     if cfg.lm_after:
-        if cfg.lobes:
-            raise SystemExit("--lm-after assumes the render is linear in the SH coefficients alone; not with --lobes")
+        if cfg.lobes or cfg.pcolor:
+            raise SystemExit("--lm-after assumes the render is linear in the SH coefficients alone; not with --lobes / --pcolor")
         if cfg.mode != "db" or cfg.train_geometry or cfg.head != "none" or cfg.densify != "none" or cfg.faces_per_step < 2:
             raise SystemExit("--lm-after: db mode, frozen geometry, no head, no densification, --faces-per-step >= 2 "
                              "(the render must be linear in the SH coefficients; LM works on receiver positions)")
@@ -1000,6 +1041,14 @@ def main():
             model.load_state(torch.load(cfg.init_from, map_location=device))       # its lobes, if it has any
         print(f"lobes: {cfg.lobes} per Gaussian, kappa {cfg.lobe_kappa:g} (width ~{math.degrees(cfg.lobe_kappa ** -0.5):.0f} deg), "
               f"weights from zero")
+    if cfg.pcolor:
+        rx = torch.linalg.inv(train["viewmats"])[:, :3, 3]
+        model.add_pcolor(cfg.pcolor, cfg.pcolor_hidden, cfg.pcolor_freqs, rx)
+        if cfg.init_from:
+            model.load_state(torch.load(cfg.init_from, map_location=device))
+        print(f"position-conditioned colour: latent {cfg.pcolor}, MLP hidden {cfg.pcolor_hidden}, "
+              f"{cfg.pcolor_freqs} position frequencies ({sum(p.numel() for p in model.pcolor_mlp.parameters()):,} MLP parameters), "
+              f"output from zero")
     print(f"{model.n_gaussians:,} Gaussians from visual iteration {model.visual_iteration}; "
           f"mode {cfg.mode}, {channels} channel(s), SH degree {cfg.sh_degree}; "
           f"geometry {'trained' if cfg.train_geometry else 'frozen'}, densify {cfg.densify}")
@@ -1010,12 +1059,14 @@ def main():
     # which is what gsplat's strategies expect.
     lrs = {"sh0": cfg.feature_lr, "shN": cfg.feature_lr / 20.0, "opacities": cfg.opacity_lr,
            "means": 1.6e-5 * model.spatial_lr_scale, "scales": 5e-3, "quats": 1e-3, "latent": cfg.feature_lr,
-           "lobe_w": cfg.feature_lr, "lobe_axis": cfg.lobe_axis_lr, "lobe_logk": cfg.lobe_kappa_lr}
+           "lobe_w": cfg.feature_lr, "lobe_axis": cfg.lobe_axis_lr, "lobe_logk": cfg.lobe_kappa_lr, "pc_latent": cfg.feature_lr}
     lrs = {k: v * cfg.lr_scale for k, v in lrs.items()}
     optimizers = {name: torch.optim.Adam([p], lr=lrs[name], eps=1e-15)
                   for name, p in model.params.items() if p.requires_grad}
     if model.head is not None:
         optimizers["head"] = torch.optim.Adam(model.head.parameters(), lr=cfg.head_lr)
+    if getattr(model, "pcolor_mlp", None) is not None:
+        optimizers["pcolor"] = torch.optim.Adam(model.pcolor_mlp.parameters(), lr=cfg.pcolor_lr * cfg.lr_scale)
     n_params = sum(p.numel() for p in model.params.values() if p.requires_grad)
     print(f"optimised per-Gaussian parameters: {n_params:,} (Adam state {2 * 4 * n_params / 2**20:.0f} MiB)")
     geom_mask = None

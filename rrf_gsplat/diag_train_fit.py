@@ -76,6 +76,9 @@ def main():
     st = torch.load(os.path.join(a.run, "rrf_state.pt"), map_location=dev)
     if "lobe_w" in st:                    # --lobes: create the parameters, then load them
         model.add_lobes(st["lobe_w"].shape[1], 20.0, torch.zeros(1, 3))
+    if "pcolor_mlp" in st:                # --pcolor: the same, the receiver normalisation comes from the state
+        c = st["pcolor_cfg"]
+        model.add_pcolor(c["width"], c["hidden"], c["n_freqs"], torch.zeros(2, 3))
     model.load_state(st)
     out = os.path.join(a.run + "_trainfit", "renders")
     with torch.no_grad():
