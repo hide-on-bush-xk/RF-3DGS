@@ -76,6 +76,9 @@ def main():
         keep = max(1, a.train_subset // 4)
         idx = [i for j in np.linspace(0, len(groups) - 1, keep).round().astype(int) for i in groups[j]]
     names = [train_names[i] for i in idx]
+    if cfg.get("train_names_file"):
+        # the run trained on an explicit list (train_rrf.py --train-names-file): score exactly those
+        names = [l.strip() for l in open(cfg["train_names_file"]) if l.strip()]
     dev = "cuda"
     data = T.load_views(source, names, views, dev, want_float=True)
     ck = cfg["checkpoint"] if os.path.isabs(cfg["checkpoint"]) else os.path.join(T.REPO, cfg["checkpoint"])
@@ -88,6 +91,8 @@ def main():
     if "pcolor_mlp" in st:                # --pcolor: the same, the receiver normalisation comes from the state
         c = st["pcolor_cfg"]
         model.add_pcolor(c["width"], c["hidden"], c["n_freqs"], torch.zeros(2, 3))
+    if "em_means" in st:                  # --emitters: the points and their scale come from the state
+        model.add_emitters(st["em_means"].cpu().numpy(), float(torch.exp(st["em_scales"][0, 0])))
     model.load_state(st)
     out = os.path.join(a.run + "_trainfit", "renders")
     with torch.no_grad():

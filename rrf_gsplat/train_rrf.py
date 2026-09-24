@@ -357,21 +357,57 @@ class RRF(torch.nn.Module):
         self.params["lobe_logk"] = torch.nn.Parameter(torch.full((n, k), math.log(kappa_init), device=dev))
         self.params["lobe_w"] = torch.nn.Parameter(torch.zeros(n, k, self.channels, device=dev))
 
-    def _sh_colours(self, cam_center):
+    def _sh_colours(self, cam_center, means=None, sh=None, frozen=None):
+        means = self.means if means is None else means
+        sh = self.sh if sh is None else sh
+        frozen = (not self.params["means"].requires_grad) if frozen is None else frozen
         if self.sh_degree == 0:
-            return self.params["sh0"][:, 0, :] * 0.28209479177387814 + 0.5
-        if self.sh_backend == "gsplat" and not self.params["means"].requires_grad:
+            return sh[:, 0, :] * 0.28209479177387814 + 0.5
+        if self.sh_backend == "gsplat" and frozen:
             # gsplat's SH kernel takes any channel count and reads the camera position from a view
             # matrix as -R^T t, so an identity rotation with t = -c places the camera at c. Same basis,
             # same coefficients: 6e-8 from the torch path forward, and a third of its time with backward.
             from gsplat import spherical_harmonics
             vm = torch.eye(4, device=cam_center.device); vm[:3, 3] = -cam_center
-            return spherical_harmonics(self.sh_degree, self.means, vm[None], self.sh)[0] + 0.5
-        ctx = torch.enable_grad() if self.params["means"].requires_grad else torch.no_grad()
+            return spherical_harmonics(self.sh_degree, means, vm[None], sh)[0] + 0.5
+        ctx = torch.no_grad() if frozen else torch.enable_grad()
         with ctx:
-            dirs = F.normalize(self.means - cam_center[None], dim=-1)
+            dirs = F.normalize(means - cam_center[None], dim=-1)
             basis = sh_basis(self.sh_degree, dirs)                  # [N, K]
-        return (self.sh * basis[:, :, None]).sum(dim=1) + 0.5
+        return (sh * basis[:, :, None]).sum(dim=1) + 0.5
+
+    def add_emitters(self, means, scale_m, opacity0=0.01):
+        """M3's placement oracle (docs/tech_paths.md; sionna_port/path_emitters.py): extra isotropic Gaussians at
+        given points -- the ray tracer's interaction points -- rendered in their OWN pass and added to the field in
+        linear power (power mode only). The visual Gaussians do not occlude them, so this is the most generous
+        placement oracle: whether a peak can be drawn where the energy really comes from. Geometry fixed; SH and
+        opacity learn. The DC starts at value 0.01 (0.01 x span above the floor), so the model starts as the plain
+        one up to about opacity0 x the floor's power (checked in the smoke). Not at 0: the colour is clamped to
+        [0, 1] and the SH gradient dies at the boundary (the smoke's first run: zero SH gradient)."""
+        dev = self.params["means"].device
+        m = torch.as_tensor(means, dtype=torch.float32, device=dev)
+        n, k = m.shape[0], (self.sh_degree + 1) ** 2
+        self.params["em_means"] = torch.nn.Parameter(m, requires_grad=False)
+        self.params["em_scales"] = torch.nn.Parameter(torch.full((n, 3), math.log(scale_m), device=dev), requires_grad=False)
+        self.params["em_opacities"] = torch.nn.Parameter(torch.full((n,), math.log(opacity0 / (1 - opacity0)), device=dev))
+        self.params["em_sh0"] = torch.nn.Parameter(torch.full((n, 1, self.channels), (0.01 - 0.5) / 0.28209479177387814, device=dev))
+        self.params["em_shN"] = torch.nn.Parameter(torch.zeros(n, k - 1, self.channels, device=dev))
+        self._em_quats = torch.zeros(n, 4, device=dev); self._em_quats[:, 0] = 1.0
+
+    def _emitter_power(self, viewmats, Ks, width, height, span_db, centres):
+        """The emitters' own rasterisation, linear power [B, C, H, W] on a zero background."""
+        from gsplat import rasterization
+        p = self.params
+        sh = torch.cat([p["em_sh0"], p["em_shN"]], dim=1)
+        if viewmats.shape[0] == 1 or float((centres - centres[:1]).norm(dim=-1).max()) < 1e-4:
+            col = self._sh_colours(centres[0], p["em_means"], sh, frozen=True)
+        else:
+            col = torch.stack([self._sh_colours(c, p["em_means"], sh, frozen=True) for c in centres])
+        col = torch.pow(10.0, col.clamp(0.0, 1.0) * span_db / 10.0)
+        img, _, _ = rasterization(p["em_means"], self._em_quats, torch.exp(p["em_scales"]), torch.sigmoid(p["em_opacities"]),
+                                  col, viewmats, Ks, width, height, sh_degree=None,
+                                  backgrounds=torch.zeros(viewmats.shape[0], col.shape[-1], device=col.device))
+        return img.permute(0, 3, 1, 2)
 
     def render(self, viewmat, K, width, height, span_db):
         """One view, [C, H, W]: render_batch with a batch of one."""
@@ -477,6 +513,8 @@ class RRF(torch.nn.Module):
                 depth_m = depth_m * self._range_factor[1]
             img = img[:, :self.channels].clone()
             img[:, self.delay_channel] = img[:, self.delay_channel] + depth_m / (0.299792458 * self.delay_span_ns)
+        if "em_means" in self.params:
+            img = img + self._emitter_power(viewmats, Ks, width, height, span_db, centres)   # linear power (power mode)
         if self.mode == "power":
             img = torch.log10(img + 1e-12) * 10.0 / span_db
         if hc is not None:
@@ -524,7 +562,7 @@ class RRF(torch.nn.Module):
             self.head.load_state_dict(st["head"])
         if "latent" in st and "latent" in p:
             p["latent"].data.copy_(st["latent"])
-        for k in ("lobe_axis", "lobe_logk", "lobe_w", "pc_latent"):
+        for k in ("lobe_axis", "lobe_logk", "lobe_w", "pc_latent", "em_opacities", "em_sh0", "em_shN"):
             if k in st and k in p and st[k].shape == p[k].shape:
                 p[k].data.copy_(st[k])
         if "pcolor_mlp" in st and getattr(self, "pcolor_mlp", None) is not None:
@@ -922,6 +960,13 @@ def main():
     ap.add_argument("--pcolor-hidden", type=int, default=32)
     ap.add_argument("--pcolor-freqs", type=int, default=4, help="Fourier frequencies of the receiver position")
     ap.add_argument("--pcolor-lr", type=float, default=1e-3, help="the MLP's learning rate (the latent: --feature-lr)")
+    ap.add_argument("--emitters", default=None,
+                    help="M3's placement oracle: an npz of points (sionna_port/path_emitters.py) that become extra "
+                         "isotropic Gaussians rendered in their own pass and added in linear power (--mode power)")
+    ap.add_argument("--emitter-scale", type=float, default=0.025, help="the emitters' isotropic scale (m)")
+    ap.add_argument("--emitter-opacity", type=float, default=0.01, help="the emitters' initial opacity")
+    ap.add_argument("--train-names-file", default=None,
+                    help="train on exactly these views (one name per line; each must be in the training set)")
     ap.add_argument("--bwd-no-geom", choices=["auto", "on", "off"], default="auto",
                     help="gsplat_win's GSPLAT_BWD_NO_GEOM: the rasteriser's backward skips the conic / 2D-mean gradients, "
                          "which frozen geometry discards anyway (same colour / opacity gradients; -6.5 %% training time in "
@@ -957,6 +1002,9 @@ def main():
             print("--head-strip: evaluation groups each position's faces (--eval-group), or the ring could not form")
     if cfg.faces_per_step > 1 and cfg.densify != "none":
         raise SystemExit("--faces-per-step > 1 is not wired into the densification strategy's per-view statistics")
+    if cfg.emitters and (cfg.mode != "power" or cfg.head != "none" or cfg.delay_depth or cfg.densify != "none"
+                         or cfg.lm_after or cfg.train_geometry):
+        raise SystemExit("--emitters: --mode power, frozen geometry, no head, no delay channel, no densification, no LM")
 
     torch.manual_seed(cfg.seed)
     device = torch.device("cuda")
@@ -1009,6 +1057,12 @@ def main():
         else:
             pos_idx = np.linspace(0, n_pos - 1, keep).round().astype(int)
         train_names = [train_names[p * per_pos + k] for p in pos_idx for k in range(per_pos)]
+    if cfg.train_names_file:
+        chosen = [l.strip() for l in open(cfg.train_names_file) if l.strip()]
+        outside = [n for n in chosen if n not in set(train_names)]
+        if outside:
+            raise SystemExit(f"--train-names-file: {len(outside)} views are not in the training set (e.g. {outside[:3]})")
+        train_names = chosen
     t0 = time.time()
     train = load_views(cfg.source, train_names, views, device, want_float=True)
     if cfg.test_source:
@@ -1071,6 +1125,13 @@ def main():
         print(f"position-conditioned colour: latent {cfg.pcolor}, MLP hidden {cfg.pcolor_hidden}, "
               f"{cfg.pcolor_freqs} position frequencies ({sum(p.numel() for p in model.pcolor_mlp.parameters()):,} MLP parameters), "
               f"output from zero")
+    if cfg.emitters:
+        em = np.load(cfg.emitters)
+        model.add_emitters(em["means"], cfg.emitter_scale, cfg.emitter_opacity)
+        if cfg.init_from:
+            model.load_state(torch.load(cfg.init_from, map_location=device))
+        print(f"emitters (placement oracle): {len(em['means']):,} from {cfg.emitters}, scale {cfg.emitter_scale} m, "
+              f"opacity from {cfg.emitter_opacity}, value from the floor; own pass, added in linear power")
     print(f"{model.n_gaussians:,} Gaussians from visual iteration {model.visual_iteration}; "
           f"mode {cfg.mode}, {channels} channel(s), SH degree {cfg.sh_degree}; "
           f"geometry {'trained' if cfg.train_geometry else 'frozen'}, densify {cfg.densify}")
@@ -1081,7 +1142,8 @@ def main():
     # which is what gsplat's strategies expect.
     lrs = {"sh0": cfg.feature_lr, "shN": cfg.feature_lr / 20.0, "opacities": cfg.opacity_lr,
            "means": 1.6e-5 * model.spatial_lr_scale, "scales": 5e-3, "quats": 1e-3, "latent": cfg.feature_lr,
-           "lobe_w": cfg.feature_lr, "lobe_axis": cfg.lobe_axis_lr, "lobe_logk": cfg.lobe_kappa_lr, "pc_latent": cfg.feature_lr}
+           "lobe_w": cfg.feature_lr, "lobe_axis": cfg.lobe_axis_lr, "lobe_logk": cfg.lobe_kappa_lr, "pc_latent": cfg.feature_lr,
+           "em_sh0": cfg.feature_lr, "em_shN": cfg.feature_lr / 20.0, "em_opacities": cfg.opacity_lr}
     lrs = {k: v * cfg.lr_scale for k, v in lrs.items()}
     optimizers = {name: torch.optim.Adam([p], lr=lrs[name], eps=1e-15)
                   for name, p in model.params.items() if p.requires_grad}
