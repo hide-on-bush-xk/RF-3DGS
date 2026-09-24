@@ -376,21 +376,32 @@ class RRF(torch.nn.Module):
             basis = sh_basis(self.sh_degree, dirs)                  # [N, K]
         return (sh * basis[:, :, None]).sum(dim=1) + 0.5
 
-    def add_emitters(self, means, scale_m, opacity0=0.01):
+    EM_VMAX = 1.5                  # an emitter's value v = EM_VMAX * sigmoid(SH): up to 1.5 x the span above the floor
+
+    def add_emitters(self, means, scale_m, opacity=0.05, v0=0.02):
         """M3's placement oracle (docs/tech_paths.md; sionna_port/path_emitters.py): extra isotropic Gaussians at
         given points -- the ray tracer's interaction points -- rendered in their OWN pass and added to the field in
         linear power (power mode only). The visual Gaussians do not occlude them, so this is the most generous
-        placement oracle: whether a peak can be drawn where the energy really comes from. Geometry fixed; SH and
-        opacity learn. The DC starts at value 0.01 (0.01 x span above the floor), so the model starts as the plain
-        one up to about opacity0 x the floor's power (checked in the smoke). Not at 0: the colour is clamped to
-        [0, 1] and the SH gradient dies at the boundary (the smoke's first run: zero SH gradient)."""
+        placement oracle: whether a peak can be drawn where the energy really comes from. Geometry fixed; only the
+        SH (the emitted power per direction) learns.
+
+        No dead zones (the first full run had them: 97 % of the emitters never lit):
+          value     v = EM_VMAX * sigmoid(SH), power 10^(v span / 10) - 1: smooth everywhere, and v -> 0 adds nothing.
+                    (With the visual Gaussians' clamp(0, 1) the values were pushed below 0 early, when the whole
+                    render is too bright, and their gradient died there.)
+          opacity   fixed at `opacity`: above gsplat's 1 / 255 alpha cut-off (a trained opacity decayed below it and
+                    the rasteriser skipped those emitters), and small, so the pass is nearly additive (little
+                    occlusion among emitters on one line of sight).
+        Starts at v0, i.e. about opacity x (10^(v0 span / 10) - 1) of the floor's power: the plain model's render."""
         dev = self.params["means"].device
         m = torch.as_tensor(means, dtype=torch.float32, device=dev)
         n, k = m.shape[0], (self.sh_degree + 1) ** 2
+        raw0 = math.log(v0 / self.EM_VMAX / (1 - v0 / self.EM_VMAX))
         self.params["em_means"] = torch.nn.Parameter(m, requires_grad=False)
         self.params["em_scales"] = torch.nn.Parameter(torch.full((n, 3), math.log(scale_m), device=dev), requires_grad=False)
-        self.params["em_opacities"] = torch.nn.Parameter(torch.full((n,), math.log(opacity0 / (1 - opacity0)), device=dev))
-        self.params["em_sh0"] = torch.nn.Parameter(torch.full((n, 1, self.channels), (0.01 - 0.5) / 0.28209479177387814, device=dev))
+        self.params["em_opacities"] = torch.nn.Parameter(torch.full((n,), math.log(opacity / (1 - opacity)), device=dev),
+                                                         requires_grad=False)
+        self.params["em_sh0"] = torch.nn.Parameter(torch.full((n, 1, self.channels), raw0 / 0.28209479177387814, device=dev))
         self.params["em_shN"] = torch.nn.Parameter(torch.zeros(n, k - 1, self.channels, device=dev))
         self._em_quats = torch.zeros(n, 4, device=dev); self._em_quats[:, 0] = 1.0
 
@@ -400,10 +411,11 @@ class RRF(torch.nn.Module):
         p = self.params
         sh = torch.cat([p["em_sh0"], p["em_shN"]], dim=1)
         if viewmats.shape[0] == 1 or float((centres - centres[:1]).norm(dim=-1).max()) < 1e-4:
-            col = self._sh_colours(centres[0], p["em_means"], sh, frozen=True)
+            raw = self._sh_colours(centres[0], p["em_means"], sh, frozen=True) - 0.5
         else:
-            col = torch.stack([self._sh_colours(c, p["em_means"], sh, frozen=True) for c in centres])
-        col = torch.pow(10.0, col.clamp(0.0, 1.0) * span_db / 10.0)
+            raw = torch.stack([self._sh_colours(c, p["em_means"], sh, frozen=True) for c in centres]) - 0.5
+        v = self.EM_VMAX * torch.sigmoid(raw)
+        col = torch.pow(10.0, v * span_db / 10.0) - 1.0
         img, _, _ = rasterization(p["em_means"], self._em_quats, torch.exp(p["em_scales"]), torch.sigmoid(p["em_opacities"]),
                                   col, viewmats, Ks, width, height, sh_degree=None,
                                   backgrounds=torch.zeros(viewmats.shape[0], col.shape[-1], device=col.device))
@@ -964,7 +976,11 @@ def main():
                     help="M3's placement oracle: an npz of points (sionna_port/path_emitters.py) that become extra "
                          "isotropic Gaussians rendered in their own pass and added in linear power (--mode power)")
     ap.add_argument("--emitter-scale", type=float, default=0.025, help="the emitters' isotropic scale (m)")
-    ap.add_argument("--emitter-opacity", type=float, default=0.01, help="the emitters' initial opacity")
+    ap.add_argument("--emitter-opacity", type=float, default=0.05,
+                    help="the emitters' FIXED opacity (above gsplat's 1/255 cut-off, small enough to add almost linearly)")
+    ap.add_argument("--emitter-lr-mult", type=float, default=10.0,
+                    help="the emitters' SH learning rate over --feature-lr: their value is a sigmoid of the SH and starts "
+                         "near the floor, so at the visual Gaussians' rate it could not get bright within 3000 steps")
     ap.add_argument("--train-names-file", default=None,
                     help="train on exactly these views (one name per line; each must be in the training set)")
     ap.add_argument("--bwd-no-geom", choices=["auto", "on", "off"], default="auto",
@@ -1131,7 +1147,8 @@ def main():
         if cfg.init_from:
             model.load_state(torch.load(cfg.init_from, map_location=device))
         print(f"emitters (placement oracle): {len(em['means']):,} from {cfg.emitters}, scale {cfg.emitter_scale} m, "
-              f"opacity from {cfg.emitter_opacity}, value from the floor; own pass, added in linear power")
+              f"opacity {cfg.emitter_opacity} (fixed), value from near the floor, SH lr x{cfg.emitter_lr_mult:g}; "
+              f"own pass, added in linear power")
     print(f"{model.n_gaussians:,} Gaussians from visual iteration {model.visual_iteration}; "
           f"mode {cfg.mode}, {channels} channel(s), SH degree {cfg.sh_degree}; "
           f"geometry {'trained' if cfg.train_geometry else 'frozen'}, densify {cfg.densify}")
@@ -1143,7 +1160,7 @@ def main():
     lrs = {"sh0": cfg.feature_lr, "shN": cfg.feature_lr / 20.0, "opacities": cfg.opacity_lr,
            "means": 1.6e-5 * model.spatial_lr_scale, "scales": 5e-3, "quats": 1e-3, "latent": cfg.feature_lr,
            "lobe_w": cfg.feature_lr, "lobe_axis": cfg.lobe_axis_lr, "lobe_logk": cfg.lobe_kappa_lr, "pc_latent": cfg.feature_lr,
-           "em_sh0": cfg.feature_lr, "em_shN": cfg.feature_lr / 20.0, "em_opacities": cfg.opacity_lr}
+           "em_sh0": cfg.feature_lr * cfg.emitter_lr_mult, "em_shN": cfg.feature_lr / 20.0 * cfg.emitter_lr_mult}
     lrs = {k: v * cfg.lr_scale for k, v in lrs.items()}
     optimizers = {name: torch.optim.Adam([p], lr=lrs[name], eps=1e-15)
                   for name, p in model.params.items() if p.requires_grad}

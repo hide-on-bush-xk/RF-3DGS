@@ -1,11 +1,14 @@
 """Smoke for --emitters (M3's placement oracle; train_rrf.RRF.add_emitters, sionna_port/path_emitters.py).
 
 Criteria, written before the first run (2026-09-24):
-  S1  at initialisation (emitter value 0.01 above the floor, opacity 0.01) the renders equal the plain model's: median |diff|
+  S1  at initialisation (emitter value near the floor) the renders equal the plain model's: median |diff|
       <= 0.05 dB and max <= 0.5 dB over the smoke views (every face of 12 stratified positions, the flat view included)
-  S2  after one step the emitters' SH (DC and rest) and opacity have a nonzero, finite gradient; their means and
-      scales do not train
+  S2  after one step the emitters' SH (DC and rest) have a nonzero, finite gradient; their means, scales and (since
+      the dead-emitter fix) opacities do not train
   S3  300 steps on the smoke views: no NaN, the mean loss of the last 20 steps below that of the first 20
+  S5  (added with the dead-emitter fix, before its run) liveness after the 300 steps: over one pass of all smoke views,
+      among the emitters inside at least one view's frustum, the share whose DC gradient is exactly zero <= 1 %
+      (the first full oracle run: DC value median 0 under the clamp, opacity median 0.0028 < gsplat's 1/255 cut-off)
 Reported, not judged (S4, train_rrf.py runs on the same views, see rounds/win_m3_smoke.sh): <= 1 deg with and
 without the emitters, and the step time.
 
@@ -70,10 +73,10 @@ def main():
     res["S1_median_db"], res["S1_max_db"] = float(d.median()), float(d.max())
     res["S1"] = res["S1_median_db"] <= 0.05 and res["S1_max_db"] <= 0.5
     # S2 and S3
-    lrs = {"sh0": 5e-3, "shN": 2.5e-4, "opacities": 0.1, "em_sh0": 5e-3, "em_shN": 2.5e-4, "em_opacities": 0.1}
+    lrs = {"sh0": 5e-3, "shN": 2.5e-4, "opacities": 0.1, "em_sh0": 5e-2, "em_shN": 2.5e-3}      # train_rrf: emitters x10
     opt = {k: torch.optim.Adam([p], lr=lrs[k], eps=1e-15) for k, p in m1.params.items() if p.requires_grad}
     target = lambda i: ((data["float"][i].float() - vmin) / span).clamp(0, 1)[None]    # noqa: E731
-    fixed = {k: m1.params[k].detach().clone() for k in ("em_means", "em_scales")}
+    fixed = {k: m1.params[k].detach().clone() for k in ("em_means", "em_scales", "em_opacities")}
     losses = []
     n_pos = len(names) // 4
     for it in range(300):
@@ -85,21 +88,39 @@ def main():
             o.zero_grad(set_to_none=True)
         loss.backward()
         if it == 0:
-            g = {k: m1.params[k].grad for k in ("em_sh0", "em_shN", "em_opacities")}
+            g = {k: m1.params[k].grad for k in ("em_sh0", "em_shN")}
             res["S2_grad_norms"] = {k: (None if v is None else float(v.norm())) for k, v in g.items()}
             res["S2"] = all(v is not None and torch.isfinite(v).all() and float(v.norm()) > 0 for v in g.values()) and \
-                not m1.params["em_means"].requires_grad and not m1.params["em_scales"].requires_grad
+                not any(m1.params[k].requires_grad for k in ("em_means", "em_scales", "em_opacities"))
         for o in opt.values():
             o.step()
         losses.append(float(loss.detach()))
     res["S2"] = bool(res["S2"]) and all(torch.equal(fixed[k], m1.params[k].detach()) for k in fixed)
     res["S3_first20"], res["S3_last20"] = float(np.mean(losses[:20])), float(np.mean(losses[-20:]))
     res["S3"] = bool(np.isfinite(losses).all()) and res["S3_last20"] < res["S3_first20"]
-    op = torch.sigmoid(m1.params["em_opacities"]).detach()
-    res["after_300_emitter_opacity_p50_p99"] = [float(op.median()), float(op.quantile(0.99))]
+    # S5: one pass over every smoke view, DC gradients accumulated, no step
+    for o in opt.values():
+        o.zero_grad(set_to_none=True)
+    for s in range(0, len(names), 4):
+        sl = slice(s, s + 4)
+        img = m1.render_batch(data["viewmats"][sl], data["Ks"][sl], data["width"], data["height"], span)
+        l1_loss(img, torch.stack([target(i) for i in range(s, s + 4)])).backward()
+    gdc = m1.params["em_sh0"].grad[:, 0, 0].abs()
+    mu = m1.params["em_means"].detach()
+    inside = torch.zeros(len(mu), dtype=torch.bool, device=mu.device)
+    for vm, K in zip(data["viewmats"], data["Ks"]):
+        xc = mu @ vm[:3, :3].T + vm[:3, 3]
+        z = xc[:, 2].clamp_min(1e-6)
+        u, v = K[0, 0] * xc[:, 0] / z + K[0, 2], K[1, 1] * xc[:, 1] / z + K[1, 2]
+        inside |= (xc[:, 2] > 0.01) & (u >= 0) & (u < data["width"]) & (v >= 0) & (v < data["height"])
+    res["S5_emitters_in_a_frustum"] = int(inside.sum())
+    res["S5_zero_grad_share"] = float((gdc[inside] == 0).float().mean())
+    res["S5"] = res["S5_zero_grad_share"] <= 0.01
+    val = (T.RRF.EM_VMAX * torch.sigmoid(m1.params["em_sh0"][:, 0, 0] * 0.28209479177387814)).detach()
+    res["after_300_emitter_dc_value_p50_p90_p99"] = [float(val.median()), float(val.quantile(0.9)), float(val.quantile(0.99))]
     print(json.dumps(res, indent=1))
-    print("ALL PASS" if res["S1"] and res["S2"] and res["S3"] else
-          "FAIL: " + ", ".join(k for k in ("S1", "S2", "S3") if not res[k]))
+    print("ALL PASS" if all(res[k] for k in ("S1", "S2", "S3", "S5")) else
+          "FAIL: " + ", ".join(k for k in ("S1", "S2", "S3", "S5") if not res[k]))
     json.dump(res, open(os.path.join(T.REPO, "output", "rrf", "m3", "check_emitters.json"), "w"), indent=1)
 
 
