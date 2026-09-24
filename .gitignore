@@ -5,7 +5,8 @@
 RF-3DGS_dataset/
 output/
 *.pyc
-*/simple-knn
+original_rf3dgs/submodules/simple-knn/build/
+original_rf3dgs/submodules/simple-knn/*.egg-info/
 *.zip
 sionna_tutorial/
 

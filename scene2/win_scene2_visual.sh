@@ -30,7 +30,7 @@ if [ ! -f scene2/visual_dataset/transforms_train.json ]; then
   stamp "render done"
 fi
 stamp "train visual 3DGS (30k)"
-$PYG train.py -s scene2/visual_dataset -m output/scene2_visual --eval --iterations 30000 --checkpoint_iterations 30000 --save_iterations 30000 \
+$PYG original_rf3dgs/train.py -s scene2/visual_dataset -m output/scene2_visual --eval --iterations 30000 --checkpoint_iterations 30000 --save_iterations 30000 \
     < /dev/null 2>&1 | grep -a "PSNR\|Training progress\|Error\|Traceback\|Number of points\|Evaluating" | tail -12 >> $LOG
 stamp "train done"
 mkdir -p scene2/visual_trained && cp output/scene2_visual/chkpnt30000.pth scene2/visual_trained/chkpnt30000.pth 2>/dev/null && stamp "checkpoint copied"

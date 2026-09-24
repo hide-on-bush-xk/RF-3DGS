@@ -24,7 +24,7 @@ stamp "fix: render 800x450 with the x,z column flip (Mitsuba camera x = left)"
 $PYS scene2/render_visual.py --scene scene2/corridor --out C:/Users/Ke/Documents/GitHub/RF-3DGS/scene2/visual_dataset --width 800 --height 450 --spp 64 --extra 300 --route-every 4 \
     < /dev/null 2>&1 | grep -v "jitc_llvm\|WARN" | tail -2 >> $LOG
 stamp "fix: train (30k, saves at 7k and 30k)"
-$PYG train.py -s scene2/visual_dataset -m output/scene2_visual --eval --iterations 30000 \
+$PYG original_rf3dgs/train.py -s scene2/visual_dataset -m output/scene2_visual --eval --iterations 30000 \
     --test_iterations 7000 30000 --save_iterations 7000 30000 --checkpoint_iterations 30000 \
     < /dev/null > output/scene2_visual_train_stdout.log 2>&1
 grep -a "PSNR\|Error\|Traceback\|Number of points" output/scene2_visual_train_stdout.log | tail -8 >> $LOG

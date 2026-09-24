@@ -8,7 +8,8 @@ rasterises any number of channels, so the target no longer has to be an RGB
 picture — and then runs the experiments that this makes possible.
 
 Runs in WSL (`rf-gsplat`, Python 3.10, torch 2.9.1+cu130, gsplat 1.6.0), reading
-the repo from `/mnt/c`. Datasets come from `sionna_port/generate_dataset.py` on
+the repo from `/mnt/c`, or since round 44 natively on Windows (`rf-gsplat-win`, the same versions, gsplat
+built from the `gsplat_win` fork). Datasets come from `sionna_port/generate_dataset.py` on
 Windows, which also writes the float spectra the evaluation needs.
 
 ```text
@@ -17,9 +18,11 @@ jet.py                matplotlib's jet and its inverse in torch (to score RGB mo
 renormalize.py        remap a dataset's float spectra to PNGs: global percentile / global min-max / per view
 summarize.py          output/rrf/*/results.json -> one table (summary.json + markdown)
 rrf_panels.py         the dashboard section (sionna_port/dashboard.py --rrf-dir output/rrf)
+losses.py             INRIA's l1_loss / ssim, copied so the pipeline does not import original_rf3dgs/
 run_matrix.sh         the experiment matrix, skips finished runs
 wsl_run.sh            run one training in WSL with a log
-win_gpu_jobs.sh       Windows-side GPU jobs: Tx-B dataset, 2.4 GHz timing, INRIA rasteriser timing
+rounds/               every experiment queue, one script per round (win_roundNN.sh, win_gpu_jobs.sh, ...);
+                      they cd to the repository root, so they run from anywhere
 time_tutorial_019.py  the original tutorial pipeline (Sionna 0.19 + TF) timed on this machine
 profile_resolution.py one training step split into SH colour / raster / loss+backward / Adam, at six render sizes
 check_face_batching.py controls for the speed flags: render() vs HEAD, batched faces vs single, CUDA vs torch SH
@@ -31,7 +34,21 @@ label_sr.py           experiment A1: a learned upsampler for 150x100 labels, sco
 check_shading_head.py controls for --head cnn: identity at the start, guide buffers, gradients
 head_share.py         how much of a head model's output is the head, on in-range and peak pixels
 dlss_ablation.py      rounds 41-43 tables: every head feature's gain (ladder, leave-one-out, seeds)
+check_gsplat_port.py  the Windows-native gsplat (gsplat_win) against the WSL build: trained scenes, forward + backward
+check_gsplat_port_edge.py  the same on 161 edge-case arrays (sizes, packed, extremes, 1-32 channels, options)
+check_pergauss_bwd.py the per-Gaussian and frozen-geometry backward variants against stock, and a float64 reference
+time_bwd_variants.py  one training step per backward variant, two resolutions, quiet-GPU gate
+lm_optim.py           3DGS-LM after Adam (--lm-after): PCG on the normal equations, line search, trust region
+check_lm.py           controls for lm_optim: J p vs finite differences, symmetry, J^T r vs autograd, descent
+r45_table.py          rounds 45-46 table and the pre-registered keep / drop decisions
 ```
+
+**Windows-native gsplat (2026-09-24, round 44).** gsplat 1.6.0 now also builds natively under VS 2026 from
+the fork at `../gsplat_win` (branch `rf-win`), env `rf-gsplat-win`; the WSL env `rf-gsplat` stays untouched
+as the reference. Renders are bit-identical to the WSL build and gradients agree to 1e-6
+(`check_gsplat_port*.py`). The fork adds switches, all off by default: `GSPLAT_BWD_NO_GEOM=1` (frozen
+geometry: skip the conic / 2D-mean gradients), `GSPLAT_BWD_PERGAUSS=1` (Taming 3DGS's per-Gaussian
+backward). `--cudnn-tf32 off` computes the SSIM exactly (TF32 put a quarter of the pixels above SSIM 1).
 
 **Speed (2026-09-23, rounds 24–35; details in `docs/stage2_notes.md`).** A step does not get
 cheaper below 600×400 (multi: 39–44 ms from 75×50 to 600×400, `profile_resolution.py`): the cost is

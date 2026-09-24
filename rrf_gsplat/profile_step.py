@@ -17,7 +17,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from train_rrf import REPO, RRF, load_views, read_colmap_text, read_index  # noqa: E402
-from utils.loss_utils import l1_loss, ssim  # noqa: E402
+from losses import l1_loss, ssim  # noqa: E402  (INRIA's, copied: losses.py)
 
 
 def timed(fn, n=20):

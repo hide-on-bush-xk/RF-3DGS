@@ -40,7 +40,7 @@ def ssim_window(device, size=11, sigma=1.5):
 
 
 def ssim_map(img, gt, win):
-    """[B, 1, H, W] -> per-pixel SSIM, the statistics of utils.loss_utils._ssim (C1 = 0.01^2, C2 = 0.03^2)."""
+    """[B, 1, H, W] -> per-pixel SSIM, the statistics of losses._ssim (INRIA's) (C1 = 0.01^2, C2 = 0.03^2)."""
     p = win.shape[-1] // 2
     mu1, mu2 = F.conv2d(img, win, padding=p), F.conv2d(gt, win, padding=p)
     s11 = F.conv2d(img * img, win, padding=p) - mu1 * mu1

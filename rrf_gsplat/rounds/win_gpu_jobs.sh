@@ -40,7 +40,7 @@ echo "== 2.4 GHz timing done $(date)" >> $LOG
 # 3. INRIA rasteriser, released MVDR, 30k -> 40k
 cd $REPO
 T0=$(date +%s)
-$PYT train.py -s RF-3DGS_dataset/training-rf-spectrum/3dgs_MVDR_100 -m output/rrf/inria_released_mvdr \
+$PYT original_rf3dgs/train.py -s RF-3DGS_dataset/training-rf-spectrum/3dgs_MVDR_100 -m output/rrf/inria_released_mvdr \
     --iterations 40000 --start_checkpoint RF-3DGS_dataset/blender_visual_trained/chkpnt30000.pth \
     --eval --test_iterations 40000 --save_iterations 40000 > output/rrf/inria_released_mvdr.log 2>&1
 T1=$(date +%s)

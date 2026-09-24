@@ -16,7 +16,7 @@ stamp() { echo "== $1 $(date +%H:%M:%S)" >> $LOG; }
 sed -i 's/np.array(arr\*255.0, dtype=np.byte)/np.array(arr*255.0, dtype=np.uint8)/' scene/dataset_readers.py
 rm -rf output/scene2_visual
 stamp "train visual 3DGS (30k, resolution 1/2, saves at 7k and 30k)"
-$PYG train.py -s scene2/visual_dataset -m output/scene2_visual -r 2 --eval --iterations 30000 \
+$PYG original_rf3dgs/train.py -s scene2/visual_dataset -m output/scene2_visual -r 2 --eval --iterations 30000 \
     --test_iterations 7000 30000 --save_iterations 7000 30000 --checkpoint_iterations 30000 \
     < /dev/null > output/scene2_visual_train_stdout.log 2>&1
 grep -a "PSNR\|Error\|Traceback\|Number of points" output/scene2_visual_train_stdout.log | tail -12 >> $LOG

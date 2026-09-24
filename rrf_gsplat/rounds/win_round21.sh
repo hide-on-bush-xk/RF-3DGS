@@ -30,11 +30,11 @@ score() { local name=$1; local ds=$2; [ -f output/rrf/$name/inria_metrics.json ]
 inria() { local S=$1; local ds=$2; local out=output/sota/inria_$S
           [ -f $out/results.json ] && { echo "skip inria_$S" >> $LOG; return; }
           stamp "inria_$S train"; T0=$(date +%s)
-          $PYT train.py -s $ds -m $out --iterations 40000 --start_checkpoint $CKW --eval --test_iterations 40000 --save_iterations 40000 \
+          $PYT original_rf3dgs/train.py -s $ds -m $out --iterations 40000 --start_checkpoint $CKW --eval --test_iterations 40000 --save_iterations 40000 \
               < /dev/null > $out.train.log 2>&1; echo "wall $(( $(date +%s) - T0 )) s" >> $LOG
           grep -a "Evaluating test" $out.train.log | tail -1 >> $LOG
-          stamp "inria_$S render+metrics"; $PYT render.py -m $out --skip_train < /dev/null > /dev/null 2>&1
-          $PYT metrics.py -m $out < /dev/null 2>&1 | grep -a "PSNR\|SSIM\|LPIPS" | tr '\n' ' ' >> $LOG; echo >> $LOG; stamp "done inria_$S"; }
+          stamp "inria_$S render+metrics"; $PYT original_rf3dgs/render.py -m $out --skip_train < /dev/null > /dev/null 2>&1
+          $PYT original_rf3dgs/metrics.py -m $out < /dev/null 2>&1 | grep -a "PSNR\|SSIM\|LPIPS" | tr '\n' ' ' >> $LOG; echo >> $LOG; stamp "done inria_$S"; }
 quiet=0; while [ $quiet -lt 24 ]; do if gpu_busy; then quiet=0; else quiet=$((quiet+1)); fi; sleep 5; done
 mkdir -p output/sota
 stamp "start (gpu $(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader | tr -d '\r'))"

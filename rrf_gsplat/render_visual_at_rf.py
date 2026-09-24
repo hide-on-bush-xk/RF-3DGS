@@ -41,8 +41,9 @@ from PIL import Image
 import sys
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if REPO not in sys.path:
-    sys.path.insert(0, REPO)
+ORIG = os.path.join(REPO, "original_rf3dgs")      # the published code's gaussian_renderer / scene / utils
+if ORIG not in sys.path:
+    sys.path.insert(0, ORIG)
 
 from gaussian_renderer import render
 from scene.cameras import Camera

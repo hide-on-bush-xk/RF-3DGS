@@ -28,7 +28,7 @@ RF-3DGS 的本质是:**把 Sionna 算出来的"射频图片"(角功率谱的 jet
 
 ### 1.1 `train.py`:从视觉 checkpoint 出发,只学颜色和不透明度
 
-[train.py:44-52](../train.py#L44-L52)
+[train.py:44-52](../original_rf3dgs/train.py#L44-L52)
 
 ```python
 # RF_3dgs_retraining
@@ -42,7 +42,7 @@ gaussians._features_rest.data.fill_(0.0)   # SH 高阶清零
 
 也就是说:先用 Blender 渲染的照片按原版 3DGS 训练 30k 步得到几何(`_xyz, _scaling, _rotation`),然后加载这个 checkpoint,把每个高斯的颜色(球谐系数)清零,**只训练 SH 和 opacity** 去拟合射频谱图,再跑 10k 步(30k → 40k)。这就是论文里"3 min 训练"的含义——它不包括视觉 3DGS 的 30k 步,也不包括 Sionna 生成数据集的时间。"2 ms 渲染"是光栅化一张 300×200 图的时间,也就是原版 3DGS 的渲染速度。
 
-损失函数是原版的,[train.py:103-105](../train.py#L103-L105):
+损失函数是原版的,[train.py:103-105](../original_rf3dgs/train.py#L103-L105):
 
 $$\mathcal{L} = (1-\lambda)\,\|I - I_{gt}\|_1 + \lambda\,(1 - \mathrm{SSIM}(I, I_{gt})),\quad \lambda = 0.2$$
 
@@ -50,11 +50,11 @@ $$\mathcal{L} = (1-\lambda)\,\|I - I_{gt}\|_1 + \lambda\,(1 - \mathrm{SSIM}(I, I
 
 ### 1.2 `scene/dataset_readers.py`:按索引文件划分训练/测试
 
-[dataset_readers.py:195-211](../scene/dataset_readers.py#L195-L211) 读 `train_index.txt` / `test_index.txt`。仅此而已。
+[dataset_readers.py:195-211](../original_rf3dgs/scene/dataset_readers.py#L195-L211) 读 `train_index.txt` / `test_index.txt`。仅此而已。
 
 ### 1.3 光栅器:原封不动
 
-[config.h:15](../submodules/diff-gaussian-rasterization/cuda_rasterizer/config.h#L15) 仍是 `#define NUM_CHANNELS 3 // Default 3, RGB`。谱图是 3 通道 RGB,不是 1 通道 dB,也不是 N 通道(比如每个时延 bin 一通道)。
+[config.h:15](../original_rf3dgs/submodules/diff-gaussian-rasterization/cuda_rasterizer/config.h#L15) 仍是 `#define NUM_CHANNELS 3 // Default 3, RGB`。谱图是 3 通道 RGB,不是 1 通道 dB,也不是 N 通道(比如每个时延 bin 一通道)。
 
 ### 1.4 数据集:Sionna 0.19 教程
 
@@ -228,7 +228,7 @@ $$\mathbb{E}_{\mathbf{w}\sim\mathcal N(0,I)}\bigl[(\mathbf{J}_n^\top \mathbf{w})
 
 - CUDA 13.4(conda-forge,无管理员)+ VS 2026 MSVC 14.51:`NVCC_APPEND_FLAGS=-Xcompiler /Zc:preprocessor`;CUDA 12.8 在这套编译器下 `cudafe++` 崩溃。`submodules/*/setup.py` 加了 Windows 守卫。
 - `torch.load(weights_only=False)`:torch ≥ 2.6 默认拒绝 checkpoint 里的 numpy 标量。
-- gsplat 1.6.0 在 VS 2026 下编不过(`std::isfinite` 设备端),在 WSL 里从 main(`28e794ca`)构建成功;Sionna 2.1 在 WSL 的 CPU 后端因 Dr.Jit 1.5 捆绑的 LLVM 15 不能降低 `fmaximum` 而崩溃,WSL 里也没有 OptiX。**结论:Sionna 在 Windows 跑,gsplat 在 WSL 跑**。四个环境:`rf-3dgs`(py3.10,原版训练)、`rf-sionna-win`(py3.12,Sionna 2.1 GPU)、WSL `rf-gsplat` / `rf-sionna2`。
+- gsplat 1.6.0 在 VS 2026 下编不过(`std::isfinite` 设备端),在 WSL 里从 main(`28e794ca`)构建成功;Sionna 2.1 在 WSL 的 CPU 后端因 Dr.Jit 1.5 捆绑的 LLVM 15 不能降低 `fmaximum` 而崩溃,WSL 里也没有 OptiX。**结论:Sionna 在 Windows 跑,gsplat 在 WSL 跑**。四个环境:`rf-3dgs`(py3.10,原版训练)、`rf-sionna-win`(py3.12,Sionna 2.1 GPU)、WSL `rf-gsplat` / `rf-sionna2`。2026-09-24 起 gsplat 也在 Windows 原生编译(分支 `rf-win` 的 `gsplat_win`,环境 `rf-gsplat-win`;只改 MSVC 方言,与 WSL 版逐位 / 1e-6 一致,见 `stage2_notes.md` round 44)。
 - 场景文件:Blender 的 `.001` 后缀让 Sionna 查不到 ITU 材料;`custom_*` 不是 ITU 材料;plywood/brick 在 60 GHz 无定义;网格文件名 UTF-8 被当 CP437 解码;Windows 上 Mitsuba 不接受非 ASCII 路径;shape id 含 `.` 被渲染器拒绝。`fix_scene_xml.py` + `ascii_meshes.py` 处理。
 
 ---

@@ -105,7 +105,9 @@ absent from the Windows driver store, so Dr.Jit reports "could not find symbol
 optixQueryFunctionTable". Windows has the real `nvoptix.dll`, which is why the
 GPU path works there and not in WSL. Between the two constraints, **Sionna runs
 on Windows and gsplat runs in WSL** -- gsplat cannot build under VS 2026, and
-Sionna cannot ray trace under WSL.
+Sionna cannot ray trace under WSL. (Since 2026-09-24 gsplat also builds natively from
+the fork `../gsplat_win`, branch `rf-win`, env `rf-gsplat-win`: MSVC-dialect fixes only,
+verified against the WSL build; see `rrf_gsplat/README.md`.)
 
 Two Windows-only requirements:
 

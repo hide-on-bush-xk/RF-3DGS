@@ -34,7 +34,7 @@ sys.path.insert(0, HERE)
 import train_rrf as T  # noqa: E402
 import lm_optim as L  # noqa: E402
 from check_gsplat_port import MV, CK  # noqa: E402
-from utils.loss_utils import l1_loss, ssim  # noqa: E402
+from losses import l1_loss, ssim  # noqa: E402  (INRIA's, copied: losses.py)
 
 
 def main():

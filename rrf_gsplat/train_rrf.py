@@ -39,8 +39,8 @@ import torch
 import torch.nn.functional as F
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, REPO)
-from utils.loss_utils import l1_loss, ssim          # noqa: E402  (pure torch)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from losses import l1_loss, ssim                    # noqa: E402  (INRIA's, copied: losses.py)
 
 from jet import jet_rgb, jet_inverse               # noqa: E402
 

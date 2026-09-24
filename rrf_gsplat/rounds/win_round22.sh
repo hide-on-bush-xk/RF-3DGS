@@ -56,7 +56,7 @@ fi
 
 # T. clean re-timings (quality already measured in round 21)
 stamp "retime inria_MVDR"; T0=$(date +%s)
-$PYT train.py -s RF-3DGS_dataset/training-rf-spectrum/3dgs_MVDR_100 -m output/sota/inria_MVDR_retime --iterations 40000 --start_checkpoint $CKW --eval --test_iterations 40000 --save_iterations 40000 < /dev/null > output/sota/inria_MVDR_retime.train.log 2>&1
+$PYT original_rf3dgs/train.py -s RF-3DGS_dataset/training-rf-spectrum/3dgs_MVDR_100 -m output/sota/inria_MVDR_retime --iterations 40000 --start_checkpoint $CKW --eval --test_iterations 40000 --save_iterations 40000 < /dev/null > output/sota/inria_MVDR_retime.train.log 2>&1
 echo "wall inria_MVDR (train only, 30k->40k) $(( $(date +%s) - T0 )) s" >> $LOG
 stamp "retime sota_MVDR_rgb"; T0=$(date +%s)
 $WSL sota_MVDR_rgb_retime --checkpoint $CK --source RF-3DGS_dataset/training-rf-spectrum/3dgs_MVDR_100 --mode rgb --save-renders 0 >> $LOG 2>&1 < /dev/null

@@ -26,7 +26,7 @@ import time
 import torch
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, "original_rf3dgs"))           # the INRIA path imports utils.graphics_utils
 
 
 def load_gaussians(device):

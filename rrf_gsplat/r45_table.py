@@ -1,4 +1,4 @@
-"""Round 45 table and decisions (rrf_gsplat/win_round45.sh): keep or drop each of the night's features.
+"""Round 45 table and decisions (rrf_gsplat/rounds/win_round45.sh): keep or drop each of the night's features.
 
 Quality = PSNR(jet) on the 640 held-out views and mvdr_peaks' power at the true peak; time = the pure training
 time (train_seconds_excl_running_eval: the running evaluations excluded, the final one not included), all as

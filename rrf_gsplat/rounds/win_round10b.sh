@@ -10,7 +10,7 @@
 #     calibration in round 10a keeps the signs and order of cold/A/C/D,
 #     else 10k), seed 0, then transfer_curve.py after each point.
 # Every stage is time-stamped; the GPU is shared with nothing once 10a ends.
-#   bash rrf_gsplat/win_round10b.sh [ITERS]
+#   bash rrf_gsplat/rounds/win_round10b.sh [ITERS]
 set -u
 ITERS=${1:-2000}
 TAG=$((ITERS / 1000))k

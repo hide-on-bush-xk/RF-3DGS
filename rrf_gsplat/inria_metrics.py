@@ -52,7 +52,7 @@ def main():
         shutil.copy(os.path.join(run, "renders", n + ".png"), os.path.join(stage, "renders", n + ".png"))
         shutil.copy(os.path.join(src, "images", n + ".png"), os.path.join(stage, "gt", n + ".png"))
     env = dict(os.environ, PYTHONUTF8="1")
-    out = subprocess.run([PY_3DGS, os.path.join(REPO, "metrics.py"), "-m", run], cwd=REPO, env=env, capture_output=True, text=True)
+    out = subprocess.run([PY_3DGS, os.path.join(REPO, "original_rf3dgs", "metrics.py"), "-m", run], cwd=REPO, env=env, capture_output=True, text=True)
     if out.returncode != 0:
         # metrics.py swallows its own exceptions, so its stderr is the only
         # diagnostic; the tail of it is printed before giving up.

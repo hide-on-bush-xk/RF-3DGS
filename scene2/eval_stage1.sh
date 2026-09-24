@@ -19,6 +19,6 @@ rm -rf output/lobby_visual_eval; mkdir -p output/lobby_visual_eval
 cp RF-3DGS_dataset/blender_visual_trained/cfg_args output/lobby_visual_eval/ 2>/dev/null
 cp -r RF-3DGS_dataset/blender_visual_trained/point_cloud output/lobby_visual_eval/ 2>/dev/null
 cp RF-3DGS_dataset/blender_visual_trained/cameras.json output/lobby_visual_eval/ 2>/dev/null
-$PYG render.py -m output/lobby_visual_eval -s RF-3DGS_dataset/blender_visual_dataset --skip_test < /dev/null 2>&1 | grep -a "Error\|Traceback\|Rendering" | tail -3 >> $LOG
-$PYG metrics.py -m output/lobby_visual_eval < /dev/null 2>&1 | grep -a "PSNR\|SSIM\|LPIPS\|Error\|Traceback" | tail -4 >> $LOG
+$PYG original_rf3dgs/render.py -m output/lobby_visual_eval -s RF-3DGS_dataset/blender_visual_dataset --skip_test < /dev/null 2>&1 | grep -a "Error\|Traceback\|Rendering" | tail -3 >> $LOG
+$PYG original_rf3dgs/metrics.py -m output/lobby_visual_eval < /dev/null 2>&1 | grep -a "PSNR\|SSIM\|LPIPS\|Error\|Traceback" | tail -4 >> $LOG
 stamp "stage-1 PSNR done"

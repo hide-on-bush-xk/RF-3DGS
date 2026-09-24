@@ -8,7 +8,7 @@
 # per-process path is the known-good one; the 1 s scene build it repeats
 # is nothing. Missing datasets are generated per process, then
 # renormalised; existing raw datasets (L, O) are only renormalised.
-#   bash rrf_gsplat/win_round10c.sh [ITERS]
+#   bash rrf_gsplat/rounds/win_round10c.sh [ITERS]
 set -u
 ITERS=${1:-2000}
 TAG=$((ITERS / 1000))k

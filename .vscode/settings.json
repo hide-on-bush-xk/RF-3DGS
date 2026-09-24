@@ -1,18 +1,19 @@
 {
-    "//": "Four environments exist for this repo; see sionna_port/README.md.",
-    "//train": "train.py / render.py / metrics.py need rf-3dgs: it is the only one with diff_gaussian_rasterization and simple_knn built.",
+    "//": "Four environments exist for this repo; see README.md.",
+    "//train": "original_rf3dgs/ (train.py / render.py / metrics.py) needs rf-3dgs: it is the only one with diff_gaussian_rasterization and simple_knn built.",
     "//sionna": "sionna_port/ needs rf-sionna-win (Sionna 2.1 + GPU OptiX). Switch with the interpreter picker when working in that folder.",
-    "//gsplat": "gsplat lives in WSL (rf-gsplat, rf-sionna2) because it cannot build under VS 2026. Use the WSL extension for that work.",
+    "//gsplat": "rrf_gsplat/ runs in rf-gsplat-win (Windows, gsplat built from ../gsplat_win, branch rf-win) or in WSL (rf-gsplat, the untouched reference).",
     "python.defaultInterpreterPath": "C:\\Users\\Ke\\miniconda3\\envs\\rf-3dgs\\python.exe",
     "python.analysis.extraPaths": [
-        "${workspaceFolder}",
+        "${workspaceFolder}/original_rf3dgs",
+        "${workspaceFolder}/rrf_gsplat",
         "${workspaceFolder}/sionna_port"
     ],
     "python.terminal.activateEnvironment": true,
     "files.exclude": {
         "**/__pycache__": true
     },
-    "cmake.sourceDirectory": "${workspaceFolder}/SIBR_viewers",
+    "cmake.sourceDirectory": "${workspaceFolder}/original_rf3dgs/SIBR_viewers",
     "python-envs.defaultEnvManager": "ms-python.python:conda",
     "python-envs.defaultPackageManager": "ms-python.python:conda",
     "//typecheck": "The INRIA code trips Pylance's basic mode (receive() returning Nones, memoryview(ndarray), optional tb_writer); it runs fine, so the checker is off for this repo only.",

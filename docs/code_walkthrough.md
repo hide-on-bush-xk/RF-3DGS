@@ -1,8 +1,8 @@
 # 代码导览:从起点到每个模块的输入/输出
 
 > 写给 Ke:仓库现在有三条独立的流水线,共用一个场景和一个视觉 checkpoint。每一节按"起点 → 关键函数 → 输入/输出"写,
-> 文件名可点击。环境:`rf-sionna-win`(Windows,Sionna 2.1 GPU)跑生成与规划;WSL `rf-gsplat` 跑 gsplat 训练;
-> `rf-3dgs`(Windows)只跑原版 `train.py`。
+> 文件名可点击。环境:`rf-sionna-win`(Windows,Sionna 2.1 GPU)跑生成与规划;WSL `rf-gsplat` 或 Windows `rf-gsplat-win`(gsplat_win 分支)跑 gsplat 训练;
+> `rf-3dgs`(Windows)只跑原版 `original_rf3dgs/train.py`(发布代码整体移到 `original_rf3dgs/`)。
 
 ## 0. 全景
 
@@ -86,7 +86,7 @@ python generate_dataset.py --scene-xml ../sionna_tutorial/.../NIST_lobby_V1.1_si
 | 数据 | `load_views(source, names, views, device, want_float)` | PNG、`spectra_float/*.npy` | `{"rgb": uint8 [n,3,H,W], "float": fp16 [n,(C,)H,W], "viewmats", "Ks", ...}` 全部驻留 GPU |
 | 模型 | `RRF(ckpt, mode, channels, sh_degree, device, train_opacity, train_geometry)` | checkpoint 的 `xyz/scaling/rotation/opacity`(detach!) | `params` = ParameterDict:`means, scales(log), quats, opacities(logit,[N]), sh0 [N,1,C], shN [N,K−1,C]`;SH 清零 |
 | 前向 | `model.render(viewmat, K, w, h, span_db)` | 一张视图 | `[C,H,W]`:rgb 走 gsplat 内置 CUDA SH(`sh_degree=3`);db/power/multi 走 `colours()`(`sh_basis` 线性映射)→ `rasterization(..., sh_degree=None)`;power 模式先 `10^(v·span/10)` 再合成再 `10log10` |
-| 损失 | `l1_loss` + `ssim`(INRIA 的 `utils/loss_utils`),λ=0.2;`multi_loss` 对非掩码通道只在功率 > 2% 的像素上算 L1 | 预测 vs `target(i)` | 标量 |
+| 损失 | `l1_loss` + `ssim`(INRIA 的 `loss_utils`,复制在 `rrf_gsplat/losses.py`),λ=0.2;`multi_loss` 对非掩码通道只在功率 > 2% 的像素上算 L1 | 预测 vs `target(i)` | 标量 |
 | 优化 | 每个参数一个 `Adam(eps=1e-15)`:sh0 0.0025、shN /20、opacities 0.05;几何(若解冻)means 1.6e-5×scale、scales 5e-3、quats 1e-3 | | |
 | 致密化 | `--densify mcmc`:`MCMCStrategy(cap_max, refine_start 500, refine_stop 0.8·iters, refine_every 100)`,`step_pre/post_backward` 钩子 + gsplat 的 opacity/scale 正则 | `model.params`、`optimizers`、`model.last_info` | 参数张量被就地替换(所以模型全部通过 `params[...]` 读) |
 | 评估 | `evaluate(model, data, idx, span, vmin)` / `evaluate_multi(...)` | 留出视图 | `psnr_rgb`(预测经 `jet_rgb` 后对 PNG)、`ssim_rgb`、`rmse_db`/`mae_db`(对浮点真值)、`rmse_db_in_range`(真值裁到色标范围)、multi 的逐通道 RMSE(方位角 wrap-aware,单位 deg/ns) |
@@ -94,7 +94,7 @@ python generate_dataset.py --scene-xml ../sionna_tutorial/.../NIST_lobby_V1.1_si
 `--mode` 四种:`rgb`(= RF-3DGS,jet 三通道)、`db`(单通道归一化 dB)、`power`(线性功率合成)、`multi`(每个浮点通道一个)。
 `--init-from` 热启动读别的 run 的 `rrf_state.pt`(`load_state` 兼容旧布局)。
 
-**和原版的对应**:[train.py](../train.py) 的 `training()` 用 `Scene(dataset)` + `GaussianModel.restore(checkpoint)`,冻结
+**和原版的对应**:[train.py](../original_rf3dgs/train.py) 的 `training()` 用 `Scene(dataset)` + `GaussianModel.restore(checkpoint)`,冻结
 `_xyz/_scaling/_rotation`、清零 `_features_dc/_features_rest`,每步 `render(viewpoint_cam, gaussians, pipe, bg)`
 (`gaussian_renderer/__init__.py` → `diff_gaussian_rasterization`),同样的 L1+SSIM。`train_rrf.py` 的 rgb 模式在发布数据上
 复现到 15.97 vs 16.02 dB,所以后面所有实验只改被测变量。
