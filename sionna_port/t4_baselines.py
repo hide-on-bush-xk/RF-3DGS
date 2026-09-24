@@ -96,6 +96,8 @@ def main():
     ap.add_argument("--realisations", type=int, default=10)
     ap.add_argument("--loading", type=float, default=1e-3)
     ap.add_argument("--device", default="cuda:0", help="Sionna accepts cuda:<i>, not cuda")
+    ap.add_argument("--nn-positions", type=int, default=0,
+                    help="NN from only K training positions (train_rrf's route subset); 0 = all")
     ap.add_argument("--floor-offset", type=float, default=1.713, help="m added to every z for InH (scene z = 0 above the floor)")
     ap.add_argument("--limit", type=int, default=0,
                     help="smoke: n held-out positions spread along the route (end points included) with all their "
@@ -195,8 +197,13 @@ def main():
 
     # ---- NN: the nearest training position's truth, same face ---------------------------------------------------
     if "nn" in which:
-        run = a.out_prefix + "nn"
+        run = a.out_prefix + "nn" + (f"_k{a.nn_positions}" if a.nn_positions else "")
         tr_pos = {}
+        if a.nn_positions:
+            # the same route subset as train_rrf.py --max-train-views 4K: K whole positions evenly along the list
+            n_pos = len(train) // 4
+            keep = np.linspace(0, n_pos - 1, a.nn_positions).round().astype(int)
+            train = [train[p * 4 + k] for p in keep for k in range(4)]
         for n in train:
             rx, yaw = views[n]
             tr_pos.setdefault(round(yaw, 3), []).append((n, rx))
@@ -263,7 +270,9 @@ def main():
             json.dump(stats, open(os.path.join(run, "stats.json"), "w"), indent=1)
             print(f"inh_{kind} r{r}: {len(test)} views in {time.time() - t0:.0f} s -> {run}")
     os.makedirs(os.path.dirname(a.out_prefix), exist_ok=True)
-    json.dump(log, open(a.out_prefix + "log.json", "w"), indent=1)
+    # one log per selection of parts, so a later partial run (e.g. --which nn) does not overwrite the control's
+    name = "log_" + "_".join(which) + (f"_k{a.nn_positions}" if a.nn_positions else "") + ".json"
+    json.dump(log, open(a.out_prefix + name, "w"), indent=1)
 
 
 if __name__ == "__main__":
