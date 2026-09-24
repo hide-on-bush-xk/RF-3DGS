@@ -467,16 +467,18 @@ def _live_data(rel):
         body["range_db"] = [meta["spec_min_db"], meta["spec_max_db"]]
     except (OSError, ValueError, KeyError, TypeError):
         body["range_db"] = None
-    pts, evals = [], []
+    pts, evals, comm = [], [], []
     try:
         for line in open(os.path.join(d, "live.jsonl")):
             try:
                 r = json.loads(line)
             except ValueError:
                 continue                               # a line being written
-            (evals if "eval" in r else pts).append(r)
+            (evals if "eval" in r else comm if "comm" in r else pts).append(r)
     except OSError:
         pass
+    body["comm"] = comm
+    body["comm_refs"] = (body["status"] or {}).get("comm_refs")
     step = max(1, len(pts) // 1500)
     body["points"] = pts[::step] + (pts[-1:] if pts and (len(pts) - 1) % step else [])
     body["evals"] = evals

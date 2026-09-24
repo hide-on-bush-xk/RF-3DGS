@@ -29,6 +29,24 @@ def _atomic_write(path, data: bytes):
     os.replace(tmp, path)
 
 
+def _ring(img, y, x, r=7):
+    """A white ring with a dark outline around (y, x): the true main peak."""
+    yy, xx = np.ogrid[:img.shape[0], :img.shape[1]]
+    d = np.sqrt((yy - y) ** 2 + (xx - x) ** 2)
+    img[(d >= r - 2.2) & (d < r + 1.2)] = (20, 20, 20)
+    img[(d >= r - 1.2) & (d < r + 0.2)] = (255, 255, 255)
+
+
+def _cross(img, y, x, r=5):
+    """A dark X with a white edge at (y, x): the predicted main peak."""
+    for k in range(-r, r + 1):
+        for dy, dx in ((k, k), (k, -k)):
+            for oy, ox, c in ((0, 1, 255), (1, 0, 255), (0, 0, 20)):
+                yy, xx = y + dy + oy, x + dx + ox
+                if 0 <= yy < img.shape[0] and 0 <= xx < img.shape[1]:
+                    img[yy, xx] = (c, c, c)
+
+
 class LiveLog:
     def __init__(self, out, cfg, every=50, render_every=500):
         self.out, self.every, self.render_every = out, every, render_every
@@ -78,23 +96,37 @@ class LiveLog:
         keep = {k: float(v) for k, v in metrics.items() if isinstance(v, (int, float)) and np.isfinite(v)}
         self._append({"it": it, "t": round(time.time() - self.t0, 2), "eval": keep})
 
+    def comm(self, it, summary):
+        """The communication metrics of the fixed validation subset (live_comm.py) at this step."""
+        if self.every and summary is not None:
+            self._append({"it": it, "t": round(time.time() - self.t0, 2), "comm": summary})
+
     def want_render(self, it, last):
         return bool(self.every and self.render_every) and (it % self.render_every == 0 or last)
 
     @torch.no_grad()
     def render(self, it, rows):
         """rows: list of (label, pred [B, H, W] in [0, 1], truth [B, H, W] in [0, 1]) -> live/render.png,
-        each row the B faces side by side, the prediction above its truth."""
+        each row the B faces side by side, the prediction above its truth. On every face of both rows the true
+        main peak is ringed and the predicted main peak crossed: where a beam would be steered, and where it
+        should be."""
         from matplotlib import colormaps
         from PIL import Image
         jet = colormaps["jet"]
         strips = []
         for _label, pred, truth in rows:
-            for x in (pred, truth):
-                a = x.clamp(0, 1).float().cpu().numpy()
-                strip = np.concatenate(list(a), axis=1)                           # faces side by side
-                strips.append((jet(strip)[..., :3] * 255).round().astype(np.uint8))
-                strips.append(np.full((3, strips[-1].shape[1], 3), 255, np.uint8))  # a thin gap
+            pa, ta = pred.float().cpu().numpy(), truth.float().cpu().numpy()
+            w = pa.shape[2]
+            peaks = [(np.unravel_index(int(ta[f].argmax()), ta[f].shape), np.unravel_index(int(pa[f].argmax()), pa[f].shape))
+                     for f in range(len(pa))]
+            for x in (pa, ta):
+                strip = np.concatenate(list(np.clip(x, 0, 1)), axis=1)             # faces side by side
+                rgb = (jet(strip)[..., :3] * 255).round().astype(np.uint8)
+                for f, ((ty, tx), (py, px)) in enumerate(peaks):
+                    _ring(rgb, ty, tx + f * w)
+                    _cross(rgb, py, px + f * w)
+                strips.append(rgb)
+                strips.append(np.full((3, rgb.shape[1], 3), 255, np.uint8))        # a thin gap
         img = np.concatenate(strips[:-1], axis=0)
         from io import BytesIO
         buf = BytesIO()

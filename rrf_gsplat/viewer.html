@@ -286,6 +286,19 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
             <div id="liveBar" style="height:8px;background:var(--accent);width:0;border-radius:4px"></div></div>
           <canvas id="liveLoss" style="width:100%;height:220px;display:block"></canvas>
           <canvas id="liveSpeed" style="width:100%;height:90px;display:block;margin-top:6px"></canvas>
+          <div id="liveComm" style="margin-top:12px">
+            <h2 style="margin:0">communication metrics during training <span class="mono" id="commInfo" style="font-weight:400;font-size:12px"></span></h2>
+            <p class="note" style="margin-top:2px">On a fixed set of validation views (new positions), every
+            <span class="mono">--live-comm-every</span> steps. Physical quantities only: where a beam would be steered
+            (the predicted main peak) against the truth, and what steering there costs on the true channel. Dashed:
+            the look-ups on the same views &mdash; a curve crossing them is the field beating a copy of its training data.</p>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <canvas id="commAngle" style="width:100%;height:140px;display:block"></canvas>
+              <canvas id="commBeam" style="width:100%;height:140px;display:block"></canvas>
+              <canvas id="commWithin" style="width:100%;height:140px;display:block"></canvas>
+              <canvas id="commTop3" style="width:100%;height:140px;display:block"></canvas>
+            </div>
+          </div>
           <div id="liveScores" style="margin-top:10px"></div>
           <h2 style="margin-top:14px">render <span class="mono" id="liveImgInfo" style="font-weight:400;font-size:12px"></span></h2>
           <p class="note" style="margin-top:0">Two receiver positions, each as its four faces side by side (the full
@@ -1213,6 +1226,61 @@ function multiChart(cv, xs, series, opt) {
     g.stroke();
   }
 }
+function commChart(cv, xs, ys, refs, opt) {
+  // one metric over training steps, with the references as dashed horizontal lines
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const L = 46, R = 70, T = 20, B = 18;
+  g.font = "11px 'IBM Plex Mono', ui-monospace, monospace"; g.fillStyle = cssv("--muted");
+  g.fillText(opt.title, L, 12);
+  const vals = ys.filter(v => v != null).concat(refs.map(r => r.y).filter(v => v != null));
+  if (!vals.length) { g.fillText("no evaluation yet", L, T + 20); return; }
+  let y0 = Math.min(opt.ymin ?? Infinity, ...vals), y1 = Math.max(...vals);
+  if (y1 - y0 < 1e-9) { y1 = y0 + 1; }
+  const pad = (y1 - y0) * 0.08; y1 += pad; if (opt.ymin == null) y0 -= pad;
+  const x0 = 0, x1 = Math.max(opt.xmax || 1, ...xs);
+  const px = x => L + (x - x0) / (x1 - x0) * (W - L - R), py = v => T + (1 - (v - y0) / (y1 - y0)) * (H - T - B);
+  g.strokeStyle = cssv("--line"); g.lineWidth = 1;
+  for (let k = 0; k <= 3; k++) {
+    const v = y0 + (y1 - y0) * k / 3, yy = py(v);
+    g.beginPath(); g.moveTo(L, yy); g.lineTo(W - R, yy); g.stroke();
+    g.fillText(String(Number(v.toPrecision(3))), 2, yy + 4);
+  }
+  g.fillText("0", L, H - 4); g.fillText(String(x1), W - R - 8 * String(x1).length, H - 4);
+  const rc = ["--s2", "--s4", "--muted", "--s3"];
+  refs.forEach((r, i) => {
+    if (r.y == null) return;
+    g.strokeStyle = cssv(rc[i % rc.length]); g.setLineDash([5, 4]); g.lineWidth = 1.2;
+    g.beginPath(); g.moveTo(L, py(r.y)); g.lineTo(W - R, py(r.y)); g.stroke(); g.setLineDash([]);
+    g.fillStyle = cssv(rc[i % rc.length]); g.fillText(r.label, W - R + 4, py(r.y) + 4);
+  });
+  g.strokeStyle = cssv("--s1"); g.fillStyle = cssv("--s1"); g.lineWidth = 1.8; g.beginPath();
+  let on = false;
+  xs.forEach((x, i) => { if (ys[i] == null) return; const X = px(x), Y = py(ys[i]); on ? g.lineTo(X, Y) : g.moveTo(X, Y); on = true; });
+  g.stroke();
+  xs.forEach((x, i) => { if (ys[i] == null) return; g.beginPath(); g.arc(px(x), py(ys[i]), 2.5, 0, 7); g.fill(); });
+}
+function drawComm(d, n) {
+  const c = d.comm || [], refsAll = d.comm_refs || {};
+  $("#liveComm").style.display = (c.length || Object.keys(refsAll).length) ? "" : "none";
+  if (!c.length && !Object.keys(refsAll).length) return;
+  const xs = c.map(p => p.it), last = c[c.length - 1];
+  $("#commInfo").textContent = last ? `${last.comm.views} views, last at step ${last.it}` : "waiting for the first evaluation";
+  const labels = Object.keys(refsAll).filter(k => k !== "truth itself");
+  const ref = (key, f = v => v) => labels.map(k => ({ label: k, y: refsAll[k] && refsAll[k][key] != null ? f(refsAll[k][key]) : null }));
+  const pc = v => v == null ? null : 100 * v;
+  commChart($("#commAngle"), xs, c.map(p => p.comm.angle_median), ref("angle_median"),
+            { title: "main-peak direction error, median (deg) - lower is better", ymin: 0, xmax: n });
+  const tb = refsAll["truth itself"];
+  commChart($("#commBeam"), xs, c.map(p => p.comm.beam_loss_median),
+            ref("beam_loss_median").concat(tb ? [{ label: "truth", y: tb.beam_loss_median }] : []),
+            { title: "beam-gain loss on the true channel, median (dB) - lower is better", ymin: 0, xmax: n });
+  commChart($("#commWithin"), xs, c.map(p => pc(p.comm.distinct_within_1deg)), ref("distinct_within_1deg", pc),
+            { title: "main peak within 1 deg, distinct views (%) - higher is better", ymin: 0, xmax: n });
+  commChart($("#commTop3"), xs, c.map(p => pc(p.comm.top3_detected)), ref("top3_detected", pc),
+            { title: "top-3 true peaks detected within 1.5 deg (%) - higher is better", ymin: 0, xmax: n });
+}
 async function sysTick() {
   let pts;
   try { pts = await (await fetch("/api/live/sys", { cache: "no-store" })).json(); } catch (e) { return; }
@@ -1284,6 +1352,7 @@ async function liveTick() {
             { title: "training loss (mean over each interval, log scale)", log: true, xmin: 0, xmax: n, color: "--s1" });
   lineChart($("#liveSpeed"), pts.map(p => p.it), pts.map(p => p.it_s),
             { title: "speed (it/s)", xmin: 0, xmax: n, color: "--s3" });
+  drawComm(d, n);
   const rows = [];
   for (const e of d.evals || []) {
     rows.push([`eval @ ${e.it}: held-out RMSE (dB)`, num(e.eval.rmse_db)]);

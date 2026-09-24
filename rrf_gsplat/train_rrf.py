@@ -1024,6 +1024,13 @@ def main():
                          "near the floor, so at the visual Gaussians' rate it could not get bright within 3000 steps")
     ap.add_argument("--live-every", type=int, default=50,
                     help="write <out>/live.jsonl (loss, it/s) every N steps for the viewer's live tab; 0 = off (live.py)")
+    ap.add_argument("--live-comm-every", type=int, default=10000,
+                    help="every N steps (and at the end) the communication metrics of a fixed validation subset "
+                         "(live_comm.py: main-peak direction, <= 1 deg, beam-gain loss on the true channel, top-3) "
+                         "into live.jsonl; needs --live-comm-maps; 0 = off")
+    ap.add_argument("--live-comm-maps", default=os.path.join(REPO, "output", "rrf", "beam_maps_val_subset"),
+                    help="sionna_port/beam_maps.py's output (without .npz / .json): the subset, its true-channel "
+                         "beam-gain maps and the look-ups' reference values")
     ap.add_argument("--live-render-every", type=int, default=500,
                     help="write <out>/live/render.png (prediction over truth, one training and one held-out position) "
                          "every N steps; 0 = no renders")
@@ -1351,7 +1358,7 @@ def main():
     running_eval_seconds = 0.0
     torch.cuda.synchronize(); t_train = time.time()
     rng = np.random.default_rng(cfg.seed)
-    live, live_rows = None, None
+    live, live_rows, comm = None, None, None
     if cfg.live_every:
         from live import LiveLog
         live = LiveLog(cfg.out, cfg, cfg.live_every, cfg.live_render_every if cfg.mode in ("db", "power", "multi") else 0)
@@ -1360,6 +1367,36 @@ def main():
             c = torch.linalg.inv(d["viewmats"])[:, :3, 3]
             return [i for i in range(len(c)) if float((c[i] - c[0]).norm()) < 1e-4]
         g_tr, g_te = _first_group(train), _first_group(test)
+        comm = None
+        if cfg.live_comm_every and os.path.isfile(cfg.live_comm_maps + ".npz") and "float" in test:
+            # the fixed validation subset of the communication curves: its views must be among this run's held-out
+            # views (a protocol run on --eval-set val), else the curves are off (said once, not an error)
+            zc = np.load(cfg.live_comm_maps + ".npz")
+            pos_of = {n: i for i, n in enumerate(test_names)}
+            cn = [str(n) for n in zc["names"]]
+            if all(n in pos_of for n in cn):
+                import live_comm as LC
+                from mvdr_peaks import pixel_dirs
+                ci = [pos_of[n] for n in cn]
+                comm = {"idx": ci, "maps": zc["maps"], "dirs": pixel_dirs(cfg.source),
+                        "truth": [test["float"][i].float().cpu().numpy() for i in ci],
+                        "groups": [ci[k:k + 4] for k in range(0, len(ci), 4)]}
+                refs = json.load(open(cfg.live_comm_maps + ".json")).get("references")
+                live.status["comm_refs"] = refs
+                live.status["comm_views"] = len(ci)
+                print(f"live communication metrics: {len(ci)} validation views every {cfg.live_comm_every} steps")
+            else:
+                print("live communication metrics off: the subset's views are not this run's held-out views")
+
+        def comm_eval(it):
+            rows = []
+            for g in comm["groups"]:
+                pred = model.render_batch(test["viewmats"][g], test["Ks"][g], test["width"], test["height"], span)[:, 0]
+                pn = pred.float().cpu().numpy()
+                for k, i in enumerate(g):
+                    j = comm["idx"].index(i)
+                    rows.append(LC.view_metrics(pn[k], comm["truth"][j], comm["maps"][j], comm["dirs"]))
+            live.comm(it, LC.summarise(rows))
 
         def live_rows():
             def norm(d, g):
@@ -1410,6 +1447,11 @@ def main():
             if live.want_render(it, it == cfg.iterations):
                 with torch.no_grad():
                     live.render(it, live_rows())
+            if comm is not None and (it % cfg.live_comm_every == 0 or it == cfg.iterations):
+                torch.cuda.synchronize(); t_c = time.time()
+                with torch.no_grad():
+                    comm_eval(it)
+                torch.cuda.synchronize(); running_eval_seconds += time.time() - t_c   # not training time
         if it % cfg.eval_every == 0 or it == cfg.iterations:
             torch.cuda.synchronize(); t_ev = time.time()
             m = (evaluate_multi(model, test, eval_idx, ch_ranges, channel_names, mask_channel=cfg.mask_channel,
