@@ -19,9 +19,9 @@ views per step) moves PSNR by up to 3 dB and leaves "<= 1 deg" at 15-20 %. The p
 share. Tonight's ablations (rounds 43-45) do not change that: the head's features, the per-Gaussian backward, the
 exact SSIM and LM are about how fast / how smooth the fit is, not about what the model can represent.
 
-## 0b. What the night established (rounds 47-49; details in `docs/t4_channel_model_plan.md`, `stage2_notes.md`)
+## 0b. What the night established (rounds 47-52; details in `docs/t4_channel_model_plan.md`, `stage2_notes.md`)
 
-Five facts that re-rank everything below:
+Nine facts that re-rank everything below:
 
 1. **The labels are partly noise.** The dataset's MVDR ran in complex64 on a covariance with cond ~3e11; the
    solver returns its paths in a different order every time, so the weak directions are rounding noise. Against a
@@ -69,12 +69,12 @@ Five facts that re-rank everything below:
    3.32 deg, at the true peak -5.95 dB) -- about one more SH band's worth, below the 28.9 % written before the
    run as the line for pursuing P2. A sharper directional function per Gaussian is not what is missing.
 
-What this implies: the bottleneck is how a Gaussian's value may vary with the receiver position. SH3 gives each
-Gaussian 16 numbers as a smooth function of the direction to the receiver; one position is representable, many are
-not. Whether more angular bandwidth (P2) is enough, or the value must depend on the receiver position itself (not
-only the direction -- a diffuse hotspot's MVDR level depends on what else the array sees, M1), is the question the
-next experiments should separate: P2 (sharper lobes) vs a position-conditioned colour (a per-Gaussian latent
-decoded with the receiver position, the NeRF^2 / shading-head idea moved into the Gaussians).
+What this implies: the bottleneck is how a Gaussian's value may vary with the receiver position. One position
+is representable by the frozen Gaussians; many are not, and neither more SH bands (0b.8) nor sharp lobes (0b.9)
+change that much -- a sharper function of the direction alone is not what is missing. What is left: the value
+must depend on the receiver position itself (a diffuse hotspot's MVDR level depends on what else the array
+sees -- M1), which points at P1 (make the target additive: render power, apply the MVDR as a known layer) and
+at P7 (a position-conditioned colour). The MULTI contrast (section 2, item 2) favours P1.
 
 ## 1. What the model is asked to represent
 
@@ -127,12 +127,11 @@ and lowered top-3 detection from 68 % to 45 % (round 37): the optimiser moved Ga
    top-1 0.68 vs 0.60 (sigma 3) and 0.55 vs 0.38 (sigma 1), decoded-azimuth P90 5.85 vs 131 deg -- while on MVDR the
    copy wins at every density (0b.6); and the incoherent-MVDR ceiling (65.8 % <= 1 deg) is three times where the
    field is.
-3. **Position-conditioned colour (new, P7)**; sharper lobes (P2) were tried in round 52 and bought only ~1 SH band
-   (0b.9). the capacity sweep (0b.3) is the fast
-   benchmark for both -- train on 160 positions and score the training views (`diag_train_fit.py`); SH3 gives
-   19 %, one position alone ~100 % top-3. P7: a small per-Gaussian latent decoded together with the receiver
-   position (not only the direction) by a shared MLP, the shading head's idea moved into the Gaussians. P2: 1-2
-   spherical-Gaussian lobes per Gaussian, optionally mirror-tied.
+3. **Position-conditioned colour (new, P7).** Sharper lobes (P2) were tried in round 52 and bought about one SH
+   band (0b.9). P7: a small per-Gaussian latent decoded together with the receiver position (not only the
+   direction) by a shared MLP -- the shading head's idea moved into the Gaussians. Its fast test is the capacity
+   benchmark (0b.3): train on 160 positions and score the training views (`diag_train_fit.py`); SH3 19 %, SH4
+   24 %, lobes 26 %, one position alone ~100 % top-3.
 4. **Report the NN baseline everywhere.** A radio radiance field has to beat the lookup of its own training labels
    to claim anything about peaks; on this dataset it does not, at any density.
 5. P0 is moot (0b.4); P3-P5 stay as the heavier physics routes.
