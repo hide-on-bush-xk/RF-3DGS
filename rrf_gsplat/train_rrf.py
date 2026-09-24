@@ -1024,7 +1024,7 @@ def main():
                          "near the floor, so at the visual Gaussians' rate it could not get bright within 3000 steps")
     ap.add_argument("--live-every", type=int, default=50,
                     help="write <out>/live.jsonl (loss, it/s) every N steps for the viewer's live tab; 0 = off (live.py)")
-    ap.add_argument("--live-comm-every", type=int, default=10000,
+    ap.add_argument("--live-comm-every", type=int, default=1000,
                     help="every N steps (and at the end) the communication metrics of a fixed validation subset "
                          "(live_comm.py: main-peak direction, <= 1 deg, beam-gain loss on the true channel, top-3) "
                          "into live.jsonl; needs --live-comm-maps; 0 = off")
@@ -1388,15 +1388,20 @@ def main():
             else:
                 print("live communication metrics off: the subset's views are not this run's held-out views")
 
+        if comm is not None:
+            from concurrent.futures import ThreadPoolExecutor
+            comm["pool"] = ThreadPoolExecutor(max_workers=1)
+
         def comm_eval(it):
-            rows = []
-            for g in comm["groups"]:
-                pred = model.render_batch(test["viewmats"][g], test["Ks"][g], test["width"], test["height"], span)[:, 0]
-                pn = pred.float().cpu().numpy()
-                for k, i in enumerate(g):
-                    j = comm["idx"].index(i)
-                    rows.append(LC.view_metrics(pn[k], comm["truth"][j], comm["maps"][j], comm["dirs"]))
-            live.comm(it, LC.summarise(rows))
+            # the training loop waits only for the renders (one position -- four faces, one colour evaluation -- per
+            # call) and one copy back; the numpy metrics run on a worker thread while training continues
+            pn = torch.cat([model.render_batch(test["viewmats"][g], test["Ks"][g], test["width"], test["height"],
+                                               span)[:, 0].float() for g in comm["groups"]]).cpu().numpy()
+
+            def work(pn=pn, it=it):
+                rows = [LC.view_metrics(pn[j], comm["truth"][j], comm["maps"][j], comm["dirs"]) for j in range(len(pn))]
+                live.comm(it, LC.summarise(rows))
+            comm["pool"].submit(work)
 
         def live_rows():
             def norm(d, g):
@@ -1546,6 +1551,8 @@ def main():
     with open(os.path.join(cfg.out, "results.json"), "w") as fid:
         json.dump(result, fid, indent=1)
     if live is not None:
+        if comm is not None:
+            comm["pool"].shutdown(wait=True)            # the last evaluation's metrics, before the run is marked done
         live.close(os.path.join(cfg.out, "results.json"))
     if final is None:
         print(f"\nno final evaluation (--no-eval); {cfg.iterations} iterations in {train_seconds:.0f} s "

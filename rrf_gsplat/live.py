@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 
 import numpy as np
@@ -57,6 +58,7 @@ class LiveLog:
         self.t0 = time.time()
         self.t_last, self.it_last = self.t0, 0
         self.acc, self.n_acc = None, 0
+        self._lock = threading.Lock()                # the communication metrics are written from a worker thread
         self.status = {"run": os.path.basename(os.path.abspath(out)), "out": out, "iterations": cfg.iterations,
                        "mode": cfg.mode, "source": cfg.source, "seed": cfg.seed,
                        "extras": {k: getattr(cfg, k) for k in ("emitters", "em_pcolor", "pcolor", "max_train_views",
@@ -66,11 +68,12 @@ class LiveLog:
         self._write_status()
 
     def _write_status(self):
-        self.status["updated"] = time.time()
-        _atomic_write(os.path.join(self.dir, "status.json"), json.dumps(self.status).encode())
+        with self._lock:
+            self.status["updated"] = time.time()
+            _atomic_write(os.path.join(self.dir, "status.json"), json.dumps(self.status).encode())
 
     def _append(self, rec):
-        with open(self.path, "a") as f:
+        with self._lock, open(self.path, "a") as f:
             f.write(json.dumps(rec) + "\n")
 
     def step(self, it, loss):
