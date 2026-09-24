@@ -25,6 +25,7 @@ from __future__ import annotations
 import math
 import time
 from contextlib import contextmanager
+from functools import partial
 
 import numpy as np
 import torch
@@ -86,7 +87,10 @@ class Group:
         """Render at the current coefficients, keep the graph (for J^T z) and the residual Jacobian."""
         self.out = self.render()
         f = self.out.detach()
-        fn = lambda img: residuals(img, self.y, self.win, self.lam)                     # noqa: E731
+        # a partial, not a lambda over self: the lambda made Group -> fn -> Group a reference cycle, so every
+        # subset's Groups (each holding its render graph) lived until the cyclic collector ran -- 2.6 GB per LM
+        # iteration, past the 12 GB card by the fourth (round 46)
+        fn = partial(residuals, y=self.y, win=self.win, lam=self.lam)
         self.r, self.vjp = torch.func.vjp(fn, f)
         self.fn, self.f = fn, f
         return self.r
@@ -268,8 +272,15 @@ class LM:
         torch.cuda.synchronize()
         rec = {"lm_iteration": it, "gamma": gamma, "accepted": bool(change > 0), "cost_prev": F_prev, "cost_new": F_new,
                "cost_linearised": F_lin, "ratio": ratio, "radius": self.radius, "seconds": time.time() - t0,
-               "positions_used": len(used)}
+               "positions_used": len(used),
+               # a step whose memory passes the card's size does not fail on Windows: the driver's sysmem fallback
+               # pages to host memory and the step runs 10-20x slower (round 46), so the memory is logged
+               "cuda_allocated_mib": torch.cuda.memory_allocated() / 2 ** 20,
+               "cuda_reserved_mib": torch.cuda.memory_reserved() / 2 ** 20,
+               "cuda_peak_allocated_mib": torch.cuda.max_memory_allocated() / 2 ** 20}
         self.history.append(rec)
         self.log(f"  LM {it}: gamma {gamma:.3g}, cost {F_prev:.4g} -> {F_new:.4g} (linearised {F_lin:.4g}), "
-                 f"{'accepted' if change > 0 else 'undone'}, radius {self.radius:.2e}, {rec['seconds']:.1f} s")
+                 f"{'accepted' if change > 0 else 'undone'}, radius {self.radius:.2e}, {rec['seconds']:.1f} s, "
+                 f"CUDA allocated {rec['cuda_allocated_mib']:.0f} / reserved {rec['cuda_reserved_mib']:.0f} / "
+                 f"peak {rec['cuda_peak_allocated_mib']:.0f} MiB")
         return rec

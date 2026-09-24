@@ -1166,6 +1166,14 @@ def main():
         del lm
         torch.cuda.empty_cache()
     torch.cuda.synchronize(); train_seconds = time.time() - t_train
+    # On Windows the driver's sysmem fallback lets allocations past the card's memory page to host RAM instead of
+    # failing, and everything then runs 10-20x slower (round 46): a run whose peak comes near the card's size has
+    # no valid timing
+    peak_reserved = torch.cuda.max_memory_reserved() / 2 ** 20
+    card_mib = torch.cuda.get_device_properties(0).total_memory / 2 ** 20
+    if peak_reserved > 0.9 * card_mib:
+        print(f"WARNING: peak reserved CUDA memory {peak_reserved:.0f} MiB of {card_mib:.0f}: the timing may include "
+              f"host-memory paging (sysmem fallback)")
     model.head_on = True
 
     os.makedirs(cfg.out, exist_ok=True)
@@ -1195,6 +1203,7 @@ def main():
               "channels": channel_names, "channel_ranges": meta.get("channel_ranges"),
               "n_test": len(test_names), "gaussians": model.n_gaussians,
               "train_seconds": train_seconds, "iters_per_second": cfg.iterations / train_seconds,
+              "cuda_peak_reserved_mib": peak_reserved, "cuda_card_mib": card_mib,
               "running_eval_seconds": running_eval_seconds,
               "train_seconds_excl_running_eval": train_seconds - running_eval_seconds,
               "views_seen": cfg.iterations * cfg.faces_per_step,
