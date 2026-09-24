@@ -346,7 +346,47 @@ def discover():
             "visual": bool(vdir and os.path.isfile(os.path.join(vdir, f"{names[0]}.png"))),
             "released": any(p["kind"] == "released" for p in preds),
         })
+    spectra.extend(_regen_groups())
     return spectra
+
+
+def _regen_groups():
+    """The curated regenerated-data groups written by build_wall.py (output/rrf/wall_groups.json): our fields next to
+    T4's predictors (NN, LOS, 3GPP InH, the float64 truth) on one regenerated dataset's held-out views. Each prediction
+    carries per-view PSNR(jet) and main-peak direction error (deg); "baseline" marks the non-learned predictors."""
+    p = os.path.join(OURS, "wall_groups.json")
+    if not os.path.isfile(p):
+        return []
+    out = []
+    for g in json.load(open(p)):
+        src = os.path.join(REPO, g["dataset"])
+        names = sorted(l.strip() for l in open(os.path.join(src, "test_index.txt")) if l.strip())
+        poses = read_poses(os.path.join(src, "sparse", "0", "images.txt"))
+        preds = []
+        for e in g["preds"]:
+            w = json.load(open(os.path.join(REPO, e["wall"])))
+            run_res = os.path.join(OURS, e["id"], "results.json")
+            preds.append({
+                "id": e["id"], "label": e["label"], "kind": e["kind"], "default": e["default"],
+                "test": f"ours_{w.get('iterations') or 0}", "naming": "name", "dir": e["dir"],
+                "metrics": {"PSNR": w["PSNR"], "peak_median": w["peak_median"], "peak_within_1deg": w["peak_within_1deg"]},
+                "psnr": [w["per_view_psnr"].get(n) for n in names],
+                "peak": [w["peak_deg"].get(n) for n in names],
+                "ply": False,
+                "mtime": os.path.getmtime(run_res) if os.path.isfile(run_res) else None,
+            })
+        items = []
+        for i, n in enumerate(names):
+            rx, yaw, fwd, down = poses.get(n, (None, None, None, None))
+            items.append({"i": i, "name": n,
+                          "rx": None if rx is None else [round(rx[0], 3), round(rx[1], 3), round(rx[2], 3)],
+                          "yaw": None if yaw is None else round(yaw, 1),
+                          "fwd": None if fwd is None else [round(v, 5) for v in fwd],
+                          "down": None if down is None else [round(v, 5) for v in down]})
+        out.append({"name": g["name"], "src": g["dataset"], "views": len(names), "items": items, "preds": preds,
+                    "size": list(_png_size(os.path.join(src, "images", f"{names[0]}.png")) or []) or None,
+                    "visual_dir": None, "visual": False, "released": False, "regen": True})
+    return out
 
 
 
@@ -450,7 +490,10 @@ def make_handler(spectra, page, db_path=None):
             self._send(body, ctype, code, extra)
 
         def do_GET(self):
-            p = self.path.split("?")[0]
+            from urllib.parse import unquote
+            # decoded, because the regenerated groups' names carry spaces and brackets and the browser sends them
+            # percent-encoded; no name contains "/", so decoding cannot change how the path splits
+            p = unquote(self.path.split("?")[0])
             if p in ("/", "/index.html"):
                 self._send(page.encode(), "text/html; charset=utf-8"); return
             if p == "/api/index":

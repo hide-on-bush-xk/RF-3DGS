@@ -92,6 +92,40 @@ def _scalar_text(v):
     return json.dumps(v, sort_keys=True)
 
 
+EXTRA_PREFIXES = ("peaks.", "trainfit.")
+
+
+def _flatten(prefix, obj, out):
+    """Nested JSON numbers as dotted keys: {"a": {"b": 1}} -> {prefix + "a.b": 1.0}."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            _flatten(f"{prefix}{k}.", v, out)
+    elif _num(obj) is not None and not isinstance(obj, bool):
+        out[prefix[:-1]] = float(obj)
+    return out
+
+
+def extra_metrics(name):
+    """The per-run results written beside the run rather than into results.json: mvdr_peaks.py's
+    peaks_<run>.json (main-peak direction, power at the true peak, top-3, false peaks) and
+    diag_train_fit.py's <run>_trainfit.json (the same peak metrics on the run's own training views)."""
+    out = {}
+    p = os.path.join(RRF, f"peaks_{name}.json")
+    if os.path.isfile(p):
+        try:
+            _flatten("peaks.", json.load(open(p, encoding="utf-8")), out)
+        except Exception:
+            pass
+    p = os.path.join(RRF, f"{name}_trainfit.json")
+    if os.path.isfile(p):
+        try:
+            r = json.load(open(p, encoding="utf-8"))
+            _flatten("trainfit.", {k: r.get(k) for k in ("train", "test", "train_views")}, out)
+        except Exception:
+            pass
+    return out
+
+
 def scan_run(d):
     """Everything one run directory contributes, or None if it holds no results.
 
@@ -154,6 +188,8 @@ def scan_run(d):
                 for k, v in block.items():
                     if _num(v) is not None:
                         rec["metrics"][f"{key}.{k}"] = float(v)
+
+    rec["metrics"].update(extra_metrics(name))
 
     # artifacts: the sibling JSONs, and the render directory as a count, never
     # its contents.
@@ -253,7 +289,12 @@ def check(db_path=DB):
         r = json.load(open(p, encoding="utf-8"))
         want = {k: float(v) for k, v in ((r.get("final") or {}) if kind == "trainer" else {}).items()
                 if _num(v) is not None}
-        got = dict(con.execute("SELECT key, value FROM metrics WHERE run = ?", (name,)).fetchall())
+        got_all = dict(con.execute("SELECT key, value FROM metrics WHERE run = ?", (name,)).fetchall())
+        extra = {k: v for k, v in got_all.items() if k.startswith(EXTRA_PREFIXES)}
+        got = {k: v for k, v in got_all.items() if not k.startswith(EXTRA_PREFIXES)}
+        if extra != extra_metrics(name):
+            print(f"  MISMATCH {name}: peaks / trainfit metrics differ from their files")
+            bad += 1
         if kind == "trainer" and want != {k: v for k, v in got.items()}:
             miss = set(want) ^ set(got)
             diff = [k for k in set(want) & set(got) if want[k] != got[k]]

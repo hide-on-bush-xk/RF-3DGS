@@ -41,6 +41,8 @@ time_bwd_variants.py  one training step per backward variant, two resolutions, q
 lm_optim.py           3DGS-LM after Adam (--lm-after): PCG on the normal equations, line search, trust region
 check_lm.py           controls for lm_optim: J p vs finite differences, symmetry, J^T r vs autograd, descent
 r45_table.py          rounds 45-46 table and the pre-registered keep / drop decisions
+build_wall.py         the viewer's regenerated-data groups: fields beside T4's predictors (NN, LOS, InH,
+                      float64 truth), per-view PSNR and main-peak error; restart viewer.py afterwards
 ```
 
 **Windows-native gsplat (2026-09-24, round 44).** gsplat 1.6.0 now also builds natively under VS 2026 from

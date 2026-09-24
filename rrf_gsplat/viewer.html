@@ -432,7 +432,11 @@ const fmt = (v, d = 2) => v == null ? "MISSING" : v.toFixed(d);
 // models are trained to 40k and most of our runs stop at 10k: side by side
 // without the iteration count reads as a like-for-like comparison and is not one.
 const iters = p => +(p.test.split("_")[1] || 0);
-const kIt = p => `${Math.round(iters(p) / 1000)}k`;
+// baselines (NN, LOS, 3GPP InH, the float64 truth on the regenerated groups) are not trained: no count
+const kIt = p => p.kind === "baseline" ? "—"
+  : `${iters(p) % 1000 ? (iters(p) / 1000).toFixed(1) : iters(p) / 1000}k`;     // 2500 -> 2.5k, not 3k
+// main-peak direction error, where the group carries it (the regenerated groups, from build_wall.py)
+const peakTxt = (p, i) => p.peak ? ` · peak Δ ${p.peak[i] == null ? "–" : p.peak[i].toFixed(1) + "°"}` : "";
 
 function drawChips() {
   const host = $("#chips");
@@ -442,7 +446,8 @@ function drawChips() {
     b.className = "chip" + (p.kind === "released" ? " rel" : "") +
       (SEL.has(p.id) ? " on" : "");
     b.title = `${p.id} · ${p.test} · renders named by ${p.naming}`;
-    b.innerHTML = `${p.label} <span class="n">${kIt(p)} · ${fmt(p.metrics.PSNR)}</span>`;
+    b.innerHTML = `${p.label} <span class="n">${kIt(p)} · ${fmt(p.metrics.PSNR)}` +
+      (p.metrics.peak_median != null ? ` · peak ${p.metrics.peak_median.toFixed(1)}°` : "") + `</span>`;
     b.onclick = () => {
       // never let the wall go empty -- with nothing selected there is no
       // reference and the floor plan has nothing to colour by
@@ -532,8 +537,8 @@ function el(tag, cls, html) {
 // first canvas of a cell, so reading across a row still compares predictions.
 function labelHtml(p) {
   const tag = p.kind === "released"
-    ? `<span class="rel">RF-3DGS released</span>` : "ours";
-  return `<span class="sc">${fmt(p.psnr[VIEW])}</span>` +
+    ? `<span class="rel">RF-3DGS released</span>` : (p.kind === "baseline" ? "baseline" : "ours");
+  return `<span class="sc">${fmt(p.psnr[VIEW])}${peakTxt(p, VIEW)}</span>` +
          `<b>${p.label}</b><br>${tag} · ${kIt(p)}`;
 }
 
@@ -580,14 +585,22 @@ async function show() {
     `<tr${SEL.has(p.id) ? "" : ' style="opacity:.45"'}>
        <th>${p.kind === "released" ? "★ " : ""}${p.label}
          <span class="mono" style="opacity:.6">${kIt(p)}</span></th>
-       <td>${fmt(p.psnr[VIEW])} / ${fmt(p.metrics.PSNR)}</td></tr>`).join("");
-  $("#itNote").innerHTML = mixed
+       <td>${fmt(p.psnr[VIEW])} / ${fmt(p.metrics.PSNR)}` +
+       (p.peak ? `<br><span class="mono" style="opacity:.7">peak Δ ${p.peak[VIEW] == null ? "–" : p.peak[VIEW].toFixed(1) + "°"}` +
+                 ` / median ${p.metrics.peak_median.toFixed(1)}°, ≤ 1° ${(100 * p.metrics.peak_within_1deg).toFixed(0)} %</span>` : "") +
+       `</td></tr>`).join("");
+  $("#itNote").innerHTML = MODEL.regen
+    ? "Regenerated dataset (Sionna 2.1 port): our fields beside T4's predictors -- the nearest training position's " +
+      "label (NN), a geometric LOS path, 3GPP InH and the float64 recomputation of the labels. Per view: PSNR(jet) " +
+      "and the main-peak direction error (peak Δ). LOS / InH are shifted by one global level offset. " +
+      "See docs/t4_channel_model_plan.md."
+    : mixed
     ? "Iteration counts differ across these rows, so the aggregates are " +
       "<b>not</b> a like-for-like comparison: the released models train to 40k " +
       "and most of our runs stop at 10k. Compare within one count, or read the " +
       "difference as including the budget."
     : "";
-  $("#relNote").textContent = MODEL.released ? ""
+  $("#relNote").textContent = MODEL.released || MODEL.regen ? ""
     : `No released RF-3DGS model for ${MODEL.name} — the paper ships five, and ` +
       `${MODEL.name} is not one of them. The released row is MISSING, not zero.`;
 
@@ -718,6 +731,15 @@ function pickModel(name) {
   // joins them: a new scheme that scores a little below the best would otherwise
   // never be on screen unless someone knew to click its chip.
   SEL = new Set();
+  if (MODEL.regen) {
+    // the curated groups say which predictions open together (build_wall.py's "default")
+    for (const p of MODEL.preds) if (p.default) SEL.add(p.id);
+    if (!SEL.size && MODEL.preds.length) SEL.add(MODEL.preds[0].id);
+    $("#mViews").textContent = MODEL.views;
+    const r0 = $("#view"); r0.max = MODEL.views - 1; r0.value = 0;
+    drawChips(); layout(); show();
+    return;
+  }
   const rel = MODEL.preds.find(p => p.kind === "released");
   if (rel) SEL.add(rel.id);
   const mine = MODEL.preds.filter(p => p.kind === "ours")
