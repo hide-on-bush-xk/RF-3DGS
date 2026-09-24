@@ -112,6 +112,12 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
   margin-left:6px; vertical-align:middle; }
 .dot.on { background:var(--s3); box-shadow:0 0 6px var(--s3); animation:pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+/* live-tab tables: text columns left, number columns right, each header aligned with its own column (the
+   page-wide rule right-aligns every td but left-aligns every th, which put the headers out of line) */
+.ltab { width:auto; min-width:60%; }
+.ltab th, .ltab td { text-align:left; padding:3px 14px 3px 0; vertical-align:top; }
+.ltab th.num, .ltab td.num { text-align:right; padding-right:0; }
+.ltab tr + tr td { border-top:1px solid var(--line); }
 @media (prefers-reduced-motion: reduce) { .dot.on { animation:none; } }
 /* 3D tab: the render at the held-out view's pose beside that view's prediction and target, all 3:2 */
 .row3d { display:grid; grid-template-columns:2fr 1fr; gap:10px; margin-top:10px; }
@@ -263,7 +269,7 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
       held-out: <span class="mono">mvdr_peaks.py</span>).</p>
       <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
         <div style="flex:0 1 340px;min-width:240px;max-height:70vh;overflow:auto">
-          <table id="liveList" class="mono" style="font-size:12px;width:100%"></table>
+          <table id="liveList" class="mono ltab" style="font-size:12px;width:100%"></table>
         </div>
         <div style="flex:1 1 480px;min-width:300px">
           <div id="liveHead" class="mono" style="font-size:13px"></div>
@@ -1198,8 +1204,8 @@ async function sysTick() {
 }
 function scoreTable(rows) {
   if (!rows.length) return "";
-  let h = '<table class="mono" style="font-size:12px"><tr><th>score</th><th>value</th></tr>';
-  for (const [k, v] of rows) h += `<tr><td>${k}</td><td>${v}</td></tr>`;
+  let h = '<table class="mono ltab" style="font-size:12px"><tr><th>score</th><th class="num">value</th></tr>';
+  for (const [k, v] of rows) h += `<tr><td>${k}</td><td class="num">${v}</td></tr>`;
   return h + "</table>";
 }
 const pct = v => v == null ? "–" : (100 * v).toFixed(1) + " %";
@@ -1214,7 +1220,7 @@ async function liveTick() {
   setLiveDot(running.length);
   if ($("#liveFollow").checked && running.length && !running.some(r => r.rel === LIVE.run)) LIVE.run = running[0].rel;
   if (!LIVE.run && runs.length) LIVE.run = runs[0].rel;
-  const t = $("#liveList"); t.innerHTML = "<tr><th>run</th><th>state</th><th>iteration</th></tr>";
+  const t = $("#liveList"); t.innerHTML = '<tr><th>run</th><th>state</th><th class="num">iteration</th></tr>';
   for (const r of runs.slice(0, 60)) {
     const row = t.insertRow(); row.style.cursor = "pointer";
     if (r.rel === LIVE.run) row.style.background = "var(--sunk)";
@@ -1222,7 +1228,7 @@ async function liveTick() {
     if (r.state === "running") { const dot = document.createElement("span"); dot.className = "dot on"; nameCell.prepend(dot); dot.style.margin = "0 6px 0 0"; }
     const c = row.insertCell(); c.textContent = r.state;
     c.style.color = r.state === "running" ? "var(--s3)" : r.state === "stale" ? "var(--s2)" : "var(--muted)";
-    row.insertCell().textContent = `${r.iteration} / ${r.iterations}`;
+    const itCell = row.insertCell(); itCell.className = "num"; itCell.textContent = `${r.iteration} / ${r.iterations}`;
     row.onclick = () => { LIVE.run = r.rel; $("#liveFollow").checked = false; liveTick(); };
   }
   if (!LIVE.run) { $("#liveHead").textContent = "no run has written live progress yet (train_rrf.py --live-every)"; return; }
