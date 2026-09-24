@@ -35,4 +35,19 @@ run() {
 }
 run m3v_em_pc8_40k --emitters $EM --em-pcolor 8
 run m3v_plain_40k
+# seed 0 gave A 41.4 %, plain 28.2 %: A in the 30-50 % band -> by the reading above, more seeds before reading
+# (plain too, for the paired comparison)
+for s in 1 2; do
+  B2="${B/--seed 0/--seed $s}"
+  for arm in em_pc8 plain; do
+    name=m3v_${arm}_40k_s$s
+    extra=""; [ $arm = em_pc8 ] && extra="--emitters $EM --em-pcolor 8"
+    if [ ! -f output/rrf/m3/$name/results.json ]; then
+      mkdir -p output/rrf/m3/$name
+      $PYW rrf_gsplat/train_rrf.py --out output/rrf/m3/$name $B2 $extra > output/rrf/m3/$name/train.log 2>&1
+    fi
+    echo "$name: $(grep -a 'iterations in' output/rrf/m3/$name/train.log | tail -1 | cut -c1-120)" >> $LOG
+    $PYW rrf_gsplat/diag_train_fit.py --run output/rrf/m3/$name --train-subset 640 >> $LOG 2>&1
+  done
+done
 echo "== all done $(date +%H:%M:%S)" >> $LOG

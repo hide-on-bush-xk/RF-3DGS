@@ -125,6 +125,11 @@ Fourteen facts that re-rank everything below:
    (3 seeds 33.4 / 23.9 / 20.5). The visual Gaussians with P7 alone: 27.3 %. All four arms sit at 25-27 %. By the
    reading written before the run: an explicit path set. Unresolved confound: views per step -- the 160-position
    benchmark visits each training view ~19 times in 3000 steps, the 12-position smoke ~250 times.
+19. **...and it was the visits: item 18's reading is withdrawn.** At 40,000 steps (~250 visits per view, 3 seeds)
+   placement + switch reaches 41.7 % (41.4 / 42.0 / 41.6), while plain stays at 25.0 % (so the plain field's
+   capacity limit is real, and rounds 51-56 stand). On the unclipped views it is 56.9 % (median 0.82 deg), on
+   the clipped ones 11.4 %: a flat-topped training target carries no peak position, and once a model can fit,
+   the clipped range (item 16) is the ceiling. Next: the same with an unclipped training range.
 
 What this implies: the peak is lost in something every variant tried shares. One position is representable
 exactly by the frozen Gaussians; for 160 positions no colour model (SH4, lobes, CNN head, position-conditioned
