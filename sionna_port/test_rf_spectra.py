@@ -188,6 +188,34 @@ def test_mvdr_fixed_is_snapshot_invariant():
     print("MVDR snapshot invariance ok")
 
 
+def test_mvdr_float64_is_order_invariant():
+    """An unloaded, ill-conditioned covariance (a few strong paths over a weak diffuse floor, cond ~1e11 as in the
+    MVDR datasets) must not depend on the order of the paths -- the ray tracer returns them in a different order on
+    every solve. complex128 holds that; complex64 does not (found 2026-09-24: up to 17 dB between two solves of one
+    view). The float32 spread is printed, not asserted: it is the bug, not a contract."""
+    grid = ArrayGrid.build(M, W, H, FOV)
+    g = torch.Generator().manual_seed(1)
+    P = 3000
+    rows, cols = torch.randint(0, H, (P,), generator=g), torch.randint(0, W, (P,), generator=g)
+    a = torch.stack([grid.manifold[:, r, c] for r, c in zip(rows.tolist(), cols.tolist())], dim=1)   # [M^2, P]
+    amp = 1e-5 * torch.randn(P, generator=g, dtype=torch.float64)
+    amp[:3] = 1.0                                                  # three strong paths over a -100 dB floor
+    phase = torch.exp(2j * math.pi * torch.rand(P, generator=g, dtype=torch.float64))
+    tau = torch.rand(P, generator=g, dtype=torch.float64) * 15.0      # ~20 paths per 0.1 ns tap: order changes the sums
+    order = torch.randperm(P, generator=g)
+    out = {}
+    for dtype, fdtype in ((torch.complex128, torch.float64), (torch.complex64, torch.float32)):
+        A = a.to(dtype) * (amp * phase).to(dtype)[None]
+        t = tau.to(fdtype)
+        grid_t = torch.arange(0, 15.1, 0.1, dtype=fdtype)
+        dbs = [mvdr_spectrum(merge_paths_to_time_grid(A[:, o], t[o], grid_t), grid)[1]
+               for o in (torch.arange(P), order)]
+        out[dtype] = float((dbs[0] - dbs[1]).abs().max())
+    # bound: a tenth of the 0.01 dB reproduction criterion (float64 on the real data: 6e-5 dB between two solves)
+    assert out[torch.complex128] < 1e-3, f"float64 MVDR depends on the path order by {out[torch.complex128]:.2e} dB"
+    print(f"MVDR float64 order invariance ok (float64 {out[torch.complex128]:.1e} dB; float32 {out[torch.complex64]:.2f} dB)")
+
+
 def test_mpc_variant_is_power():
     """Criterion F: the projection family's weight is an amplitude, not a power.
 
@@ -251,6 +279,7 @@ if __name__ == "__main__":
     test_cbf_variants_agree_on_one_path()
     test_cbf_variants_differ_on_two_taps()
     test_mvdr_fixed_is_snapshot_invariant()
+    test_mvdr_float64_is_order_invariant()
     test_mpc_variant_is_power()
     test_mpc_fixed_matches_multichannel_power()
     print("\nall checks passed")

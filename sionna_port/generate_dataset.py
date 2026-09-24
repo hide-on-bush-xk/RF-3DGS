@@ -89,6 +89,11 @@ class Config:
     # towards the high-sample answer while each view stays cheap.
     per_view_seed: bool = True
     seed_per_view: bool = False     # pre-fix behaviour: every view (not position) gets its own lattice and solve; for A/B only
+    # MVDR in complex128. An unloaded tap covariance has cond ~1e11, and complex64 turns the weak directions into
+    # rounding noise (up to ~18 dB against float64, median ~1.4 dB on 3dgs_MVDR_100_gpct view 00010, and not even
+    # reproducible: the solver returns the same paths in another order each time). Every dataset generated before
+    # 2026-09-24 has no key and was float32.
+    mvdr_float64: bool = True
     bandwidth_hz: float = 400e6     # link budget only; scales SNR and capacity
     dashboard: bool = True
 
@@ -288,6 +293,10 @@ def spectrum_for_paths(paths, grid: ArrayGrid, cfg: Config, yaw: float = 0.0):
         eq = projection_equirect(paths, kind, grid.theta.device, cfg.splat_sigma, cfg.power_floor_db)
         persp = equirect_to_perspective(eq, cfg.width, cfg.height, cfg.fov_deg, yaw_rad=yaw)
         return None, persp                                   # [C, H, W]
+    if kind == "MVDR" and cfg.mvdr_float64:
+        response = paths_to_response(paths, cfg.time_interval_ns, device=grid.theta.device, dtype=torch.complex128)
+        p, db = mvdr_spectrum(response, grid, cfg.diagonal_loading)
+        return p.float(), db.float()
     response = paths_to_response(paths, cfg.time_interval_ns, device=grid.theta.device)
     if kind == "CBF":
         return cbf_spectrum(response, grid)
@@ -593,6 +602,8 @@ def main():
     ap.add_argument("--no-dashboard", dest="dashboard", action="store_false")
     ap.add_argument("--samples-per-src", type=int, default=1_000_000,
                     dest="samples_per_src")
+    ap.add_argument("--mvdr-float32", dest="mvdr_float64", action="store_false",
+                    help="the pre-2026-09-24 MVDR in complex64 (numerically unstable in the weak directions)")
     ap.add_argument("--seed-per-view", dest="seed_per_view", action="store_true",
                     help="pre-fix behaviour for A/B tests: one lattice and solve per view instead of per position")
     ap.add_argument("--fixed-seed", dest="per_view_seed", action="store_false",

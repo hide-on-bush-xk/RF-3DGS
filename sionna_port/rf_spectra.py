@@ -162,7 +162,7 @@ def merge_paths_to_time_grid(a: torch.Tensor, tau_ns: torch.Tensor,
 
 
 def paths_to_response(paths, time_interval_ns: float = 1.0,
-                      device=None) -> torch.Tensor:
+                      device=None, dtype=None) -> torch.Tensor:
     """Per-element discrete baseband response, [M**2, L] complex.
 
     `paths` is a Sionna RT 2.x Paths object. Delays are *not* normalized, matching
@@ -180,6 +180,10 @@ def paths_to_response(paths, time_interval_ns: float = 1.0,
     tau = tau[0, 0, 0, 0, :] if tau.dim() == 5 else tau.reshape(-1)
     if device is not None:
         a, tau = a.to(device), tau.to(device)
+    if dtype is not None:
+        # torch.complex128 for MVDR: the paths of one tap are summed before the (ill-conditioned) inverse, and the
+        # solver returns them in a different order every time, so the sum itself must be exact enough
+        a, tau = a.to(dtype), tau.to(torch.float64 if dtype == torch.complex128 else torch.float32)
 
     # Drop padding slots before anything downstream sees them.
     finite = torch.isfinite(tau) & (tau >= 0)
@@ -298,9 +302,14 @@ def mvdr_spectrum(response: torch.Tensor, grid: ArrayGrid,
             "dependent. Set diagonal_loading to regularise it."
         )
 
-    # P(direction) = 1 / (a^H R^-1 a), evaluated for every pixel at once.
-    aH_Rinv = torch.einsum("mhw,mn->nhw", grid.manifold.conj(), R_inv)
-    quad = torch.einsum("nhw,nhw->hw", aH_Rinv, grid.manifold).abs()
+    # P(direction) = 1 / (a^H R^-1 a), evaluated for every pixel at once, in the response's precision: an
+    # unloaded delay-tap covariance has cond(R) ~ 1e11 (3dgs_MVDR_100_gpct, view 00010), far past float32's
+    # 1e7, and complex64 then returns rounding noise in the weak directions -- up to 17 dB between two solves of
+    # the same view whose paths only came back in another order (found 2026-09-24). Pass a complex128 response
+    # (the generator's --mvdr-float64) for a reproducible spectrum.
+    man = grid.manifold.to(R_inv.dtype)
+    aH_Rinv = torch.einsum("mhw,mn->nhw", man.conj(), R_inv)
+    quad = torch.einsum("nhw,nhw->hw", aH_Rinv, man).abs()
     p = 1.0 / quad.clamp_min(torch.finfo(quad.dtype).tiny)
     return p, 10.0 * torch.log10(p)        # 10 log10: p is already a power
 
