@@ -3,7 +3,7 @@
 # (win_m3_visits.sh) found emitters + --em-pcolor 8 at 41.7 % distinct <= 1 deg, 56.9 % on the unclipped views and
 # 11.4 % on the clipped ones: global-pct (1-99.9 percentile) flat-tops the peaks of 25 % of the APS views, and a
 # plateau carries no peak position. Here the same runs on 3dgs_APS_60_gp100 = the same spectra renormalised to the
-# 1-100 percentile range (the top = the global maximum, -64.77 dB; span 79 instead of 55 dB):
+# dataset's exact range (the top = the global maximum, -64.77 dB; span 79 instead of 55 dB):
 #   A      emitters + --em-pcolor 8, 40,000 steps, seeds 0 1 2
 #   plain  40,000 steps, seed 0 (the control; it has sat at ~25 % in every configuration)
 # Check before training: no view's maximum above the new range's top (0 clipped views); else stop.
@@ -25,7 +25,11 @@ LOG=$REPO/output/rrf/m3/win_m3_unclipped.log
 cd $REPO
 echo "== m3 unclipped start $(date +%H:%M:%S)" >> $LOG
 if [ ! -f $APU/generation_meta.json ]; then
-  $PYW rrf_gsplat/renormalize.py $AP $APU --norm global-pct --pct 1 100 >> $LOG 2>&1
+  # the range is the dataset's exact min .. max (its generation_meta): --pct 1 100 does NOT give the maximum, because
+  # renormalize.py takes percentiles of a 2000-pixel sample per image (first attempt: top -66.96 dB, 10 views above it,
+  # stopped by the check below before any training)
+  RANGE=$($PYS -c "import json; m = json.load(open('$AP/generation_meta.json')); print(m['spec_min_db'], m['spec_max_db'])")
+  $PYW rrf_gsplat/renormalize.py $AP $APU --norm global-pct --range $RANGE >> $LOG 2>&1
 fi
 $PYS - >> $LOG 2>&1 <<EOF || { echo "data check failed: not training" >> $LOG; exit 1; }
 import json, os, sys
