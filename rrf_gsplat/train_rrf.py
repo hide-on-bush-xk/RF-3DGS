@@ -1022,6 +1022,11 @@ def main():
     ap.add_argument("--emitter-lr-mult", type=float, default=10.0,
                     help="the emitters' SH learning rate over --feature-lr: their value is a sigmoid of the SH and starts "
                          "near the floor, so at the visual Gaussians' rate it could not get bright within 3000 steps")
+    ap.add_argument("--live-every", type=int, default=50,
+                    help="write <out>/live.jsonl (loss, it/s) every N steps for the viewer's live tab; 0 = off (live.py)")
+    ap.add_argument("--live-render-every", type=int, default=500,
+                    help="write <out>/live/render.png (prediction over truth, one training and one held-out position) "
+                         "every N steps; 0 = no renders")
     ap.add_argument("--em-pcolor", type=int, default=0,
                     help="with --emitters: P7 for the emitters -- a per-emitter latent of this width and a shared MLP of "
                          "(latent, direction, receiver position) added to each emitter's logit; 0 = off")
@@ -1346,6 +1351,27 @@ def main():
     running_eval_seconds = 0.0
     torch.cuda.synchronize(); t_train = time.time()
     rng = np.random.default_rng(cfg.seed)
+    live, live_rows = None, None
+    if cfg.live_every:
+        from live import LiveLog
+        live = LiveLog(cfg.out, cfg, cfg.live_every, cfg.live_render_every if cfg.mode in ("db", "power", "multi") else 0)
+        # the fixed positions of the live render: the first training position and the first held-out one (all faces)
+        def _first_group(d):
+            c = torch.linalg.inv(d["viewmats"])[:, :3, 3]
+            return [i for i in range(len(c)) if float((c[i] - c[0]).norm()) < 1e-4]
+        g_tr, g_te = _first_group(train), _first_group(test)
+
+        def live_rows():
+            def norm(d, g):
+                if cfg.mode == "multi":
+                    lo, hi = ch_ranges[0, 0], ch_ranges[0, 1]
+                    return torch.stack([((d["float"][i][0].float() - lo) / (hi - lo)).clamp(0, 1) for i in g])
+                return torch.stack([((d["float"][i].float() - vmin) / span).clamp(0, 1) for i in g])
+            out = []
+            for label, d, g in (("train", train, g_tr), ("held-out", test, g_te)):
+                pred = model.render_batch(d["viewmats"][g], d["Ks"][g], d["width"], d["height"], span)[:, 0]
+                out.append((label, pred, norm(d, g) if "float" in d else pred))
+            return out
     for it in range(1, cfg.iterations + 1):
         if cfg.lm_after and it > cfg.lm_after:
             break                                    # the rest of the budget goes to LM (below)
@@ -1379,6 +1405,11 @@ def main():
         if strategy is not None:
             strategy.step_post_backward(model.params, optimizers, state, it, model.last_info,
                                         lr=lrs["means"])
+        if live is not None:
+            live.step(it, loss)
+            if live.want_render(it, it == cfg.iterations):
+                with torch.no_grad():
+                    live.render(it, live_rows())
         if it % cfg.eval_every == 0 or it == cfg.iterations:
             torch.cuda.synchronize(); t_ev = time.time()
             m = (evaluate_multi(model, test, eval_idx, ch_ranges, channel_names, mask_channel=cfg.mask_channel,
@@ -1390,6 +1421,8 @@ def main():
                      gaussians=model.n_gaussians, views_seen=it * cfg.faces_per_step,
                      seconds_excl_eval=time.time() - t_train - running_eval_seconds)
             history.append(m)
+            if live is not None:
+                live.eval(it, m)
             print(f"  it {it:6d}  {m['seconds']:6.0f} s  loss {m['loss']:.4f}  "
                   f"PSNR(jet) {m['psnr_rgb']:5.2f}  SSIM {m['ssim_rgb']:.3f}  "
                   f"RMSE {m['rmse_db']:5.2f} dB  (subset {len(eval_idx)}"
@@ -1470,6 +1503,8 @@ def main():
               "gsplat_bwd_switches": {k: os.environ.get(k) for k in ("GSPLAT_BWD_NO_GEOM", "GSPLAT_BWD_PERGAUSS")}}
     with open(os.path.join(cfg.out, "results.json"), "w") as fid:
         json.dump(result, fid, indent=1)
+    if live is not None:
+        live.close(os.path.join(cfg.out, "results.json"))
     if final is None:
         print(f"\nno final evaluation (--no-eval); {cfg.iterations} iterations in {train_seconds:.0f} s "
               f"({cfg.iterations/train_seconds:.0f} it/s); {model.n_gaussians:,} Gaussians; wrote {cfg.out}")

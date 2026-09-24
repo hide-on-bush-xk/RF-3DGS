@@ -405,6 +405,89 @@ FROM runs r LEFT JOIN metrics m ON m.run = r.name
 GROUP BY r.name ORDER BY r.mtime DESC"""
 
 
+def _live_runs(max_age_h=72):
+    """Runs that write live/status.json (train_rrf.py --live-every, live.py), newest first. A run is "running" if
+    it wrote within the last two minutes and has not finished, "stale" if it stopped writing without finishing
+    (crashed or killed), "done" otherwise."""
+    import time as _time
+    out = []
+    for root, dirs, files in os.walk(OURS):
+        dirs[:] = [d for d in dirs if d != "renders" and not d.endswith("_trainfit") and d != "images"]
+        if os.path.relpath(root, OURS).count(os.sep) > 3:
+            dirs[:] = []
+        if os.path.basename(root) != "live" or "status.json" not in files:
+            continue
+        try:
+            st = json.load(open(os.path.join(root, "status.json")))
+        except (OSError, ValueError):
+            continue                                   # being replaced right now: next poll
+        age = _time.time() - st.get("updated", 0)
+        st["rel"] = os.path.relpath(os.path.dirname(root), OURS).replace(os.sep, "/")
+        st["state"] = "done" if st.get("done") else ("running" if age < 120 else "stale")
+        if st["state"] == "running" or age < max_age_h * 3600:
+            out.append(st)
+    return sorted(out, key=lambda s: -s.get("updated", 0))
+
+
+def _live_dir(rel):
+    """output/rrf/<rel>, refusing anything that would leave output/rrf."""
+    d = os.path.normpath(os.path.join(OURS, rel))
+    return d if d.startswith(os.path.normpath(OURS) + os.sep) and os.path.isdir(d) else None
+
+
+def _live_data(rel):
+    """A run's live status, its live.jsonl (the loss points thinned to <= 1500), its evaluations, and whatever
+    scores exist beside it: results.json (final), <run>_trainfit.json (capacity), peaks_<run>*.json."""
+    d = _live_dir(rel)
+    if d is None:
+        return {"error": "no such run"}
+    body = {"rel": rel}
+    try:
+        body["status"] = json.load(open(os.path.join(d, "live", "status.json")))
+    except (OSError, ValueError):
+        body["status"] = None
+    pts, evals = [], []
+    try:
+        for line in open(os.path.join(d, "live.jsonl")):
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue                               # a line being written
+            (evals if "eval" in r else pts).append(r)
+    except OSError:
+        pass
+    step = max(1, len(pts) // 1500)
+    body["points"] = pts[::step] + (pts[-1:] if pts and (len(pts) - 1) % step else [])
+    body["evals"] = evals
+    res = os.path.join(d, "results.json")
+    if os.path.isfile(res):
+        try:
+            r = json.load(open(res))
+            body["final"] = {k: r.get(k) for k in ("train_seconds", "iters_per_second", "gpu")} | (r.get("final") or {})
+        except (OSError, ValueError):
+            pass
+    tf = d + "_trainfit.json"
+    if os.path.isfile(tf):
+        try:
+            body["trainfit"] = json.load(open(tf)).get("train")
+        except (OSError, ValueError):
+            pass
+    base, name = os.path.dirname(d), os.path.basename(d)
+    peaks = []
+    for f in sorted(os.listdir(base)):
+        if f.startswith(f"peaks_{name}") and f.endswith(".json"):
+            try:
+                pk = json.load(open(os.path.join(base, f)))
+                m, md = pk.get("main_peak_angle_deg", {}), pk.get("main_peak_angle_deg_distinct", {})
+                peaks.append({"file": f, "eval_set": pk.get("eval_set"), "views": pk.get("views"),
+                              "median": m.get("median"), "within_1deg": m.get("within_1deg"),
+                              "distinct_median": md.get("median"), "distinct_within_1deg": md.get("within_1deg")})
+            except (OSError, ValueError):
+                pass
+    body["peaks"] = peaks
+    return body
+
+
 def make_handler(spectra, page, db_path=None):
     by_name = {s["name"]: s for s in spectra}
 
@@ -500,6 +583,22 @@ def make_handler(spectra, page, db_path=None):
                 self._send(index_bytes, "application/json"); return
             if p == "/api/sql":
                 self._sql(); return
+            if p.startswith("/api/live"):
+                from urllib.parse import parse_qs, urlparse
+                q = parse_qs(urlparse(self.path).query)
+                nocache = {"Cache-Control": "no-store"}
+                if p == "/api/live":
+                    self._send(json.dumps(_live_runs()).encode(), "application/json", extra=nocache); return
+                rel = q.get("run", [""])[0]
+                if p == "/api/live/data":
+                    self._send(json.dumps(_live_data(rel), default=str).encode(), "application/json",
+                               extra=nocache); return
+                if p == "/api/live/img":
+                    d = _live_dir(rel)
+                    f = os.path.join(d, "live", "render.png") if d else None
+                    if f and os.path.isfile(f):
+                        self._send(open(f, "rb").read(), "image/png", extra=nocache); return
+                    self._send(b"not found", "text/plain", 404); return
             # every image is addressed by VIEW INDEX, never by filename, so the
             # page can ask for "view 137 of MVDR" without knowing which of the
             # two naming conventions the prediction on disk happens to use

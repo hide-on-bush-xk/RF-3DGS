@@ -136,6 +136,7 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
     <button id="tabCmp" class="on">compare</button>
     <button id="tabRuns">runs</button>
     <button id="tab3d">3D</button>
+    <button id="tabLive">live</button>
     <button id="theme" title="light / dark">&#9681;</button>
   </div>
 
@@ -231,6 +232,37 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
       <p class="note warn" id="sqlErr"></p>
       <div style="overflow:auto;max-height:62vh;margin-top:10px">
         <table id="sqlTable" class="mono" style="font-size:12px"></table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ---------------- live tab ---------------- -->
+  <div id="live" class="hidden">
+    <div class="card">
+      <h2>live training
+        <label style="font-weight:400;font-size:13px;margin-left:10px">
+          <input type="checkbox" id="liveFollow" checked> follow the newest running run</label>
+        <span class="mono" id="liveClock" style="font-weight:400;font-size:12px;margin-left:10px"></span>
+      </h2>
+      <p class="note">Runs of <span class="mono">train_rrf.py</span> write their progress every
+      <span class="mono">--live-every</span> steps (loss, speed) and a render every
+      <span class="mono">--live-render-every</span> steps; this tab reads them every 2 s. Scores appear
+      beside a run as its scoring scripts finish (capacity: <span class="mono">diag_train_fit.py</span>,
+      held-out: <span class="mono">mvdr_peaks.py</span>).</p>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+        <div style="flex:0 1 340px;min-width:240px;max-height:70vh;overflow:auto">
+          <table id="liveList" class="mono" style="font-size:12px;width:100%"></table>
+        </div>
+        <div style="flex:1 1 480px;min-width:300px">
+          <div id="liveHead" class="mono" style="font-size:13px"></div>
+          <div style="background:var(--sunk);border-radius:4px;height:8px;margin:8px 0">
+            <div id="liveBar" style="height:8px;background:var(--accent);width:0;border-radius:4px"></div></div>
+          <canvas id="liveLoss" style="width:100%;height:220px;display:block"></canvas>
+          <canvas id="liveSpeed" style="width:100%;height:90px;display:block;margin-top:6px"></canvas>
+          <div id="liveScores" style="margin-top:10px"></div>
+          <h2 style="margin-top:14px">render <span class="mono" id="liveImgInfo" style="font-weight:400;font-size:12px"></span></h2>
+          <img id="liveImg" alt="" style="max-width:100%;display:block">
+        </div>
       </div>
     </div>
   </div>
@@ -774,7 +806,7 @@ $("#mErr").onclick = () => { MODE.err = !MODE.err; layout(); show(); };
 $("#mVis").onclick = () => { MODE.vis = !MODE.vis; layout(); show(); };
 $("#cols").onchange = () => show();
 
-const TABS = { tabCmp:"cmp", tabRuns:"runs", tab3d:"v3d" };
+const TABS = { tabCmp:"cmp", tabRuns:"runs", tab3d:"v3d", tabLive:"live" };
 for (const [btn, pane] of Object.entries(TABS)) {
   $("#" + btn).onclick = () => {
     for (const [b, p] of Object.entries(TABS)) {
@@ -783,6 +815,7 @@ for (const [btn, pane] of Object.entries(TABS)) {
     }
     if (pane === "runs" && !$("#sqlTable").rows.length) runSql();
     if (pane === "v3d") load3d();
+    liveActive(pane === "live");
   };
 }
 
@@ -1056,6 +1089,116 @@ addEventListener("keydown", e => {
   if (hash[1] || hash[3]) show();
   if (want3d) $("#tab3d").click();
 })();
+
+// ---------------------------------------------------------------- live tab
+// Polls /api/live (the runs that write live progress) and /api/live/data for the one shown, every 2 s while
+// the tab is open. Nothing here computes a result: it draws what the run and its scoring scripts wrote.
+const LIVE = { timer: null, run: null, renderIt: null };
+function liveActive(on) {
+  if (on && !LIVE.timer) { liveTick(); LIVE.timer = setInterval(liveTick, 2000); }
+  if (!on && LIVE.timer) { clearInterval(LIVE.timer); LIVE.timer = null; }
+}
+const cssv = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function fmtDur(s) {
+  if (s == null || !isFinite(s)) return "–";
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + "h " : "") + (h || m ? m + "m " : "") + x + "s";
+}
+function lineChart(cv, xs, ys, opt) {
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const L = 58, R = 12, T = 20, B = 20;
+  g.font = "11px 'IBM Plex Mono', ui-monospace, monospace"; g.fillStyle = cssv("--muted");
+  g.fillText(opt.title, L, 12);
+  if (!xs.length) { g.fillText("no points yet", L, T + 20); return; }
+  const y = ys.map(v => opt.log ? Math.log10(Math.max(v, 1e-12)) : v);
+  const x0 = opt.xmin ?? Math.min(...xs), x1 = Math.max(opt.xmax ?? 0, ...xs);
+  let y0 = Math.min(...y), y1 = Math.max(...y);
+  if (y1 - y0 < 1e-9) { y0 -= 0.5; y1 += 0.5; }
+  const px = x => L + (x - x0) / Math.max(x1 - x0, 1e-9) * (W - L - R);
+  const py = v => T + (1 - (v - y0) / (y1 - y0)) * (H - T - B);
+  g.strokeStyle = cssv("--line"); g.lineWidth = 1;
+  for (let k = 0; k <= 4; k++) {
+    const v = y0 + (y1 - y0) * k / 4, yy = py(v);
+    g.beginPath(); g.moveTo(L, yy); g.lineTo(W - R, yy); g.stroke();
+    g.fillText(String(Number((opt.log ? Math.pow(10, v) : v).toPrecision(3))), 4, yy + 4);
+  }
+  g.fillText("0", L, H - 5); g.fillText(String(x1), W - R - 8 * String(x1).length, H - 5);
+  g.strokeStyle = cssv(opt.color || "--s1"); g.lineWidth = 1.6; g.beginPath();
+  xs.forEach((x, i) => { const X = px(x), Y = py(y[i]); i ? g.lineTo(X, Y) : g.moveTo(X, Y); });
+  g.stroke();
+}
+function scoreTable(rows) {
+  if (!rows.length) return "";
+  let h = '<table class="mono" style="font-size:12px"><tr><th>score</th><th>value</th></tr>';
+  for (const [k, v] of rows) h += `<tr><td>${k}</td><td>${v}</td></tr>`;
+  return h + "</table>";
+}
+const pct = v => v == null ? "–" : (100 * v).toFixed(1) + " %";
+const num = (v, d = 2) => v == null ? "–" : Number(v).toFixed(d);
+const tail = s => String(s).split(/[\\/]/).pop();
+async function liveTick() {
+  $("#liveClock").textContent = new Date().toLocaleTimeString();
+  let runs;
+  try { runs = await (await fetch("/api/live", { cache: "no-store" })).json(); } catch (e) { return; }
+  const running = runs.filter(r => r.state === "running");
+  if ($("#liveFollow").checked && running.length && !running.some(r => r.rel === LIVE.run)) LIVE.run = running[0].rel;
+  if (!LIVE.run && runs.length) LIVE.run = runs[0].rel;
+  const t = $("#liveList"); t.innerHTML = "<tr><th>run</th><th>state</th><th>iteration</th></tr>";
+  for (const r of runs.slice(0, 60)) {
+    const row = t.insertRow(); row.style.cursor = "pointer";
+    if (r.rel === LIVE.run) row.style.background = "var(--sunk)";
+    row.insertCell().textContent = r.rel;
+    const c = row.insertCell(); c.textContent = r.state;
+    c.style.color = r.state === "running" ? "var(--s3)" : r.state === "stale" ? "var(--s2)" : "var(--muted)";
+    row.insertCell().textContent = `${r.iteration} / ${r.iterations}`;
+    row.onclick = () => { LIVE.run = r.rel; $("#liveFollow").checked = false; liveTick(); };
+  }
+  if (!LIVE.run) { $("#liveHead").textContent = "no run has written live progress yet (train_rrf.py --live-every)"; return; }
+  let d;
+  try { d = await (await fetch("/api/live/data?run=" + encodeURIComponent(LIVE.run), { cache: "no-store" })).json(); }
+  catch (e) { return; }
+  const st = d.status || {}, pts = d.points || [], last = pts[pts.length - 1];
+  const it = st.iteration || 0, n = st.iterations || 1;
+  const state = st.done ? "done" : ((Date.now() / 1000 - (st.updated || 0)) < 120 ? "running" : "stale");
+  const speed = last ? last.it_s : null;
+  const eta = state === "running" && speed ? (n - it) / speed : null;
+  const extras = Object.entries(st.extras || {}).map(([k, v]) => `${k}=${tail(v)}`).join("  ");
+  $("#liveHead").innerHTML = `<b>${d.rel}</b> &nbsp; ${state} &nbsp; ${it} / ${n} &nbsp; ` +
+    `${speed ? speed.toFixed(0) + " it/s" : ""} &nbsp; elapsed ${fmtDur(last && last.t)} &nbsp; ` +
+    `${eta != null ? "ETA " + fmtDur(eta) : ""}<br><span style="color:var(--muted)">${st.mode || ""} ` +
+    `${tail(st.source || "")}  seed ${st.seed ?? ""}  ${extras}</span>`;
+  $("#liveBar").style.width = Math.min(100, 100 * it / n) + "%";
+  lineChart($("#liveLoss"), pts.map(p => p.it), pts.map(p => p.loss),
+            { title: "training loss (mean over each interval, log scale)", log: true, xmin: 0, xmax: n, color: "--s1" });
+  lineChart($("#liveSpeed"), pts.map(p => p.it), pts.map(p => p.it_s),
+            { title: "speed (it/s)", xmin: 0, xmax: n, color: "--s3" });
+  const rows = [];
+  for (const e of d.evals || []) {
+    rows.push([`eval @ ${e.it}: held-out RMSE (dB)`, num(e.eval.rmse_db)]);
+    rows.push([`eval @ ${e.it}: held-out PSNR (jet)`, num(e.eval.psnr_rgb)]);
+  }
+  if (d.final && d.final.train_seconds) rows.push(["training time", fmtDur(d.final.train_seconds) + ` (${num(d.final.iters_per_second, 0)} it/s)`]);
+  if (d.trainfit) {
+    rows.push(["capacity: main peak <= 1 deg (all / distinct)", `${pct(d.trainfit.within_1deg)} / ${pct(d.trainfit.distinct_within_1deg)}`]);
+    rows.push(["capacity: main-peak angle median (deg)", `${num(d.trainfit.angle_median)} (distinct ${num(d.trainfit.distinct_angle_median)})`]);
+  }
+  for (const pk of d.peaks || [])
+    rows.push([`${pk.eval_set || pk.file}: main peak <= 1 deg (all / distinct)`,
+               `${pct(pk.within_1deg)} / ${pct(pk.distinct_within_1deg)}, median ${num(pk.median)} deg`]);
+  $("#liveScores").innerHTML = scoreTable(rows);
+  if (st.render_it != null && (st.render_it !== LIVE.renderIt || $("#liveImg").dataset.run !== d.rel)) {
+    LIVE.renderIt = st.render_it;
+    $("#liveImg").dataset.run = d.rel;
+    $("#liveImg").src = "/api/live/img?run=" + encodeURIComponent(d.rel) + "&it=" + st.render_it;
+    $("#liveImgInfo").textContent = `iteration ${st.render_it}: rows = ` +
+      (st.render_rows || []).map(r => r + " prediction, " + r + " truth").join(" / ");
+  }
+  if (st.render_it == null) { $("#liveImg").removeAttribute("src"); $("#liveImgInfo").textContent = "no render yet"; }
+}
+if (location.hash === "#live") $("#tabLive").click();
 </script>
 </body>
 </html>
