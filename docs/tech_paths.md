@@ -63,7 +63,11 @@ Five facts that re-rank everything below:
 8. **More SH bands help the capacity benchmark, modestly (round 51, one seed).** 160 positions, training views:
    <= 1 deg 16.6 / 18.0 / 19.2 / 23.9 % and main-peak median 5.60 / 5.75 / 4.95 / 3.74 deg for SH1-4 (held-out
    PSNR 17.6 / 18.2 / 18.8 / 19.4). Monotone, but SH3 -> SH4 is +4.7 points, between the two lines written before
-   the run: no conclusion yet. Next: SH4 seeds, and P2's lobes on the same benchmark.
+   the run: no conclusion yet.
+9. **Sharp lobes do not lift it either (round 52, one seed).** SH3 + spherical-Gaussian lobes (`--lobes`): 1 lobe
+   23.9 %, 2 lobes 24.1 %, 1 sharp lobe (kappa 100, ~6 deg) 25.6 % <= 1 deg on the same benchmark (main peak
+   3.32 deg, at the true peak -5.95 dB) -- about one more SH band's worth, below the 28.9 % written before the
+   run as the line for pursuing P2. A sharper directional function per Gaussian is not what is missing.
 
 What this implies: the bottleneck is how a Gaussian's value may vary with the receiver position. SH3 gives each
 Gaussian 16 numbers as a smooth function of the direction to the receiver; one position is representable, many are
@@ -123,7 +127,8 @@ and lowered top-3 detection from 68 % to 45 % (round 37): the optimiser moved Ga
    top-1 0.68 vs 0.60 (sigma 3) and 0.55 vs 0.38 (sigma 1), decoded-azimuth P90 5.85 vs 131 deg -- while on MVDR the
    copy wins at every density (0b.6); and the incoherent-MVDR ceiling (65.8 % <= 1 deg) is three times where the
    field is.
-3. **Position-conditioned colour (new, P7)** vs **sharper lobes (P2)**: the capacity sweep (0b.3) is the fast
+3. **Position-conditioned colour (new, P7)**; sharper lobes (P2) were tried in round 52 and bought only ~1 SH band
+   (0b.9). the capacity sweep (0b.3) is the fast
    benchmark for both -- train on 160 positions and score the training views (`diag_train_fit.py`); SH3 gives
    19 %, one position alone ~100 % top-3. P7: a small per-Gaussian latent decoded together with the receiver
    position (not only the direction) by a shared MLP, the shading head's idea moved into the Gaussians. P2: 1-2
