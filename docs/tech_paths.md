@@ -98,7 +98,9 @@ Fourteen facts that re-rank everything below:
 15. **The field fails on the instrument-free angular power too (stage 2, protocol v1, 2026-09-24).** Target: each
    path's power at its angle of arrival (iso receive pattern, 4 x 4M samples, soft floor), i.e. additive, no array,
    no floor edges. Capacity benchmark <= 1 deg 26.8 % (power) / 18.5 % (db). The pixel fit is good (training RMSE
-   1.9 dB), but the field's maximum sits 13 dB below the truth's and its spectral spread is 34 deg against 14 deg.
+   1.9 dB); the peaks are misplaced (spectral spread 34 deg against 14 deg on validation). An earlier version of this
+   item said the field's peak sits 13 dB low: that median is an artefact of the clipped training range (item 16),
+   the unclipped views are 1.9 dB low at the true peak.
    By the gate written before the run (<= 30 %), stage 3 (the operator in the loop, P1) is cancelled; M3 is next.
    Beam-gain loss on the true channel, validation: field 5.34 dB, NN 1.36, IDW-8 1.09, a second Monte-Carlo draw
    of the same scene 0.60.
@@ -109,6 +111,14 @@ Fourteen facts that re-rank everything below:
    strongest: SH3 11.6 deg vs NN 4.2 deg, and on the APS target 22.2 deg. Separately, every gpct training range
    clips the peaks of 16 % (MVDR) to 25 % (APS) of views. It does not explain the failure: clipped views score
    better. Tables in `docs/stage2_notes.md`, "协议 v1".
+   What each new term, metric and script means: `docs/protocol_v1_guide.md`.
+17. **True placement does not rescue the peaks either (M3 placement oracle).** Gaussians at the ray tracer's
+   interaction points of the 160 capacity positions (89k emitters, own pass, added in linear power, no occlusion,
+   SH3 colour) lift the capacity benchmark's distinct <= 1 deg from 25.1 to 27.1 % (3-seed means; +1.3 / +3.4 /
+   +1.3 per seed), below the 30 % line written before the run; with 12 positions the same emitters lift it from
+   35 to 53 %. Shared emitters with a ~45 deg colour cannot switch a reflection point on for the few receivers near
+   its mirror direction and off for the rest. Next: a per-position component (per-position latent, or an explicit
+   path set), not P4. The capacity benchmark's seed spread is 22-29 %, not +-1 point: 3 seeds from now on.
 
 What this implies: the peak is lost in something every variant tried shares. One position is representable
 exactly by the frozen Gaussians; for 160 positions no colour model (SH4, lobes, CNN head, position-conditioned
