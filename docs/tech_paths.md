@@ -56,6 +56,14 @@ Five facts that re-rank everything below:
    is better at every density down to 10 positions. The field wins only secondary metrics at K <= 40 (<= 1 deg
    share, RMSE at 10); its top-3 detection (~70 % at every K vs NN's 14-45 %) is inflated by its many local maxima
    (81 % of its predicted peaks are false) and is not a win.
+7. **Clean labels do not rescue it (round 50).** Regenerated in float64 (3dgs_MVDR_100_f64_gpct, same poses,
+   range and split; the float32 labels had per-view maxima up to 10 dB above the true one), the field trained and
+   scored on clean labels is unchanged within seed range (5.58 vs 5.59 deg, <= 1 deg 20.2 vs 18.6 %). NN on the
+   clean labels: 1.16 deg, 40.3 %.
+8. **More SH bands help the capacity benchmark, modestly (round 51, one seed).** 160 positions, training views:
+   <= 1 deg 16.6 / 18.0 / 19.2 / 23.9 % and main-peak median 5.60 / 5.75 / 4.95 / 3.74 deg for SH1-4 (held-out
+   PSNR 17.6 / 18.2 / 18.8 / 19.4). Monotone, but SH3 -> SH4 is +4.7 points, between the two lines written before
+   the run: no conclusion yet. Next: SH4 seeds, and P2's lobes on the same benchmark.
 
 What this implies: the bottleneck is how a Gaussian's value may vary with the receiver position. SH3 gives each
 Gaussian 16 numbers as a smooth function of the direction to the receiver; one position is representable, many are
