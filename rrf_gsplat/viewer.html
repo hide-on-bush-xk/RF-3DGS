@@ -107,6 +107,12 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
 .hidden { display:none !important; }
 .head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .head h1 { margin:0; }
+/* the live indicator: grey when nothing trains, a breathing green light while a run writes live progress */
+.dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--line);
+  margin-left:6px; vertical-align:middle; }
+.dot.on { background:var(--s3); box-shadow:0 0 6px var(--s3); animation:pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+@media (prefers-reduced-motion: reduce) { .dot.on { animation:none; } }
 /* 3D tab: the render at the held-out view's pose beside that view's prediction and target, all 3:2 */
 .row3d { display:grid; grid-template-columns:2fr 1fr; gap:10px; margin-top:10px; }
 .row3d .side { display:grid; gap:10px; align-content:start; }
@@ -143,7 +149,7 @@ td { text-align:right; font-family:"IBM Plex Mono",ui-monospace,monospace; }
     <button id="tabCmp" class="on">compare</button>
     <button id="tabRuns">runs</button>
     <button id="tab3d">3D</button>
-    <button id="tabLive">live</button>
+    <button id="tabLive">live<span class="dot" id="liveDot" title="no run is training"></span></button>
   </div>
 
   <!-- ---------------- compare tab ---------------- -->
@@ -1205,13 +1211,15 @@ async function liveTick() {
   let runs;
   try { runs = await (await fetch("/api/live", { cache: "no-store" })).json(); } catch (e) { return; }
   const running = runs.filter(r => r.state === "running");
+  setLiveDot(running.length);
   if ($("#liveFollow").checked && running.length && !running.some(r => r.rel === LIVE.run)) LIVE.run = running[0].rel;
   if (!LIVE.run && runs.length) LIVE.run = runs[0].rel;
   const t = $("#liveList"); t.innerHTML = "<tr><th>run</th><th>state</th><th>iteration</th></tr>";
   for (const r of runs.slice(0, 60)) {
     const row = t.insertRow(); row.style.cursor = "pointer";
     if (r.rel === LIVE.run) row.style.background = "var(--sunk)";
-    row.insertCell().textContent = r.rel;
+    const nameCell = row.insertCell(); nameCell.textContent = r.rel;
+    if (r.state === "running") { const dot = document.createElement("span"); dot.className = "dot on"; nameCell.prepend(dot); dot.style.margin = "0 6px 0 0"; }
     const c = row.insertCell(); c.textContent = r.state;
     c.style.color = r.state === "running" ? "var(--s3)" : r.state === "stale" ? "var(--s2)" : "var(--muted)";
     row.insertCell().textContent = `${r.iteration} / ${r.iterations}`;
@@ -1259,6 +1267,18 @@ async function liveTick() {
   }
   if (st.render_it == null) { $("#liveImg").removeAttribute("src"); $("#liveImgInfo").textContent = "no render yet"; }
 }
+// the indicator on the live tab's button (and a dot in the browser tab's title), whichever tab is open
+const BASE_TITLE = document.title;
+function setLiveDot(n) {
+  $("#liveDot").classList.toggle("on", n > 0);
+  $("#liveDot").title = n ? `${n} run${n > 1 ? "s" : ""} training` : "no run is training";
+  document.title = (n ? "\u25CF " : "") + BASE_TITLE;
+}
+async function dotTick() {
+  try { setLiveDot((await (await fetch("/api/live", { cache: "no-store" })).json()).filter(r => r.state === "running").length); }
+  catch (e) { /* the server restarting: next tick */ }
+}
+dotTick(); setInterval(dotTick, 10000);
 if (location.hash === "#live") $("#tabLive").click();
 </script>
 </body>
