@@ -19,9 +19,9 @@ views per step) moves PSNR by up to 3 dB and leaves "<= 1 deg" at 15-20 %. The p
 share. Tonight's ablations (rounds 43-45) do not change that: the head's features, the per-Gaussian backward, the
 exact SSIM and LM are about how fast / how smooth the fit is, not about what the model can represent.
 
-## 0b. What the night established (rounds 47-52; details in `docs/t4_channel_model_plan.md`, `stage2_notes.md`)
+## 0b. What the night established (rounds 47-53; details in `docs/t4_channel_model_plan.md`, `stage2_notes.md`)
 
-Nine facts that re-rank everything below:
+Ten facts that re-rank everything below:
 
 1. **The labels are partly noise.** The dataset's MVDR ran in complex64 on a covariance with cond ~3e11; the
    solver returns its paths in a different order every time, so the weak directions are rounding noise. Against a
@@ -68,6 +68,12 @@ Nine facts that re-rank everything below:
    23.9 %, 2 lobes 24.1 %, 1 sharp lobe (kappa 100, ~6 deg) 25.6 % <= 1 deg on the same benchmark (main peak
    3.32 deg, at the true peak -5.95 dB) -- about one more SH band's worth, below the 28.9 % written before the
    run as the line for pursuing P2. A sharper directional function per Gaussian is not what is missing.
+10. **An additive-target control was confounded (rounds 53 / 53b).** The power splat of MULTI on the same poses
+   (additive in linear power; trained in db and in power mode) fits no better (<= 1 deg 14.7 / 18.6 %), but the
+   target is a poor control: 18 % of its pixels (median) sit on a -200 dB no-path floor and it is 5x rougher than
+   MVDR (Monte-Carlo splats; NN's RMSE on it is 10.7 dB). No conclusion. The clean control is a smooth, floor-free
+   additive target from the same channels: the Bartlett spectrum sqrt(a^H R a) (CBF 'fixed'), or its incoherent
+   R_inc version -- the first thing to run when testing P1's premise.
 
 What this implies: the bottleneck is how a Gaussian's value may vary with the receiver position. One position
 is representable by the frozen Gaussians; many are not, and neither more SH bands (0b.8) nor sharp lobes (0b.9)
