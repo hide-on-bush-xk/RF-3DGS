@@ -90,6 +90,9 @@ def main():
     ap.add_argument("--protocol", default=None)
     ap.add_argument("--capacity", type=int, default=0, help="the capacity benchmark's n positions")
     ap.add_argument("--positions", type=int, nargs="*", default=None, help="an explicit list of dataset positions")
+    ap.add_argument("--sets", nargs="*", default=None,
+                    help="protocol sets whose positions to add (train, val, val_random, val_segment); the sealed test sets "
+                         "are refused (protocol.eval_names). G2 of the generalisation diagnostics: --sets train val")
     ap.add_argument("--voxel", type=float, default=0.05)
     ap.add_argument("--keep-share", type=float, default=0.9)
     ap.add_argument("--cap", type=int, default=2000, help="most voxels kept per position")
@@ -118,6 +121,10 @@ def main():
         return rt["solver"], rt["scene"]
     groups = G.read_pose_groups(os.path.join(a.truth, "sparse", "0", "images.txt"))
     pos = list(a.positions or []) + (capacity_positions(a.protocol, a.capacity) if a.capacity else [])
+    for set_name in a.sets or []:
+        import protocol as PR
+        names_s = PR.train_names(a.protocol) if set_name == "train" else PR.eval_names(a.protocol, set_name)
+        pos += [(int(n) - 1) // 4 for n in names_s]              # dataset position = (1-based name - 1) // 4
     pos = sorted(set(pos))
     per_pos, pooled = [], {}
     kept_pos = {}                                   # position -> kept voxel keys with their power (for the peak check)
