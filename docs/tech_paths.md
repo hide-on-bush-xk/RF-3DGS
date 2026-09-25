@@ -149,6 +149,13 @@ Fourteen facts that re-rank everything below:
    (no difference), one sharp lobe 48.1 % (helps, marginally), P7 53.2 % (helps: +11 points, seed ranges 2-3) --
    close to the oracle placement + switch (61.7 %) without any oracle. Round 55's 22 % was clipped, 3000 steps,
    one seed. On the validation subset P7's beam-gain loss is 4.1 dB against plain's 7.4 dB.
+23. **gsplat's native hit distance as the delay range term (`--delay-range hit`).** Against the mesh (640 lobby views)
+   it is the most accurate range term: median error 0.085 m against euclid's 0.142 m, signed bias +0.003 m against
+   -0.256 m. The "Gaussians 0.2 m in front of the surface" came from measuring Gaussians by their centres. A 2500-step
+   training smoke passes, but the trained delay is not better (RMSE 5.4 vs 4.9 ns, one seed), possibly because the
+   residual and the range term are composited with different weights. Default unchanged; a full comparison awaits
+   approval. Also: gsplat's `lidar` camera renders a 360 deg panorama that matches the faces to 0.003 dB, but only
+   with `tile_size=16`.
 
 What this implies: the peak is lost in something every variant tried shares. One position is representable
 exactly by the frozen Gaussians; for 160 positions no colour model (SH4, lobes, CNN head, position-conditioned

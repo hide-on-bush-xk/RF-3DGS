@@ -242,7 +242,7 @@ class RRF(torch.nn.Module):
         xyz, scaling, rotation, opacity = (t.detach().to(device) for t in (xyz, scaling, rotation, opacity))
         self.mode, self.channels, self.sh_degree = mode, channels, sh_degree
         self.delay_channel, self.delay_span_ns, self.delay_depth_mode = None, None, "D"   # --delay-depth: delay = learned residual + rendered depth / c
-        self.delay_range, self._range_factor = "z", None                                  # --delay-range euclid: depth * sec(theta_pixel) = range along the ray
+        self.delay_range, self._range_factor = "z", None                                  # --delay-range euclid: depth * sec(theta_pixel); hit: gsplat's along-ray hit distance
         n, k = xyz.shape[0], (sh_degree + 1) ** 2
         # RF-3DGS zeroes every SH coefficient before RF training; the same here,
         # for any channel count. DC and the rest are separate parameters so
@@ -514,7 +514,9 @@ class RRF(torch.nn.Module):
                 extras.append(lat if col.dim() == 2 else lat[None].expand(B, -1, -1))
             col = torch.cat([col] + extras, -1)
         n_real = col.shape[-1]                             # colour + the head's extras, before any padding
-        want_depth = self.delay_channel is not None or (hc is not None and hc["depth"])
+        # --delay-range hit renders its range term in a pass of its own (_hit_distance), so the colour pass needs no depth
+        use_hit = self.delay_channel is not None and self.delay_range == "hit"
+        want_depth = (self.delay_channel is not None and not use_hit) or (hc is not None and hc["depth"])
         depth_mode = self.delay_depth_mode if self.delay_channel is not None else "ED"
         # gsplat's kernels are compiled for a fixed set of channel counts (depth included): multi's 5 + normal 3
         # + latent 4 + depth = 13 is not one of them, so the colour vector is padded with zeros up to the next
@@ -547,7 +549,7 @@ class RRF(torch.nn.Module):
             # depth gsplat renders natively (sum_i w_i d_i, metres); the learned channel
             # keeps only the view-independent part. In the channel's normalised units.
             K = Ks[0]                                      # one camera model per dataset (load_views checks the size)
-            depth_m = img[:, self.channels]
+            depth_m = self._hit_distance(viewmats, Ks, width, height) if use_hit else img[:, self.channels]
             if self.delay_range == "euclid":
                 # gsplat's depth is the camera z; the path length is z / cos(theta) along the pixel's ray
                 # (1.41 at the edge and 1.56 at the corner of a 90-degree face). Measured on the lobby: the
@@ -569,6 +571,22 @@ class RRF(torch.nn.Module):
             if self.head_on:
                 img = self._apply_head(img, head_in[0], head_in[1], viewmats, Ks, width, height)
         return img
+
+    def _hit_distance(self, viewmats, Ks, width, height):
+        """The range term of --delay-range hit, [B, H, W] metres: gsplat's native along-ray distance to each Gaussian's
+        maximum response on the pixel's own ray (eval3d render mode "Ed", or "d" with --delay-depth-mode D).
+
+        "euclid" multiplies the composited camera z of the Gaussian centres by sec(theta_pixel): the distance along the
+        pixel's ray to the plane through the centre parallel to the image. That equals the hit distance on the ray
+        through the centre only. Off it, the hit distance follows the Gaussian's own shape: for a flat Gaussian it
+        is the intersection of the ray with the Gaussian's plane, the path length a surface actually has. Its own
+        pass, on the eval3d rasteriser (the colour pass stays the classic one), costs one extra rasterisation."""
+        from gsplat import rasterization
+        img, _, _ = rasterization(
+            self.means, self.quats, self.scales, self.opacities, self.means.new_zeros(self.means.shape[0], 1),
+            viewmats, Ks, width, height, sh_degree=None, render_mode="Ed" if self.delay_depth_mode == "ED" else "d",
+            with_ut=True, with_eval3d=True, packed=False)
+        return img[..., -1]
 
     def _apply_head(self, base, extra, depth, viewmats, Ks, width, height):
         """base [B, C, H, W] in normalised units -> base + bounded residual, from base + guide buffers + latent."""
@@ -925,8 +943,9 @@ def main():
                     help="how --max-train-views picks positions: evenly along the training list (route) or farthest-point sampling in space (fps)")
     ap.add_argument("--delay-depth-mode", choices=["D", "ED"], default="D",
                     help="--delay-depth range term: accumulated depth sum w d (D) or expected depth sum w d / alpha (ED)")
-    ap.add_argument("--delay-range", choices=["z", "euclid"], default="z",
-                    help="--delay-depth range term as the camera z (z, as the first runs) or the Euclidean range z * sec(theta_pixel) (euclid)")
+    ap.add_argument("--delay-range", choices=["z", "euclid", "hit"], default="z",
+                    help="--delay-depth range term as the camera z (z, as the first runs), the Euclidean range z * sec(theta_pixel) "
+                         "(euclid), or gsplat's native along-ray hit distance from an eval3d pass of its own (hit)")
     ap.add_argument("--init-from", default=None, help="rrf_state.pt of another run (warm start)")
     ap.add_argument("--init-geometry-only", action="store_true",
                     help="with --init-from: take means/scales/quats/opacities from that run but "
