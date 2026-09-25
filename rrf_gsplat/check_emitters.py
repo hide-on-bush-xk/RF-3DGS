@@ -57,6 +57,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--emitters", required=True); ap.add_argument("--names", required=True)
     ap.add_argument("--em-pcolor", type=int, default=0)
+    ap.add_argument("--out", default=None, help="result json (default output/rrf/m3/check_emitters[_pcW].json)")
     a = ap.parse_args()
     os.environ["GSPLAT_BWD_NO_GEOM"] = "1"
     torch.backends.cudnn.allow_tf32 = False
@@ -148,8 +149,8 @@ def main():
     print(json.dumps(res, indent=1))
     print("ALL PASS" if all(res[k] for k in ("S1", "S2", "S3", "S5")) else
           "FAIL: " + ", ".join(k for k in ("S1", "S2", "S3", "S5") if not res[k]))
-    json.dump(res, open(os.path.join(T.REPO, "output", "rrf", "m3",
-                                     f"check_emitters{'_pc' + str(a.em_pcolor) if a.em_pcolor else ''}.json"), "w"), indent=1)
+    json.dump(res, open(a.out or os.path.join(T.REPO, "output", "rrf", "m3",
+                                              f"check_emitters{'_pc' + str(a.em_pcolor) if a.em_pcolor else ''}.json"), "w"), indent=1)
 
 
 if __name__ == "__main__":
