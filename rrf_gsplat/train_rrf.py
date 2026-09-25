@@ -1008,6 +1008,18 @@ def main():
                          "at its bound, where tanh has no gradient left (round 43)")
     ap.add_argument("--head-width", type=int, default=32)
     ap.add_argument("--head-lr", type=float, default=1e-3)
+    ap.add_argument("--dir-loss", choices=["none", "expgain", "ce"], default="none",
+                    help="main-peak direction loss over the four faces of a position (dir_loss.py): the expected beam-gain loss "
+                         "under softmax(pred_dB / T) (expgain) or KL to the target's softmax (ce); needs --faces-per-step 4. "
+                         "With --dir-weight 0 it is only monitored")
+    ap.add_argument("--dir-weight", type=float, default=0.1, help="weight of the direction loss (expgain: dB / span; ce: nats)")
+    ap.add_argument("--dir-temp-db", type=float, default=1.0, help="the softmax temperature in dB (the final one when annealed)")
+    ap.add_argument("--dir-temp-start-db", type=float, default=None,
+                    help="anneal the temperature geometrically from this down to --dir-temp-db over --dir-anneal-steps: "
+                         "expgain's gradient vanishes when the prediction at the true peak is many T under its own maximum "
+                         "(check_dir_loss.py U5)")
+    ap.add_argument("--dir-anneal-steps", type=int, default=2000)
+    ap.add_argument("--dir-start", type=int, default=0, help="add the direction loss after this step")
     ap.add_argument("--peak-loss", type=float, default=0.0,
                     help="extra L1 weight on the pixels within 10 dB of each view's true maximum (value / power channel)")
     # 3DGS-LM (Hoellein et al., ICCV 2025): Levenberg-Marquardt on the SH coefficients after N Adam steps (lm_optim.py);
@@ -1120,6 +1132,8 @@ def main():
         raise SystemExit("--faces-per-step > 1 is not wired into the densification strategy's per-view statistics")
     if cfg.em_pcolor and not cfg.emitters:
         raise SystemExit("--em-pcolor needs --emitters")
+    if cfg.dir_loss != "none" and (cfg.mode not in ("db", "power") or cfg.faces_per_step != 4):
+        raise SystemExit("--dir-loss needs a single-channel value mode (db / power) and --faces-per-step 4 (the whole ring)")
     if cfg.early_stop_on != "none" and not (cfg.live_every and cfg.live_comm_every):
         raise SystemExit("--early-stop-on needs the live communication metrics (--live-every > 0, --live-comm-every > 0)")
     if cfg.emitters and (cfg.mode != "power" or cfg.head != "none" or cfg.delay_depth or cfg.densify != "none"
@@ -1530,6 +1544,12 @@ def main():
                 pred = model.render_batch(d["viewmats"][g], d["Ks"][g], d["width"], d["height"], span)[:, 0]
                 out.append((label, pred, norm(d, g) if "float" in d else pred))
             return out
+    dir_logw, dir_mon = None, []
+    if cfg.dir_loss != "none":
+        from dir_loss import dir_loss, solid_angle_logw
+        dir_logw = solid_angle_logw(train["Ks"][0], train["width"], train["height"], train["Ks"].device)
+        print(f"direction loss {cfg.dir_loss}: weight {cfg.dir_weight:g}, T {cfg.dir_temp_start_db or cfg.dir_temp_db:g} -> "
+              f"{cfg.dir_temp_db:g} dB over {cfg.dir_anneal_steps if cfg.dir_temp_start_db else 0} steps, from step {cfg.dir_start}")
     for it in range(1, cfg.iterations + 1):
         if cfg.lm_after and it > cfg.lm_after:
             break                                    # the rest of the budget goes to LM (below)
@@ -1546,6 +1566,16 @@ def main():
                 g = sorted(rng.choice(g, cfg.faces_per_step, replace=False).tolist())
             imgs = model.render_batch(train["viewmats"][g], train["Ks"][g], train["width"], train["height"], span)
             loss = sum(view_loss(imgs[k], target(i)) for k, i in enumerate(g)) / len(g)
+            if dir_logw is not None and len(g) == 4:
+                ring_gt = torch.stack([target(i)[0] for i in g])
+                with torch.no_grad():               # the monitor: expgain at T = 1 dB, in dB, whatever is trained
+                    dir_mon.append(float(dir_loss(imgs[:, 0].detach(), ring_gt, dir_logw, span, 1.0)) * span)
+                if cfg.dir_weight > 0 and it > cfg.dir_start:
+                    T = cfg.dir_temp_db
+                    if cfg.dir_temp_start_db:
+                        f = min(1.0, (it - cfg.dir_start) / max(cfg.dir_anneal_steps, 1))
+                        T = cfg.dir_temp_start_db * (cfg.dir_temp_db / cfg.dir_temp_start_db) ** f
+                    loss = loss + cfg.dir_weight * dir_loss(imgs[:, 0], ring_gt, dir_logw, span, T, cfg.dir_loss)
         if strategy is not None:
             # gsplat's MCMC regularisers, its defaults
             loss = loss + 0.01 * model.opacities.abs().mean() + 0.01 * model.scales.abs().mean()
@@ -1661,6 +1691,8 @@ def main():
               "n_test": len(test_names), "gaussians": model.n_gaussians,
               "train_seconds": train_seconds, "iters_per_second": it_run / train_seconds,
               "iterations_run": it_run, "stopped_early": es["stopped"], "stop_reason": es["reason"],
+              "dir_monitor_db": ([[k * 100 + 100, float(np.mean(dir_mon[k * 100:k * 100 + 100]))]
+                                  for k in range((len(dir_mon) + 99) // 100)] if dir_mon else None),
               "visits_per_view": it_run * views_per_step / n_train, "clipped_share_train": clip_share,
               "cuda_peak_reserved_mib": peak_reserved, "cuda_card_mib": card_mib,
               "running_eval_seconds": running_eval_seconds,
