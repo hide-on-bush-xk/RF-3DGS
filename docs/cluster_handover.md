@@ -11,6 +11,25 @@
 - **提交后自动 push**(Ke,2026-09-25:仓库只有他一个用户)。push 前先 `git pull --rebase`(本机也在 push);rebase 冲突或 push
   被拒就停下告诉 Ke。永远不要 force push。
 - 改动没通过验证就不提交,告诉 Ke 哪里坏了。
+- **第一次启动时**,把下面这段原样写进集群上的 `~/.claude/CLAUDE.md`(Ke 要求所有 session 都记住;这是本机全局设置的原文),
+  这样集群上以后所有项目、所有 session 都照此执行:
+
+```markdown
+# Git workflow
+
+When I have asked for a change and you have finished it and verified it (it builds,
+compiles, or the tests pass), commit it without waiting to be asked. Stage only the
+files that change was about, and write a commit message describing what changed and why.
+
+Commit on the branch that is already checked out. Do not create a new branch for this,
+even on `main` — I work directly on `main` in my writing repos.
+
+After each commit, push it to the branch's remote without waiting to be asked: I am the only user of my
+repositories (2026-09-25). First `git pull --rebase`, because another machine may have pushed (e.g. my GPU
+cluster). If the rebase conflicts or the push is rejected, stop and tell me. Never force-push.
+
+If the change does not build or verify, do not commit it — tell me what broke instead.
+```
 
 **仓库 `CLAUDE.md`**:计时契约(全链计时、声明 GPU 与是否独占、排除预热、报中位数)、基线公平性、冒烟优先(判据事先写下,
 结果落在范围外就报告、不改判据;分层抽样、边界样本、退化样本、平凡输入的解析解、已知失败样本)。
