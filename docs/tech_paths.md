@@ -144,6 +144,11 @@ Fourteen facts that re-rank everything below:
    metrics -- by the reading written before the run, look at generalisation before non-oracle placement.
    The gap is small in interpolation (45 vs 63 %) and large in extrapolation (21.8 vs 4.2 deg median). The plain
    field's validation curve is flat from 10k steps and worsens over the last 20k.
+22. **Re-run under corrected conditions, P7 does move the peaks (overturning item 12).** Unclipped, early-stopped
+   on the training subset (max 250 visits per view), 3 seeds, capacity benchmark: plain SH3 42.1 %, SH4 44.1 %
+   (no difference), one sharp lobe 48.1 % (helps, marginally), P7 53.2 % (helps: +11 points, seed ranges 2-3) --
+   close to the oracle placement + switch (61.7 %) without any oracle. Round 55's 22 % was clipped, 3000 steps,
+   one seed. On the validation subset P7's beam-gain loss is 4.1 dB against plain's 7.4 dB.
 
 What this implies: the peak is lost in something every variant tried shares. One position is representable
 exactly by the frozen Gaussians; for 160 positions no colour model (SH4, lobes, CNN head, position-conditioned
