@@ -1024,6 +1024,23 @@ def main():
                          "near the floor, so at the visual Gaussians' rate it could not get bright within 3000 steps")
     ap.add_argument("--live-every", type=int, default=50,
                     help="write <out>/live.jsonl (loss, it/s) every N steps for the viewer's live tab; 0 = off (live.py)")
+    ap.add_argument("--visits-per-view", type=float, default=None,
+                    help="set --iterations so that every training view is rendered this many times on average "
+                         "(iterations x views per step / training views): compare configurations at equal visits, "
+                         "not equal steps")
+    ap.add_argument("--allow-clip", action="store_true",
+                    help="train even if > 1 %% of the training views peak above the range's top (a flat-topped "
+                         "target carries no peak position; use renormalize.py --range <min> <max> instead)")
+    ap.add_argument("--early-stop-on", choices=["none", "val", "train"], default="none",
+                    help="stop when the communication metrics of this fixed subset stop improving: val = the "
+                         "validation subset (--live-comm-maps), train = 30 fixed training positions (capacity runs)")
+    ap.add_argument("--early-stop-patience", type=int, default=5,
+                    help="evaluations (every --live-comm-every steps) without a clear improvement before stopping")
+    ap.add_argument("--early-stop-min-steps", type=int, default=5000)
+    ap.add_argument("--early-stop-delta-pct", type=float, default=2.0,
+                    help="a clear improvement: distinct <= 1 deg up by this many points ...")
+    ap.add_argument("--early-stop-delta-db", type=float, default=0.2,
+                    help="... or the beam-gain loss median down by this many dB (validation subset only)")
     ap.add_argument("--live-comm-every", type=int, default=1000,
                     help="every N steps (and at the end) the communication metrics of a fixed validation subset "
                          "(live_comm.py: main-peak direction, <= 1 deg, beam-gain loss on the true channel, top-3) "
@@ -1077,6 +1094,8 @@ def main():
         raise SystemExit("--faces-per-step > 1 is not wired into the densification strategy's per-view statistics")
     if cfg.em_pcolor and not cfg.emitters:
         raise SystemExit("--em-pcolor needs --emitters")
+    if cfg.early_stop_on != "none" and not (cfg.live_every and cfg.live_comm_every):
+        raise SystemExit("--early-stop-on needs the live communication metrics (--live-every > 0, --live-comm-every > 0)")
     if cfg.emitters and (cfg.mode != "power" or cfg.head != "none" or cfg.delay_depth or cfg.densify != "none"
                          or cfg.lm_after or cfg.train_geometry):
         raise SystemExit("--emitters: --mode power, frozen geometry, no head, no delay channel, no densification, no LM")
@@ -1164,6 +1183,17 @@ def main():
             d["float"] = torch.stack([jet_inverse(d["rgb"][i].float() / 255.0) for i in range(len(d["names"]))]).half()
     print(f"loaded {len(train_names)} train / {len(test_names)} test views in {time.time()-t0:.0f} s; "
           f"float truth: {'yes' if 'float' in test else 'no'}; range {vmin:.1f}..{vmax:.1f} dB")
+    clip_share = None
+    if cfg.mode in ("db", "power") and "float" in train:
+        # a view whose maximum lies above the range's top has a flat-topped target: no peak position to learn
+        # (2026-09-24: 16-25 % of the gpct views were, and it shaped several conclusions)
+        n_clip = int((train["float"].flatten(1).max(1).values.float() > vmax + 1e-6).sum())
+        clip_share = n_clip / len(train_names)
+        print(f"training range {vmin:.2f} .. {vmax:.2f} dB: {n_clip} of {len(train_names)} training views peak above "
+              f"it ({100 * clip_share:.1f} %)")
+        if clip_share > 0.01 and not cfg.allow_clip:
+            raise SystemExit("more than 1 % of the training views are clipped by the training range: use the dataset's "
+                             "exact range (renormalize.py --range <spec_min> <spec_max>) or pass --allow-clip")
 
     channels = 3 if cfg.mode == "rgb" else (int(ch_ranges.shape[0]) if cfg.mode == "multi" else 1)
     model = RRF(cfg.checkpoint, cfg.mode, channels, cfg.sh_degree, device,
@@ -1328,6 +1358,11 @@ def main():
         sizes = np.bincount([len(g) for g in groups])
         print(f"faces per step {cfg.faces_per_step}: {len(groups)} receiver positions, "
               f"faces per position {{{', '.join(f'{s}: {int(n)}' for s, n in enumerate(sizes) if n)}}}")
+    views_per_step = cfg.faces_per_step if groups is not None else 1
+    if cfg.visits_per_view:
+        cfg.iterations = int(math.ceil(cfg.visits_per_view * n_train / views_per_step))
+        print(f"--visits-per-view {cfg.visits_per_view:g}: {cfg.iterations} iterations "
+              f"({n_train} training views, {views_per_step} per step)")
     strip_check = None
     if model.head is not None and cfg.head_strip:
         # Which way round do the faces join? Measured on the targets rather than assumed: for each candidate
@@ -1358,7 +1393,36 @@ def main():
     running_eval_seconds = 0.0
     torch.cuda.synchronize(); t_train = time.time()
     rng = np.random.default_rng(cfg.seed)
-    live, live_rows, comm = None, None, None
+    live, live_rows, comm, comm_tr = None, None, None, None
+    es = {"anchor_d": None, "anchor_b": None, "last_imp": 0, "seen": 0, "stopped": False, "reason": None}
+
+    def early_stop_check(it):
+        """True once the watched subset has shown no clear improvement for --early-stop-patience evaluations.
+        Only evaluations whose metrics have finished (on the worker) count, so the decision lags by at most one."""
+        cs = comm if cfg.early_stop_on == "val" else comm_tr
+        if cs is None or it < cfg.early_stop_min_steps:
+            return False
+        h = cs["history"]
+        while es["seen"] < len(h):
+            it_r, sm = h[es["seen"]]; es["seen"] += 1
+            if sm is None:
+                continue
+            d, b = sm.get("distinct_within_1deg"), sm.get("beam_loss_median")
+            imp = False
+            if d is not None and (es["anchor_d"] is None or 100 * (d - es["anchor_d"]) >= cfg.early_stop_delta_pct):
+                es["anchor_d"], imp = d, True
+            if b is not None and (es["anchor_b"] is None or es["anchor_b"] - b >= cfg.early_stop_delta_db):
+                es["anchor_b"], imp = b, True
+            if imp:
+                es["last_imp"] = it_r
+            es["latest"] = it_r
+        latest = es.get("latest", 0)
+        if latest - es["last_imp"] >= cfg.early_stop_patience * cfg.live_comm_every and latest >= cfg.early_stop_min_steps:
+            es["stopped"] = True
+            es["reason"] = (f"no clear improvement on the {cfg.early_stop_on} subset since step {es['last_imp']} "
+                            f"(checked to step {latest})")
+            return True
+        return False
     if cfg.live_every:
         from live import LiveLog
         live = LiveLog(cfg.out, cfg, cfg.live_every, cfg.live_render_every if cfg.mode in ("db", "power", "multi") else 0)
@@ -1388,20 +1452,42 @@ def main():
             else:
                 print("live communication metrics off: the subset's views are not this run's held-out views")
 
-        if comm is not None:
+        comm_tr = None
+        if cfg.early_stop_on == "train" and groups is not None and "float" in train:
+            import live_comm as LC
+            from mvdr_peaks import pixel_dirs
+            pick = sorted(set(np.linspace(0, len(groups) - 1, min(30, len(groups))).round().astype(int).tolist()))
+            tg = [groups[k] for k in pick]
+            comm_tr = {"groups": tg, "maps": None, "dirs": pixel_dirs(cfg.source),
+                       "truth": [train["float"][i].float().cpu().numpy() for g in tg for i in g]}
+            print(f"early stopping on {sum(len(g) for g in tg)} training views ({len(tg)} positions)")
+        if cfg.early_stop_on == "val" and comm is None:
+            raise SystemExit("--early-stop-on val needs the validation subset (--live-comm-maps, --eval-set val)")
+        if cfg.early_stop_on == "train" and comm_tr is None:
+            raise SystemExit("--early-stop-on train needs --faces-per-step > 1 and float targets")
+        if comm is not None or comm_tr is not None:
             from concurrent.futures import ThreadPoolExecutor
-            comm["pool"] = ThreadPoolExecutor(max_workers=1)
+            pool = ThreadPoolExecutor(max_workers=1)
+            for cs in (comm, comm_tr):
+                if cs is not None:
+                    cs["pool"], cs["history"] = pool, []
 
         def comm_eval(it):
             # the training loop waits only for the renders (one position -- four faces, one colour evaluation -- per
             # call) and one copy back; the numpy metrics run on a worker thread while training continues
-            pn = torch.cat([model.render_batch(test["viewmats"][g], test["Ks"][g], test["width"], test["height"],
-                                               span)[:, 0].float() for g in comm["groups"]]).cpu().numpy()
+            for cs, d, name in ((comm, test, "val"), (comm_tr, train, "train")):
+                if cs is None:
+                    continue
+                pn = torch.cat([model.render_batch(d["viewmats"][g], d["Ks"][g], d["width"], d["height"],
+                                                   span)[:, 0].float() for g in cs["groups"]]).cpu().numpy()
 
-            def work(pn=pn, it=it):
-                rows = [LC.view_metrics(pn[j], comm["truth"][j], comm["maps"][j], comm["dirs"]) for j in range(len(pn))]
-                live.comm(it, LC.summarise(rows))
-            comm["pool"].submit(work)
+                def work(pn=pn, it=it, cs=cs, name=name):
+                    rows = [LC.view_metrics(pn[j], cs["truth"][j], None if cs["maps"] is None else cs["maps"][j],
+                                            cs["dirs"]) for j in range(len(pn))]
+                    sm = LC.summarise(rows)
+                    cs["history"].append((it, sm))
+                    live.comm(it, sm, name)
+                cs["pool"].submit(work)
 
         def live_rows():
             def norm(d, g):
@@ -1447,17 +1533,22 @@ def main():
         if strategy is not None:
             strategy.step_post_backward(model.params, optimizers, state, it, model.last_info,
                                         lr=lrs["means"])
+        stop_now = False
         if live is not None:
             live.step(it, loss)
-            if live.want_render(it, it == cfg.iterations):
-                with torch.no_grad():
-                    live.render(it, live_rows())
-            if comm is not None and (it % cfg.live_comm_every == 0 or it == cfg.iterations):
+            if (comm is not None or comm_tr is not None) and (it % cfg.live_comm_every == 0 or it == cfg.iterations):
                 torch.cuda.synchronize(); t_c = time.time()
                 with torch.no_grad():
                     comm_eval(it)
                 torch.cuda.synchronize(); running_eval_seconds += time.time() - t_c   # not training time
-        if it % cfg.eval_every == 0 or it == cfg.iterations:
+                if cfg.early_stop_on != "none" and early_stop_check(it):
+                    stop_now = True
+                    print(f"  early stop at step {it}: {es['reason']}")
+                    live.status.update(stopped_early=True, stop_it=it, stop_reason=es["reason"])
+            if live.want_render(it, it == cfg.iterations or stop_now):
+                with torch.no_grad():
+                    live.render(it, live_rows())
+        if it % cfg.eval_every == 0 or it == cfg.iterations or stop_now:
             torch.cuda.synchronize(); t_ev = time.time()
             m = (evaluate_multi(model, test, eval_idx, ch_ranges, channel_names, mask_channel=cfg.mask_channel,
                                 group=cfg.eval_group)
@@ -1474,6 +1565,9 @@ def main():
                   f"PSNR(jet) {m['psnr_rgb']:5.2f}  SSIM {m['ssim_rgb']:.3f}  "
                   f"RMSE {m['rmse_db']:5.2f} dB  (subset {len(eval_idx)}"
                   + (f", {m['gaussians']:,} Gaussians" if strategy is not None else "") + ")")
+        if stop_now:
+            break
+    it_run = min(it, cfg.lm_after) if cfg.lm_after else it
     lm_history = None
     if cfg.lm_after:
         from lm_optim import LM
@@ -1535,33 +1629,37 @@ def main():
     result = {"config": vars(cfg), "db_range": [vmin, vmax], "n_train": n_train,
               "channels": channel_names, "channel_ranges": meta.get("channel_ranges"),
               "n_test": len(test_names), "gaussians": model.n_gaussians,
-              "train_seconds": train_seconds, "iters_per_second": cfg.iterations / train_seconds,
+              "train_seconds": train_seconds, "iters_per_second": it_run / train_seconds,
+              "iterations_run": it_run, "stopped_early": es["stopped"], "stop_reason": es["reason"],
+              "visits_per_view": it_run * views_per_step / n_train, "clipped_share_train": clip_share,
               "cuda_peak_reserved_mib": peak_reserved, "cuda_card_mib": card_mib,
               "running_eval_seconds": running_eval_seconds,
               "train_seconds_excl_running_eval": train_seconds - running_eval_seconds,
-              "views_seen": cfg.iterations * cfg.faces_per_step,
+              "views_seen": it_run * cfg.faces_per_step,
               "optimised_gaussian_params": n_params, "adam_state_mib": 2 * 4 * n_params / 2**20,
               "head_params": sum(p.numel() for p in model.head.parameters()) if model.head is not None else 0,
               "strip_check": strip_check,
               "load_seconds": t_train - t_start, "eval_seconds": eval_seconds,
               "gpu": torch.cuda.get_device_name(0),
               "total_seconds": time.time() - t_start, "history": history, "final": final,
-              "adam_steps": cfg.lm_after or cfg.iterations, "lm_history": lm_history,
+              "adam_steps": cfg.lm_after or it_run, "lm_history": lm_history,
               "gsplat_bwd_switches": {k: os.environ.get(k) for k in ("GSPLAT_BWD_NO_GEOM", "GSPLAT_BWD_PERGAUSS")}}
     with open(os.path.join(cfg.out, "results.json"), "w") as fid:
         json.dump(result, fid, indent=1)
     if live is not None:
-        if comm is not None:
-            comm["pool"].shutdown(wait=True)            # the last evaluation's metrics, before the run is marked done
+        for cs in (comm, comm_tr):
+            if cs is not None:
+                cs["pool"].shutdown(wait=True)          # the last evaluation's metrics, before the run is marked done
         live.close(os.path.join(cfg.out, "results.json"))
     if final is None:
-        print(f"\nno final evaluation (--no-eval); {cfg.iterations} iterations in {train_seconds:.0f} s "
-              f"({cfg.iterations/train_seconds:.0f} it/s); {model.n_gaussians:,} Gaussians; wrote {cfg.out}")
+        print(f"\nno final evaluation (--no-eval); {it_run} iterations in {train_seconds:.0f} s "
+              f"({it_run/train_seconds:.0f} it/s); {model.n_gaussians:,} Gaussians; wrote {cfg.out}")
         return
     print(f"\nfinal on {len(test_names)} test views: PSNR(jet) {final['psnr_rgb']:.2f} dB, "
           f"SSIM {final['ssim_rgb']:.3f}, RMSE {final['rmse_db']:.2f} dB, MAE {final['mae_db']:.2f} dB; "
-          f"{cfg.iterations} iterations in {train_seconds:.0f} s "
-          f"({cfg.iterations/train_seconds:.0f} it/s); {model.n_gaussians:,} Gaussians; wrote {cfg.out}")
+          f"{it_run} iterations in {train_seconds:.0f} s "
+          f"({it_run/train_seconds:.0f} it/s); {model.n_gaussians:,} Gaussians; wrote {cfg.out}"
+          + (f" (stopped early: {es['reason']})" if es["stopped"] else ""))
 
 
 if __name__ == "__main__":

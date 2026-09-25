@@ -99,10 +99,11 @@ class LiveLog:
         keep = {k: float(v) for k, v in metrics.items() if isinstance(v, (int, float)) and np.isfinite(v)}
         self._append({"it": it, "t": round(time.time() - self.t0, 2), "eval": keep})
 
-    def comm(self, it, summary):
-        """The communication metrics of the fixed validation subset (live_comm.py) at this step."""
+    def comm(self, it, summary, set_name="val"):
+        """The communication metrics (live_comm.py) of a fixed subset at this step: "val" = the validation subset
+        of beam_maps.py, "train" = the fixed training positions --early-stop-on train watches."""
         if self.every and summary is not None:
-            self._append({"it": it, "t": round(time.time() - self.t0, 2), "comm": summary})
+            self._append({"it": it, "t": round(time.time() - self.t0, 2), "comm": summary, "set": set_name})
 
     def want_render(self, it, last):
         return bool(self.every and self.render_every) and (it % self.render_every == 0 or last)

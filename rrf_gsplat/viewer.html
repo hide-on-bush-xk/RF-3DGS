@@ -1239,7 +1239,7 @@ function multiChart(cv, xs, series, opt) {
     g.stroke();
   }
 }
-function commChart(cv, xs, ys, refs, opt) {
+function commChart(cv, xs, ys, refs, opt, xs2, ys2) {
   // one metric over training steps, with the references as dashed horizontal lines
   const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
@@ -1247,12 +1247,13 @@ function commChart(cv, xs, ys, refs, opt) {
   const L = 46, R = 70, T = 20, B = 18;
   g.font = "11px 'IBM Plex Mono', ui-monospace, monospace"; g.fillStyle = cssv("--muted");
   g.fillText(opt.title, L, 12);
-  const vals = ys.filter(v => v != null).concat(refs.map(r => r.y).filter(v => v != null));
+  const vals = ys.filter(v => v != null).concat(refs.map(r => r.y).filter(v => v != null),
+                                                 (ys2 || []).filter(v => v != null));
   if (!vals.length) { g.fillText("no evaluation yet", L, T + 20); return; }
   let y0 = Math.min(opt.ymin ?? Infinity, ...vals), y1 = Math.max(...vals);
   if (y1 - y0 < 1e-9) { y1 = y0 + 1; }
   const pad = (y1 - y0) * 0.08; y1 += pad; if (opt.ymin == null) y0 -= pad;
-  const x0 = 0, x1 = Math.max(opt.xmax || 1, ...xs);
+  const x0 = 0, x1 = Math.max(opt.xmax || 1, ...xs, ...(xs2 || []));
   const px = x => L + (x - x0) / (x1 - x0) * (W - L - R), py = v => T + (1 - (v - y0) / (y1 - y0)) * (H - T - B);
   g.strokeStyle = cssv("--line"); g.lineWidth = 1;
   for (let k = 0; k <= 3; k++) {
@@ -1268,6 +1269,11 @@ function commChart(cv, xs, ys, refs, opt) {
     g.beginPath(); g.moveTo(L, py(r.y)); g.lineTo(W - R, py(r.y)); g.stroke(); g.setLineDash([]);
     g.fillStyle = cssv(rc[i % rc.length]); g.fillText(r.label, W - R + 4, py(r.y) + 4);
   });
+  if (ys2 && ys2.some(v => v != null)) {           // training views: thinner, its own colour
+    g.strokeStyle = cssv("--s4"); g.lineWidth = 1.2; g.beginPath(); let on2 = false;
+    xs2.forEach((x, i) => { if (ys2[i] == null) return; const X = px(x), Y = py(ys2[i]); on2 ? g.lineTo(X, Y) : g.moveTo(X, Y); on2 = true; });
+    g.stroke(); g.fillStyle = cssv("--s4"); g.fillText("training views", W - R + 4, T + 8);
+  }
   g.strokeStyle = cssv("--s1"); g.fillStyle = cssv("--s1"); g.lineWidth = 1.8; g.beginPath();
   let on = false;
   xs.forEach((x, i) => { if (ys[i] == null) return; const X = px(x), Y = py(ys[i]); on ? g.lineTo(X, Y) : g.moveTo(X, Y); on = true; });
@@ -1275,24 +1281,33 @@ function commChart(cv, xs, ys, refs, opt) {
   xs.forEach((x, i) => { if (ys[i] == null) return; g.beginPath(); g.arc(px(x), py(ys[i]), 2.5, 0, 7); g.fill(); });
 }
 function drawComm(d, n) {
-  const c = d.comm || [], refsAll = d.comm_refs || {};
-  $("#liveComm").style.display = (c.length || Object.keys(refsAll).length) ? "" : "none";
-  if (!c.length && !Object.keys(refsAll).length) return;
+  const all = d.comm || [], refsAll = d.comm_refs || {};
+  const c = all.filter(p => (p.set || "val") === "val"), ct = all.filter(p => p.set === "train");
+  $("#liveComm").style.display = (all.length || Object.keys(refsAll).length) ? "" : "none";
+  if (!all.length && !Object.keys(refsAll).length) return;
+  const xt = ct.map(p => p.it);
   const xs = c.map(p => p.it), last = c[c.length - 1];
-  $("#commInfo").textContent = last ? `${last.comm.views} views, last at step ${last.it}` : "waiting for the first evaluation";
+  const lastAny = all[all.length - 1];
+  $("#commInfo").textContent = lastAny ? `${c.length ? c[c.length - 1].comm.views + " validation views" : ""}` +
+    `${ct.length ? (c.length ? ", " : "") + ct[ct.length - 1].comm.views + " training views" : ""}, last at step ${lastAny.it}` +
+    (d.status && d.status.stopped_early ? ` - stopped early at ${d.status.stop_it}` : "")
+    : "waiting for the first evaluation";
   const labels = Object.keys(refsAll).filter(k => k !== "truth itself");
   const ref = (key, f = v => v) => labels.map(k => ({ label: k, y: refsAll[k] && refsAll[k][key] != null ? f(refsAll[k][key]) : null }));
   const pc = v => v == null ? null : 100 * v;
   commChart($("#commAngle"), xs, c.map(p => p.comm.angle_median), ref("angle_median"),
-            { title: "main-peak direction error, median (deg) - lower is better", ymin: 0, xmax: n });
+            { title: "main-peak direction error, median (deg) - lower is better", ymin: 0, xmax: n },
+            xt, ct.map(p => p.comm.angle_median));
   const tb = refsAll["truth itself"];
   commChart($("#commBeam"), xs, c.map(p => p.comm.beam_loss_median),
             ref("beam_loss_median").concat(tb ? [{ label: "truth", y: tb.beam_loss_median }] : []),
             { title: "beam-gain loss on the true channel, median (dB) - lower is better", ymin: 0, xmax: n });
   commChart($("#commWithin"), xs, c.map(p => pc(p.comm.distinct_within_1deg)), ref("distinct_within_1deg", pc),
-            { title: "main peak within 1 deg, distinct views (%) - higher is better", ymin: 0, xmax: n });
+            { title: "main peak within 1 deg, distinct views (%) - higher is better", ymin: 0, xmax: n },
+            xt, ct.map(p => pc(p.comm.distinct_within_1deg)));
   commChart($("#commTop3"), xs, c.map(p => pc(p.comm.top3_detected)), ref("top3_detected", pc),
-            { title: "top-3 true peaks detected within 1.5 deg (%) - higher is better", ymin: 0, xmax: n });
+            { title: "top-3 true peaks detected within 1.5 deg (%) - higher is better", ymin: 0, xmax: n },
+            xt, ct.map(p => pc(p.comm.top3_detected)));
 }
 async function sysTick() {
   let pts;
@@ -1358,6 +1373,7 @@ async function liveTick() {
   $("#liveHead").innerHTML = (d.desc ? `<div class="desc">${d.desc}</div>` : "") +
     `<b>${d.rel}</b> &nbsp; ${state} &nbsp; ${it} / ${n} &nbsp; ` +
     `${speed ? speed.toFixed(0) + " it/s" : ""} &nbsp; elapsed ${fmtDur(last && last.t)} &nbsp; ` +
+    `${st.stopped_early ? '<span style="color:var(--s2)">stopped early at ' + st.stop_it + "</span> &nbsp; " : ""}` +
     `${eta != null ? "ETA " + fmtDur(eta) : ""}<br><span style="color:var(--muted)">${st.mode || ""} ` +
     `${tail(st.source || "")}  seed ${st.seed ?? ""}  ${extras}</span>`;
   $("#liveBar").style.width = Math.min(100, 100 * it / n) + "%";

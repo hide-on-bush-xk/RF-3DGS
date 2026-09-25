@@ -22,7 +22,8 @@ from mvdr_peaks import angle, local_maxima, top_peaks
 
 
 def view_metrics(pred, truth_db, beam_db, dirs):
-    """One view -> dict, or None for an all-floor truth (no paths: nothing to steer at)."""
+    """One view -> dict, or None for an all-floor truth (no paths: nothing to steer at). beam_db may be None (a
+    training view has no tap covariance): the beam-gain loss is then left out."""
     t = np.asarray(truth_db, dtype=np.float64)
     if t.max() < -250 or t.max() - t.min() < 1e-3:
         return None
@@ -32,10 +33,12 @@ def view_metrics(pred, truth_db, beam_db, dirs):
     kept = top_peaks(t, dirs, 3)
     pm = np.flatnonzero(local_maxima(p))
     det = [bool(len(pm)) and float(np.degrees(np.arccos(np.clip(flat[pm] @ flat[c], -1, 1))).min()) <= 1.5 for c in kept]
-    b = np.asarray(beam_db, dtype=np.float64)
-    return {"angle": angle(dirs, kt, kp), "distinct": len(kept) < 2 or t.flat[kept[0]] - t.flat[kept[1]] >= 1.0,
-            "beam_loss": float(b.max() - b.flat[kp]), "beam_loss_truth_peak": float(b.max() - b.flat[kt]),
-            "top3": det}
+    out = {"angle": angle(dirs, kt, kp), "distinct": len(kept) < 2 or t.flat[kept[0]] - t.flat[kept[1]] >= 1.0,
+           "beam_loss": None, "beam_loss_truth_peak": None, "top3": det}
+    if beam_db is not None:
+        b = np.asarray(beam_db, dtype=np.float64)
+        out["beam_loss"], out["beam_loss_truth_peak"] = float(b.max() - b.flat[kp]), float(b.max() - b.flat[kt])
+    return out
 
 
 def summarise(rows):
@@ -43,10 +46,13 @@ def summarise(rows):
     if not rows:
         return None
     a = np.array([r["angle"] for r in rows]); d = np.array([r["distinct"] for r in rows], dtype=bool)
-    bl = np.array([r["beam_loss"] for r in rows]); t3 = [x for r in rows for x in r["top3"]]
+    t3 = [x for r in rows for x in r["top3"]]
+    has_beam = all(r["beam_loss"] is not None for r in rows)
+    bl = np.array([r["beam_loss"] for r in rows]) if has_beam else None
     return {"views": len(rows), "angle_median": float(np.median(a)), "within_1deg": float((a <= 1).mean()),
             "distinct_views": int(d.sum()),
             "distinct_within_1deg": float((a[d] <= 1).mean()) if d.any() else None,
-            "beam_loss_median": float(np.median(bl)), "beam_loss_p90": float(np.percentile(bl, 90)),
-            "beam_loss_truth_peak_median": float(np.median([r["beam_loss_truth_peak"] for r in rows])),
+            "beam_loss_median": float(np.median(bl)) if has_beam else None,
+            "beam_loss_p90": float(np.percentile(bl, 90)) if has_beam else None,
+            "beam_loss_truth_peak_median": float(np.median([r["beam_loss_truth_peak"] for r in rows])) if has_beam else None,
             "top3_detected": float(np.mean(t3)) if t3 else None}
