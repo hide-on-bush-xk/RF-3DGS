@@ -319,7 +319,9 @@ dB 目标在 CBF 上同样有效(RMSE −7%,PSNR +0.27),幅度比 MVDR 小;CBF �
 > 图像的两个轴就是方位角和仰角(`means2d` = (方位, 仰角) × 1024),行、列的角度可以任意单调给定,水平视场可以是完整的 360°。
 > 走 3DGUT 路径(`with_ut=True, with_eval3d=True, packed=False`),需要 `has_3dgut()`(我们的构建为 True)和 scipy(已装进 rf-gsplat-win)。
 > **必须显式传 `tile_size=16`**:gsplat 按图像尺寸给 eval3d 选 tile 8(< 1080 px),而 `compute_tiling()` 每个激光雷达 tile 装最多
-> 16 × 16 条射线,tile 8 时每个 tile 只光栅化 64 条,其余输出不初始化(NaN、1e36、每次调用都不同)。冒烟与结果见下面
+> 16 × 16 条射线,tile 8 时每个 tile 只光栅化 64 条,其余输出不初始化(NaN、1e36、每次调用都不同;全新进程里未写的像素恰好是 0,
+> 会被误认为空)。等价的另一种修法是 `compute_tiling(..., max_pts_per_tile=64)`(上游测试用的就是这个)。还必须传
+> `global_z_order=False`,否则按相机 z 裁剪,传感器水平面以下全部丢掉。冒烟与结果见下面
 > "lidar 全景冒烟"一节。原文保留如下。
 
 `gsplat.rasterization(camera_model=...)` 支持 `pinhole | ortho | fisheye | ftheta`(**漏了 `lidar`**,见上面的更正),**没有 equirect**。实测(rrf_gsplat 里的
@@ -1736,6 +1738,35 @@ euclid 对 μ_z / d_z 中位 0.000 mm。两种约定在同一个高斯上的差:
 - **默认不改,仍是 ED + euclid。** 要定案需要全量:10k 步、3 个 seed,euclid / hit / hit + 同一 eval3d pass 三组,等 Ke 批准 GPU 时间。
 - 计时作废:euclid 那次 GPU 被另一个项目占着(URA_w_sionna,利用率 100%,4.7 it/s);hit 那次开始时那个项目已退出(16.8 it/s),
   两次条件不同,不比较速度。S-B 里的每批毫秒数同样作废。
+
+#### 3f 复核(Ke 转来的代码审查,2026-09-24)与处理
+
+- **A1(设计缺陷,确认)**:hit 下时延 = Σ w_i^classic τ_res,i + Σ w_i^eval3d d_i / c,两项用两套合成算子(eval3d 的 alpha 由射线在白化空间的最近接近点算,
+  遮挡顺序与早停集合都不同;默认 D 模式下两项都不归一化,总权重也对不上)。残差会把失配吸收成视角相关的偏置,最容易在留出视角上崩。
+  euclid 没有这个问题(深度与颜色出自同一次光栅化)。S-A / S-B 测不到它,S-C 看到的是混合效应——这正是 §3f 里"候选机理"那一条。
+  修法:`render_mode="RGB-Ed"`(或 "RGB-d"),颜色与命中距离在**同一次** eval3d pass 里出(已核:kernel 在最后一个通道写 hit distance,颜色通道保留),
+  `_hit_distance` 可删。代价:颜色路径整体换成 eval3d,锚点(15.97)会动;是一个干净的单变量实验(lidar 冒烟里 B − A 的对照已有)。
+  另记:eval3d 下没有 absgrad(`rendering.py:652`),以后 MCMC 若换 absgrad 判据会撞上;训练路径现在不用 absgrad。**未改,等 Ke 定**。
+- **B1(S-B 掩膜,确认并修复重跑)**:第一次 S-B 只用经典 pass 的 alpha 做掩膜,而 "Ed" 是 eval3d 深度除以 eval3d 自己的 alpha(clamp 1e-10),
+  经典不透明而 eval3d 透明的像素上 hit 读成 0 仍进了统计。改为两边都不透明的像素,并报两套 alpha 的覆盖分歧。重跑(结论不变):
+  经典不透明 3835 万像素中只有 **0.16 %** 在 eval3d 里不透明度 ≤ 0.5(反向 0.00 %);干净掩膜下 euclid 0.141 m / RMSE 0.669 m / −0.252 m,
+  hit **0.084 m / 0.499 m / +0.006 m**,假设仍成立;第一次的数(0.142 / 0.682 / −0.256;0.085 / 0.510 / +0.003)几乎不变。hit − euclid 最大 51 ns
+  与掩膜无关(射线擦过扁平高斯)。按审查的建议,假设在干净掩膜下成立 → A1 值得做。
+- **A2(静默失败,已修)**:`--delay-range hit` 启动时检查 `gsplat.has_3dgut()`,两个冒烟脚本同样检查,不满足给一句人话退出。
+- **B3(计时表述,已改)**:S-B 里的两个数是**只渲深度**的 pass,不是训练成本:euclid 的深度搭颜色 pass 的顺风车(5 通道 + 1 深度 = 6,无额外 pass),
+  hit 是整整多一次光栅化。按契约该报的是训练单步的差、两个分辨率——**MISSING**,等 A1 定了再测(单 pass 后它变成"经典换 eval3d 的差价")。
+- **A3(记录)**:hit + `--train-geometry`(如 `--mcmc`)时,几何也收 eval3d pass 的梯度(backward 实现了命中距离的 VJP),而致密化判据只看颜色 pass 的
+  `last_info`,看不见这部分。已写进 `_hit_distance` 的 docstring。
+- **A4(已改)**:t* 是白化空间里的最近接近点,只在**扁平极限**下才是射线与高斯平面的交点;两处 docstring 已改。
+- **B2(记录)**:S-A 的 euclid 对照接近恒等式(单个高斯 ED·sec = μ_z·sec = μ_z / d_z),它验的是 sec 没写反,不是 euclid 约定对;不当作 euclid 的通过证据。
+- **B4(已修)**:两个冒烟里判断"GPU 上是否有别的进程"改为按 PID 字段精确比较(原来是子串匹配)。
+- **C2(已修)**:lidar 冒烟的每次渲染断言输出有限且 alpha ≤ 1,换 gsplat 版本后那个 tile bug 若回来会当场失败,而不是在下游变成别的症状。
+- **lidar tile bug 的复核**:单个小高斯在全新进程里**复现不出来**(未写的像素恰好是新分配的零,高斯又落在被写的那四分之一里)。
+  用 3000 个随机高斯的场景复核:pandar128 几何,默认 tile 下平均 alpha 0.228,tile 16 下 0.907(约四分之一的射线被写);0.1° 网格上默认 tile 出现 ±π 的值,
+  同一调用两次相差 3.14。根因成立。上游知道这个约束:`tests/test_cameras.py` 构造 tiling 时特意用 `max_pts_per_tile=8*8`,注释说 tile 8 的 kernel 每 tile 最多 64 条;
+  但 `compute_tiling()` 默认 256,官方示例 `examples/av_trainer.py` 用的就是默认,也没有任何检查——示例本身就会渲染出错。上游 main 自 28e794ca 起只有 2 个新提交,未触及。
+  另一个坑:`global_z_order` 默认 True 时 lidar 按相机 z 裁剪,lidar 坐标里 z 朝上,**传感器水平面以下全部被裁掉**;必须传 False(示例传了)。
+  最小复现已备好(未提 issue,等 Ke 决定)。
 
 ### 7. 解码指标的 seed 噪声底(round 20;大堂 MULTI cs,D 版范围项,同数据同划分只换 seed;640 张留出图;各 4 个 seed)
 

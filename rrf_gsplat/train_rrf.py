@@ -578,9 +578,16 @@ class RRF(torch.nn.Module):
 
         "euclid" multiplies the composited camera z of the Gaussian centres by sec(theta_pixel): the distance along the
         pixel's ray to the plane through the centre parallel to the image. That equals the hit distance on the ray
-        through the centre only. Off it, the hit distance follows the Gaussian's own shape: for a flat Gaussian it
-        is the intersection of the ray with the Gaussian's plane, the path length a surface actually has. Its own
-        pass, on the eval3d rasteriser (the colour pass stays the classic one), costs one extra rasterisation."""
+        through the centre only. Off it, the hit distance follows the Gaussian's own shape (the ray's closest
+        approach in the Gaussian's whitened space): in the flat limit it is the intersection of the ray with the
+        Gaussian's plane, the path length a surface actually has. Its own pass, on the eval3d rasteriser (the colour
+        pass stays the classic one), costs one extra rasterisation.
+
+        Known limitation (review, 2026-09-24): the learned residual is composited with the classic pass's weights
+        and this term with the eval3d pass's, two different operators (and "Ed" divides by the eval3d alpha, so a
+        pixel opaque in the classic pass but not here gets a range term near 0). A single eval3d pass for both
+        ("RGB-Ed") removes the mismatch but moves the colour path. With --train-geometry (e.g. --mcmc) the geometry
+        also receives this pass's gradient, which the densification's criteria (from the colour pass) do not see."""
         from gsplat import rasterization
         img, _, _ = rasterization(
             self.means, self.quats, self.scales, self.opacities, self.means.new_zeros(self.means.shape[0], 1),
@@ -1315,6 +1322,10 @@ def main():
         model.delay_span_ns = float(ch_ranges[model.delay_channel, 1] - ch_ranges[model.delay_channel, 0])
         model.delay_depth_mode = cfg.delay_depth_mode
         model.delay_range = cfg.delay_range
+        if cfg.delay_range == "hit":
+            import gsplat
+            if not gsplat.has_3dgut():
+                raise SystemExit("--delay-range hit needs gsplat built with 3DGUT (eval3d); gsplat.has_3dgut() is False")
         print(f"delay channel {model.delay_channel}: rendered depth / c added, span {model.delay_span_ns:.1f} ns")
 
     def target(i):

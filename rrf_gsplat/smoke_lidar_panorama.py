@@ -148,6 +148,8 @@ def render_all(model, rig, col, span, ext, el_rows, time_it=False):
     out = {}
     for k, f in (("A", fa), ("B", fb), ("C", fc)):
         img, alpha, _ = f()
+        # the lidar tile bug (see LIDAR_TILE) shows as NaN / 1e36 in uninitialised pixels: fail here, not downstream
+        assert torch.isfinite(img).all() and torch.isfinite(alpha).all() and float(alpha.max()) <= 1.0 + 1e-4, f"render {k} not finite / alpha > 1"
         out[k] = (10.0 * torch.log10(img[..., 0] + 1e-12), alpha[..., 0])
     return out
 
@@ -168,11 +170,15 @@ def main():
     ap.add_argument("--out", default="output/rrf/smoke_lidar_panorama.json")
     a = ap.parse_args()
     dev = "cuda"
+    import gsplat
+    if not gsplat.has_3dgut():
+        raise SystemExit("this smoke needs gsplat built with 3DGUT (with_ut / with_eval3d); gsplat.has_3dgut() is False")
     gpu = subprocess.run(["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used", "--format=csv,noheader"],
                          capture_output=True, text=True).stdout.strip()
     apps = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,process_name", "--format=csv,noheader"],
                           capture_output=True, text=True).stdout.strip().splitlines()
-    others = [l for l in apps if "python" in l.lower() and str(os.getpid()) not in l]
+    # the PID field compared exactly (a substring test would match 123 inside 1234)
+    others = [l for l in apps if "python" in l.lower() and l.split(",")[0].strip() != str(os.getpid())]
     print(f"GPU: {gpu}; other python processes on it: {others or 'none'}")
     torch.manual_seed(0)
     model, cfg, span = load_model(a.run, dev)

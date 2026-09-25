@@ -4,8 +4,9 @@ The delay decomposition adds a range term |p - mu| / c to a learned residual. "e
 round 19) takes gsplat's composited camera z of the Gaussian centres (render mode "ED") times sec(theta_pixel): the
 distance along the pixel's ray to the plane through the centre parallel to the image. gsplat's eval3d rasteriser
 reports the hit distance itself ("Ed"): the distance along the pixel's own ray to the point of the Gaussian's
-maximum response, t* = d' S^-1 mu / d' S^-1 d. The two agree on the ray through the centre only; for a flat
-Gaussian t* is the ray's intersection with the Gaussian's plane.
+maximum response (the ray's closest approach to the centre in the Gaussian's whitened space), t* = d' S^-1 mu /
+d' S^-1 d. The two agree on the ray through the centre only; in the flat limit t* is the ray's intersection with
+the Gaussian's plane.
 
 S-A  analytic control, one camera and one Gaussian at a time (isotropic, and flat tilted 60 deg):
        native "Ed" against t* per pixel, and "ED" x sec(theta) against mu_z / d_z per pixel.
@@ -13,6 +14,16 @@ S-B  the lobby's visual checkpoint at the 640 held-out views of 3dgs_MULTI_24ghz
      (depth_gs.py / depth_gt.py caches: the mesh's camera z per pixel, cast through Mitsuba). Pixels: mesh hit and
      alpha > 0.5, as depth_gt.py. Three range terms: z (ED, the first runs), euclid (ED x sec), hit (native Ed).
 S-C  (rounds/win_hit_smoke.sh) a short delay-channel training, euclid vs hit, same seed.
+
+Rerun 2026-09-24 after review (B1): the first S-B masked with the classic pass's alpha only, but "Ed" is the eval3d
+pass's depth divided by the eval3d pass's own alpha (clamped at 1e-10), so where eval3d is transparent and classic
+is not, hit read 0 and entered the statistics. The comparison now uses pixels opaque in both passes; the old mask
+is kept beside it for the record; how often the two passes disagree about opacity is reported (the direct measure
+of the two operators differing), expected < 5 % of the classic-opaque pixels, reported, not a gate. The criteria
+below are unchanged. The euclid control in S-A is close to an identity (mu_z sec against mu_z / d_z): it checks that
+sec is built the right way round, not that the euclid convention is right. The timings are depth-only passes, not
+the training cost: euclid's depth rides on the colour pass (no extra pass), hit adds one pass; the training-step
+difference at two resolutions is MISSING until the single-pass variant (review A1) is decided.
 
 Pass criteria, written before the first run (out of range = reported, never adjusted):
   S-A  native vs t*: median |e| <= 1 mm and P99 <= 5 mm, both Gaussians; euclid vs mu_z / d_z: median <= 1 mm
@@ -109,7 +120,9 @@ def s_b(dev, ckpt, out_dir):
     col = torch.zeros(model.means.shape[0], 1, device=dev)
     n, h, w = gs["depth"].shape
     acc = {k: [] for k in ("z", "euclid", "hit", "div", "gap", "rerender")}
+    old = {k: [] for k in ("euclid", "hit")}                     # the first run's mask (classic alpha only)
     low = {k: [] for k in ("euclid", "hit")}
+    cov = {"classic_opaque": 0, "eval3d_opaque": 0, "classic_only": 0, "eval3d_only": 0}
     t_cl, t_hit = [], []
     with torch.no_grad():
         for s0 in range(0, n, 4):
@@ -119,28 +132,37 @@ def s_b(dev, ckpt, out_dir):
             torch.cuda.synchronize(); t0 = time.perf_counter()
             ed, _, _ = rasterization(model.means, model.quats, model.scales, model.opacities, col, vm, Ks, w, h, sh_degree=None, render_mode="ED")
             torch.cuda.synchronize(); t1 = time.perf_counter()
-            hit, _, _ = rasterization(model.means, model.quats, model.scales, model.opacities, col, vm, Ks, w, h, sh_degree=None, render_mode="Ed",
-                                      with_ut=True, with_eval3d=True, packed=False)
+            hit, a3d, _ = rasterization(model.means, model.quats, model.scales, model.opacities, col, vm, Ks, w, h, sh_degree=None, render_mode="Ed",
+                                        with_ut=True, with_eval3d=True, packed=False)
             torch.cuda.synchronize(); t2 = time.perf_counter()
             if s0 >= 12:                                   # the first three batches are warm-up
                 t_cl.append(t1 - t0); t_hit.append(t2 - t1)
             ed = ed[..., 0].cpu().numpy().astype(np.float64); hit = hit[..., 0].cpu().numpy().astype(np.float64)
+            a3d = a3d[..., 0].cpu().numpy()
             for j, i in enumerate(idx):
                 K = gs["K"][i]
                 uu, vv = np.meshgrid((np.arange(w) + 0.5 - K[0, 2]) / K[0, 0], (np.arange(h) + 0.5 - K[1, 2]) / K[1, 1])
                 sec = np.sqrt(1 + uu ** 2 + vv ** 2)
                 z_gt = gt["z_gt"][i].astype(np.float64); al = gs["alpha"][i]
                 hitm = np.isfinite(z_gt)
-                m = hitm & (al > 0.5); ml = hitm & (al > 0.1) & (al <= 0.5)
+                mc = hitm & (al > 0.5)                     # classic opaque: depth_gt.py's mask, for the control
+                m = mc & (a3d[j] > 0.5)                    # opaque in both passes: every range term is defined
+                ml = hitm & (al > 0.1) & (al <= 0.5) & (a3d[j] > 0.1) & (a3d[j] <= 0.5)
+                cov["classic_opaque"] += int(mc.sum()); cov["eval3d_opaque"] += int((hitm & (a3d[j] > 0.5)).sum())
+                cov["classic_only"] += int((mc & (a3d[j] <= 0.5)).sum()); cov["eval3d_only"] += int((hitm & (al <= 0.5) & (a3d[j] > 0.5)).sum())
                 r_mesh = z_gt * sec
                 acc["z"].append(ed[j][m] - r_mesh[m]); acc["euclid"].append(ed[j][m] * sec[m] - r_mesh[m]); acc["hit"].append(hit[j][m] - r_mesh[m])
                 acc["div"].append((hit[j][m] - ed[j][m] * sec[m]) / C)
-                acc["gap"].append((r_mesh[m] - z_gt[m]) / C)
-                acc["rerender"].append(ed[j][m] - gs["depth"][i][m])
+                acc["gap"].append((r_mesh[mc] - z_gt[mc]) / C)
+                acc["rerender"].append(ed[j][mc] - gs["depth"][i][mc])
+                old["euclid"].append(ed[j][mc] * sec[mc] - r_mesh[mc]); old["hit"].append(hit[j][mc] - r_mesh[mc])
                 low["euclid"].append(ed[j][ml] * sec[ml] - r_mesh[ml]); low["hit"].append(hit[j][ml] - r_mesh[ml])
     cat = {k: np.concatenate(v) for k, v in acc.items()}
-    res = {"views": n, "pixels": int(cat["z"].size),
+    res = {"views": n, "pixels": int(cat["z"].size), "mask": "mesh hit, alpha > 0.5 in the classic AND the eval3d pass",
            "vs_mesh_range": {k: stats(cat[k]) for k in ("z", "euclid", "hit")},
+           "first_run_mask_vs_mesh_range": {k: stats(np.concatenate(v)) for k, v in old.items()},
+           "opacity_coverage": cov | {"classic_only_share": cov["classic_only"] / max(cov["classic_opaque"], 1),
+                                      "eval3d_only_share": cov["eval3d_only"] / max(cov["classic_opaque"], 1)},
            "low_alpha_vs_mesh_range": {k: stats(np.concatenate(v)) for k, v in low.items()},
            "low_alpha_pixels": int(np.concatenate(low["hit"]).size),
            "hit_minus_euclid_ns": {"median_abs": float(np.median(np.abs(cat["div"]))), "p90_abs": float(np.percentile(np.abs(cat["div"]), 90)),
@@ -155,7 +177,14 @@ def s_b(dev, ckpt, out_dir):
           "known_bad": v["z"]["median_abs_m"] > max(v["euclid"]["median_abs_m"], v["hit"]["median_abs_m"])}
     hyp = v["hit"]["median_abs_m"] <= v["euclid"]["median_abs_m"] and v["hit"]["rmse_m"] <= v["euclid"]["rmse_m"]
     div_in = 0.05 <= dv["median_abs"] <= 1.0 and 0.3 <= dv["p90_abs"] <= 5.0
-    print(f"  S-B {n} views, {res['pixels']:,} pixels (mesh hit, alpha > 0.5)")
+    cv = res["opacity_coverage"]
+    print(f"  S-B {n} views, {res['pixels']:,} pixels (mesh hit, alpha > 0.5 in both passes)")
+    print(f"    opacity: classic opaque {cv['classic_opaque']:,}, eval3d opaque {cv['eval3d_opaque']:,}; classic-only "
+          f"{cv['classic_only_share']:.2%}, eval3d-only {cv['eval3d_only_share']:.2%} of the classic-opaque pixels "
+          f"({'within' if cv['classic_only_share'] + cv['eval3d_only_share'] < 0.05 else 'OUTSIDE'} the expected < 5 %)")
+    for k in ("euclid", "hit"):
+        s = res["first_run_mask_vs_mesh_range"][k]
+        print(f"    first run's mask (classic alpha only) {k:6s}: median |e| {s['median_abs_m']:.3f} m, RMSE {s['rmse_m']:.3f} m, signed {s['mean_signed_m']:+.3f} m")
     print(f"    control: gap mean {res['control_gap_mean_ns']:.3f} ns vs {res['control_gap_ref_ns']:.3f} cached -> {'PASS' if ok['control'] else 'FAIL'}; "
           f"re-rendered ED vs cache median {res['rerender_median_abs_mm']:.4f} mm -> {'PASS' if ok['rerender'] else 'FAIL'}")
     for k in ("z", "euclid", "hit"):
@@ -170,8 +199,9 @@ def s_b(dev, ckpt, out_dir):
     print(f"    degenerate (0.1 < alpha <= 0.5, {res['low_alpha_pixels']:,} px): euclid median |e| {lo['euclid']['median_abs_m']:.3f} m, "
           f"hit {lo['hit']['median_abs_m']:.3f} m")
     tm = res["timing_ms_per_4_faces"]
-    print(f"    timing per 4 faces at 300 x 200 (median over {len(t_cl)} batches after 3 warm-up): classic ED {tm['classic_ED']:.2f} ms, "
-          f"eval3d Ed {tm['eval3d_Ed']:.2f} ms")
+    print(f"    depth-only passes per 4 faces at 300 x 200 (median over {len(t_cl)} batches after 3 warm-up): classic ED {tm['classic_ED']:.2f} ms "
+          f"(not a cost of euclid in training: its depth rides on the colour pass), eval3d Ed {tm['eval3d_Ed']:.2f} ms (the pass hit adds); "
+          f"training-step difference at two resolutions: MISSING")
     res["pass"] = ok; res["hypothesis_holds"] = hyp; res["divergence_in_expected_range"] = div_in
     return res, all(ok.values())
 
@@ -182,9 +212,13 @@ def main():
     ap.add_argument("--cache", default="output/rrf"); ap.add_argument("--out", default="output/rrf/smoke_hit_distance.json")
     a = ap.parse_args()
     dev = "cuda"
+    import gsplat
+    if not gsplat.has_3dgut():
+        raise SystemExit("this smoke needs gsplat built with 3DGUT (with_ut / with_eval3d); gsplat.has_3dgut() is False")
     gpu = subprocess.run(["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used", "--format=csv,noheader"], capture_output=True, text=True).stdout.strip()
     apps = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,process_name", "--format=csv,noheader"], capture_output=True, text=True).stdout.strip().splitlines()
-    others = [l for l in apps if "python" in l.lower() and str(os.getpid()) not in l]
+    # the PID field compared exactly (a substring test would match 123 inside 1234)
+    others = [l for l in apps if "python" in l.lower() and l.split(",")[0].strip() != str(os.getpid())]
     print(f"GPU: {gpu}; other python processes on it: {others or 'none'}")
     ra, ok_a = s_a(dev)
     rb, ok_b = s_b(dev, a.checkpoint, a.cache)
