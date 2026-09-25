@@ -13,6 +13,19 @@
     "files.exclude": {
         "**/__pycache__": true
     },
+    "//exclude": "RF-3DGS_dataset/ (~550k files) and output/ (~470k) are data, not source: keep Pylance and the file watcher out of them. Setting python.analysis.exclude replaces Pylance's defaults, so those are listed again.",
+    "python.analysis.exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        "**/.*",
+        "RF-3DGS_dataset",
+        "RF-3DGS_dataset.zip",
+        "output"
+    ],
+    "files.watcherExclude": {
+        "**/RF-3DGS_dataset/**": true,
+        "**/output/**": true
+    },
     "cmake.sourceDirectory": "${workspaceFolder}/original_rf3dgs/SIBR_viewers",
     "python-envs.defaultEnvManager": "ms-python.python:conda",
     "python-envs.defaultPackageManager": "ms-python.python:conda",
