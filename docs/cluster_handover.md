@@ -8,7 +8,8 @@
 **Ke 的全局规矩(本机 `~/.claude/CLAUDE.md`,不会跟着 git 过来,照这里执行):**
 - Ke 要求的改动做完并验证过(能跑、测试通过)就提交,不用等他说;只暂存与这次改动有关的文件,提交信息写清改了什么、为什么。
 - 在当前分支(main)上提交,不要新建分支。
-- **不要 push。** push 由 Ke 触发。
+- **提交后自动 push**(Ke,2026-09-25:仓库只有他一个用户)。push 前先 `git pull --rebase`(本机也在 push);rebase 冲突或 push
+  被拒就停下告诉 Ke。永远不要 force push。
 - 改动没通过验证就不提交,告诉 Ke 哪里坏了。
 
 **仓库 `CLAUDE.md`**:计时契约(全链计时、声明 GPU 与是否独占、排除预热、报中位数)、基线公平性、冒烟优先(判据事先写下,
@@ -28,7 +29,7 @@
 - 意外的数字先查是不是测量假象,再报告。
 
 **git 上避免和本机冲突:** 本机那边会继续改 `docs/stage2_notes.md` 等文件。集群这边的结果只写进 `docs/cluster_log.md`(新建),
-新脚本只放 `rrf_gsplat/cluster/`;不要改 `docs/stage2_notes.md`。Ke 从集群 push 之后,本机 pull 下来再把结果并进笔记。
+新脚本只放 `rrf_gsplat/cluster/`;不要改 `docs/stage2_notes.md`。两边都自动 push,本机 pull 下来再把结果并进笔记。
 
 ## 2. 现在在哪(细节见 `docs/stage2_notes.md` 的 "协议 v1" §11–§17)
 
@@ -116,5 +117,5 @@ cd ~/RF-3DGS && echo "f730132d825b47678846521a6aa40872fcde96e0f243f250beb5d228c5
 ## 7. 回报
 
 每做完一步写进 `docs/cluster_log.md`:做了什么、判据、结果表(每个 seed 的数 + 均值 [范围])、按判据的结论、计时(按契约)、
-遇到的坑。提交(不 push),然后告诉 Ke。环境信息(模块名、torch / gsplat / CUDA 版本、GPU 型号、账号与分区)也写进去,
+遇到的坑。提交并 push,然后告诉 Ke。环境信息(模块名、torch / gsplat / CUDA 版本、GPU 型号、账号与分区)也写进去,
 以后的作业照着用。
