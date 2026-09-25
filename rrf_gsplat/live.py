@@ -24,10 +24,35 @@ import torch
 
 
 def _atomic_write(path, data: bytes):
+    """Write, then replace. On Windows the replace is refused while another process (the viewer) has the target open
+    -- that race crashed a training run on 2026-09-24 (rr/plain_s2, step 50) -- so retry for up to ~1 s."""
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:
         f.write(data)
-    os.replace(tmp, path)
+    for k in range(50):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.02)
+    raise PermissionError(f"could not replace {path} (held open elsewhere) after 50 tries")
+
+
+def _never_raise(fn):
+    """Live logging must never stop a training run: a failure is reported once per kind and swallowed."""
+    import functools
+    seen = set()
+
+    @functools.wraps(fn)
+    def wrap(self, *a, **k):
+        try:
+            return fn(self, *a, **k)
+        except Exception as exc:                         # noqa: BLE001 -- logging, not training
+            key = (fn.__name__, type(exc).__name__)
+            if key not in seen:
+                seen.add(key)
+                print(f"  [live] {fn.__name__} failed ({type(exc).__name__}: {exc}); training continues", flush=True)
+    return wrap
 
 
 def _ring(img, y, x, r=7):
@@ -67,15 +92,18 @@ class LiveLog:
                        "started": self.t0, "updated": self.t0, "done": False, "iteration": 0}
         self._write_status()
 
+    @_never_raise
     def _write_status(self):
         with self._lock:
             self.status["updated"] = time.time()
             _atomic_write(os.path.join(self.dir, "status.json"), json.dumps(self.status).encode())
 
+    @_never_raise
     def _append(self, rec):
         with self._lock, open(self.path, "a") as f:
             f.write(json.dumps(rec) + "\n")
 
+    @_never_raise
     def step(self, it, loss):
         """Call every step with the (GPU) loss tensor; writes a line every `every` steps."""
         if not self.every:
@@ -93,12 +121,14 @@ class LiveLog:
             self.status["iteration"] = it
             self._write_status()
 
+    @_never_raise
     def eval(self, it, metrics):
         if not self.every:
             return
         keep = {k: float(v) for k, v in metrics.items() if isinstance(v, (int, float)) and np.isfinite(v)}
         self._append({"it": it, "t": round(time.time() - self.t0, 2), "eval": keep})
 
+    @_never_raise
     def comm(self, it, summary, set_name="val"):
         """The communication metrics (live_comm.py) of a fixed subset at this step: "val" = the validation subset
         of beam_maps.py, "train" = the fixed training positions --early-stop-on train watches."""
@@ -108,6 +138,7 @@ class LiveLog:
     def want_render(self, it, last):
         return bool(self.every and self.render_every) and (it % self.render_every == 0 or last)
 
+    @_never_raise
     @torch.no_grad()
     def render(self, it, rows):
         """rows: list of (label, pred [B, H, W] in [0, 1], truth [B, H, W] in [0, 1]) -> live/render.png,
@@ -140,6 +171,7 @@ class LiveLog:
         self.status["render_rows"] = [r[0] for r in rows]
         self._write_status()
 
+    @_never_raise
     def close(self, results_path=None):
         self.status.update(done=True, finished=time.time(), results=results_path)
         self._write_status()
