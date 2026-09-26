@@ -1,7 +1,7 @@
 #!/bin/bash
 # Validation-set comparison (docs/cluster_log.md §7): one arm, one seed, full training set, early stopping on the
 # validation subset, all 480 validation renders saved, then mvdr_peaks.py on val / val_random / val_segment.
-#     sbatch -J rf-val-<ARM>-s<SEED> rrf_gsplat/cluster/val_job.sh <plain|G1> <SEED> [full|smoke]   (from the repo root)
+#     sbatch -J rf-val-<ARM>-s<SEED> rrf_gsplat/cluster/val_job.sh <plain|G1|G1pc> <SEED> [full|smoke]   (from the repo root)
 # Uses the shared rrf_gsplat/train_rrf.py (G1 needs only --emitters). smoke = 3000 steps, early stopping exercised.
 #SBATCH -A ai_wireless_hu_lab
 #SBATCH -p a30_normal_q
@@ -16,7 +16,8 @@ cd "${SLURM_SUBMIT_DIR:-.}"
 PY=$HOME/envs/rf-gsplat/bin/python
 APU=RF-3DGS_dataset/regenerated/3dgs_APS_60_gp100
 PROT=rrf_gsplat/protocol_v1
-case $ARM in plain) X="" ;; G1) X="--emitters output/cluster/ladder/step3/prep/emit_geo.npz --emitter-scale 0.25" ;; *) echo "arm $ARM"; exit 1 ;; esac
+G1E="--emitters output/cluster/ladder/step3/prep/emit_geo.npz --emitter-scale 0.25"
+case $ARM in plain) X="" ;; G1) X="$G1E" ;; G1pc) X="$G1E --em-pcolor 8" ;; *) echo "arm $ARM"; exit 1 ;; esac   # G1pc: §8
 case $MODE in
   full)  OUT=output/rrf/val_falcon; S="--visits-per-view 250 --early-stop-on val --early-stop-patience 10 --early-stop-min-steps 5000" ;;
   smoke) OUT=output/rrf/val_falcon_smoke; S="--iterations 3000 --early-stop-on val --early-stop-patience 1 --early-stop-min-steps 1000" ;;
