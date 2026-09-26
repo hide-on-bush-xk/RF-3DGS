@@ -38,6 +38,7 @@ for ((r = 0; r < REPS; r++)); do
     A6) X="--sh-extra $PREP/sel_dark.npz --sh-extra-degree 6" ;;
     A7) X="--emitters $PREP/emit_img_k${K}_r${r}.npz --emitter-scale 0.25" ;;
     A8) X="--emitters $PREP/emit_wall_k${K}_r${r}.npz --emitter-scale 0.25" ;;
+    G1) X="--emitters output/cluster/ladder/step3/prep/emit_geo.npz --emitter-scale 0.25" ;;   # step 3 (§6): geometry-only mirrors
     *) echo "arm $ARM"; exit 1 ;;
   esac
   d=$OUT/k${K}_r$r$SFX

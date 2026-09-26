@@ -28,7 +28,7 @@ import ladder_step1 as L                          # noqa: E402
 RUNS = os.path.join(L.REPO, "output", "rrf", "ladder_step2")
 PREP = os.path.join(L.REPO, "output", "cluster", "ladder", "step2", "prep")
 OUT = os.path.join(L.REPO, "output", "cluster", "ladder", "step2")
-ARMS = ("A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8")
+ARMS = ("A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "G1")
 KS = (1, 2, 5, 20, 160)
 CLASSES = ("ringmax", "weak_image", "weak_other")
 INFO = L.view_info()
@@ -97,7 +97,7 @@ def main():
             # seed 0 only (other seeds end in _s<N>); finished = both diag JSONs written (they come after all renders)
             runs = [r for r in runs if os.path.basename(r)[len(f"k{k}_r"):].isdigit()
                     and os.path.isfile(r + "_heldout.json") and os.path.isfile(r + "_insample.json")]
-            planned = {1: 6, 2: 4, 5: 4, 20: 2, 160: 1}[k] if arm not in ("A6", "A7", "A8") else None
+            planned = {1: 6, 2: 4, 5: 4, 20: 2, 160: 1}[k] if arm not in ("A6", "A7", "A8") else None     # G1 runs every k
             if planned and len(runs) < planned:
                 print(f"WARNING {arm} k={k}: {len(runs)} of {planned} repeats finished", flush=True)
             if not runs:
