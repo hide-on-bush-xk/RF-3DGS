@@ -36,5 +36,6 @@ fake.element_gain_fn = element_gain_fn
 sys.modules["generate_dataset"] = fake
 sys.path.insert(0, os.path.join(REPO, "sionna_port"))
 sys.path.insert(0, os.path.join(REPO, "rrf_gsplat"))
-sys.argv = [os.path.join(REPO, "sionna_port", "t4_score.py")] + sys.argv[1:]
-runpy.run_path(sys.argv[0], run_name="__main__")
+if __name__ == "__main__":
+    sys.argv = [os.path.join(REPO, "sionna_port", "t4_score.py")] + sys.argv[1:]
+    runpy.run_path(sys.argv[0], run_name="__main__")
