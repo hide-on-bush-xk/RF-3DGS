@@ -3,8 +3,9 @@
     nice -n 10 ~/envs/rf-gsplat/bin/python rrf_gsplat/cluster/ladder_step2_prep.py
 
 Writes output/cluster/ladder/step2/prep/:
-  names_k{k}_r{r}.txt   nested route subsets: slots (arange(k) * step + off) % 160, step = 160 // k, repeats spread
-                        along the route (k = 1 x6, 2 x4, 5 x4, 20 x2, 160 x1); all 4 faces of each position
+  names_k{k}_r{r}.txt   nested route subsets (slot = index into the 160 route positions), repeats spread along the
+                        route, every repeat of a smaller k inside a repeat of the next larger k (k = 1 x6 in k = 2 x4
+                        in k = 5 x4 in k = 20_r0 in 160; k = 20_r1 in 160); all 4 faces of each position
   heldout.txt           the 307 non-route training positions (1228 views), scored after training, never trained on
   sel_box.npz / mirror_box.npz   R2-box-snap: surface Gaussians (opacity >= 0.5) whose shortest axis snaps to a room
                         axis (within 20 deg) and whose mirror ray of the transmitter passes through the receiver box
@@ -39,12 +40,21 @@ REPEATS = {1: 6, 2: 4, 5: 4, 20: 2, 160: 1}
 
 
 def subsets():
-    out = {}
-    for k, reps in REPEATS.items():
-        step = 160 // k
-        for r in range(reps):
-            off = int(round(r * step / reps))
-            out[(k, r)] = ((np.arange(k) * step + off) % 160).tolist()
+    # 2026-09-26 review: the first version built each k independently, so k = 1 and 2 were not inside k = 5 / 20;
+    # nested explicitly now (k = 5, 20, 160 unchanged)
+    out = {(160, 0): list(range(160)), (20, 0): list(range(0, 160, 8)), (20, 1): list(range(4, 160, 8))}
+    for j in range(4):
+        out[(5, j)] = [8 * j + 32 * m for m in range(5)]                     # inside k20_r0
+    for j, pair in enumerate(([0, 96], [40, 136], [48, 144], [24, 120])):    # pair inside k5_r0 / r1 / r2 / r3
+        out[(2, j)] = pair
+    for j, s in enumerate((0, 24, 48, 96, 120, 144)):                        # each inside a k = 2 pair
+        out[(1, j)] = [s]
+    for (k, r), sl in out.items():
+        assert len(sl) == k and len(set(sl)) == k
+    nest = {1: 2, 2: 5, 5: 20}
+    for (k, r), sl in out.items():
+        if k in nest:
+            assert any(set(sl) <= set(v) for (kk, _), v in out.items() if kk == nest[k]), (k, r)
     return out
 
 

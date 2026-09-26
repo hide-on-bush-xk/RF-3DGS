@@ -1,6 +1,7 @@
 #!/bin/bash
 # Information ladder, step 2 (docs/cluster_log.md §5): one arm at one k, all repeats of that k, one A30 job.
-#     sbatch -J rf-l2-<ARM>-k<K> rrf_gsplat/cluster/ladder_step2_job.sh <ARM> <K> [ITERATIONS]   (from the repo root)
+#     sbatch -J rf-l2-<ARM>-k<K> rrf_gsplat/cluster/ladder_step2_job.sh <ARM> <K> [ITERATIONS] [SEED]   (from the repo root)
+# SEED defaults to 0; another seed writes k<K>_r<R>_s<SEED> (the 3-seed confirmation at k = 160).
 # Each run: rrf_gsplat/cluster/train_rrf_ladder.py on the subset's names (fixed steps, no early stopping, no final
 # validation pass, live comm off), then diag_ladder.py in-sample (the subset) and on the 307 held-out training positions.
 # Inputs from rrf_gsplat/cluster/ladder_step2_prep.py (output/cluster/ladder/step2/prep/).
@@ -19,6 +20,7 @@ PREP=output/cluster/ladder/step2/prep
 OUT=output/rrf/ladder_step2/$ARM
 case $K in 1) REPS=6 ;; 2) REPS=4 ;; 5) REPS=4 ;; 20) REPS=2 ;; 160) REPS=1 ;; *) echo "k $K"; exit 1 ;; esac
 IT=${3:-$([ "$K" = 160 ] && echo 24000 || echo 5000)}
+SEED=${4:-0}; SFX=$([ "$SEED" = 0 ] && echo "" || echo "_s$SEED")
 BOX="--sh-extra $PREP/sel_box.npz --sh-extra-degree 6"
 LOBE="--lobes 1 --lobe-kappa 300 --mirror-lobes $PREP/mirror_box.npz"
 export OMP_NUM_THREADS=16
@@ -38,13 +40,13 @@ for ((r = 0; r < REPS; r++)); do
     A8) X="--emitters $PREP/emit_wall_k${K}_r${r}.npz --emitter-scale 0.25" ;;
     *) echo "arm $ARM"; exit 1 ;;
   esac
-  d=$OUT/k${K}_r$r
+  d=$OUT/k${K}_r$r$SFX
   t0=$(date +%s.%N)
   if [ ! -f $d/results.json ]; then
     mkdir -p $d
     $PY rrf_gsplat/cluster/train_rrf_ladder.py --out $d --mode power \
       --source RF-3DGS_dataset/regenerated/3dgs_APS_60_gp100 --protocol rrf_gsplat/protocol_v1 --eval-set val \
-      --sh-backend gsplat --eval-group --faces-per-step 4 --lr-scale 2 --sh-degree 3 --seed 0 \
+      --sh-backend gsplat --eval-group --faces-per-step 4 --lr-scale 2 --sh-degree 3 --seed $SEED \
       --train-names-file $PREP/names_k${K}_r$r.txt --iterations $IT --eval-every 1000000 --save-renders 0 \
       --live-comm-every 0 --no-eval $X > $d/train.log 2>&1 || { echo "train failed: $d"; tail -25 $d/train.log; exit 1; }
   fi
